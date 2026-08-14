@@ -195,7 +195,12 @@ func (h *Handler) handleProxy(w http.ResponseWriter, r *http.Request) {
 		Task  string `json:"task"`
 	}
 	json.Unmarshal(bodyBytes, &reqBody)
-	thinkDisabled := reqBody.Think == nil || !*reqBody.Think
+	// Original
+	//thinkDisabled := reqBody.Think == nil || !*reqBody.Think
+
+	// Don't let viiwork strip out the thinking information from the request
+	// and let llama-server use it
+	thinkDisabled := reqBody.Think != nil && !*reqBody.Think
 
 	// Resolve task ID: body "task" wins, else X-Viiwork-Task header.
 	taskID := sanitizeTaskID(reqBody.Task)
