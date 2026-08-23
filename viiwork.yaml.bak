@@ -1,0 +1,83 @@
+server:
+  host: 0.0.0.0
+  port: 8080
+
+model:
+  path: models/Muse-Glimmer-30B-UD-Q4_K_XL.gguf
+  #context_size: 65536
+  context_size: 131072
+  n_gpu_layers: -1
+  parallel: 1
+
+gpus:
+  devices: [0, 1, 2]
+  base_port: 9001
+  power_limit_watts: 200
+  tensor_split:
+    enabled: true
+    mode: layer
+
+backend:
+  binary: llama-server
+  extra_args: [
+    # ---- Qwen 3.6 Configuration ----
+    #"--jinja",
+    #"--flash-attn", "auto",
+    #"--batch-size", "2048",
+    #"--ubatch-size", "2048",
+    #"--cache-type-k", "q8_0",
+    #"--cache-type-v", "q8_0",
+    #"--no-mmap",
+    #"--temperature", "0.7",
+    #"--top-p", "0.95",
+    #"--top-k", "20",
+    #"--repeat-penalty", "1.0",
+    #"--tensor-split", "1,1,1",
+    #"--n-predict", "32768",
+    # --------------------------------
+    # ---- Qwen 3.8 Configuration ----
+    #"--reasoning-format", "deepseek",
+    #"--reasoning-budget", "8192",
+    #"--jinja",
+    #"--no-context-shift",
+    #"--flash-attn", "auto",
+    #"--batch-size", "2048",
+    #"--ubatch-size", "512",
+    #"--no-mmap",
+    #"--temperature", "1.0",
+    #"--top-p", "0.95",
+    #"--top-k", "20",
+    #"--min-p", "0.0",
+    #"--repeat-penalty", "1.0",
+    #"--presence_penalty", "0.0",
+    #"--tensor-split", "1,1,1",
+    #"--cache-type-k", "q8_0",
+    #"--cache-type-v", "q8_0",
+    #"--n-predict", "-1",
+    # --------------------------------
+    # ---- Glimmer Configuration ----
+    "--reasoning-format", "auto",
+    "--jinja",
+    "--flash-attn", "on",
+    "--batch-size", "512",
+    "--ubatch-size", "512",
+    "--cache-type-k", "q8_0",
+    "--cache-type-v", "q8_0",
+    "--no-mmap",
+    "--temperature", "1.0",
+    "--top-p", "0.95",
+    "--top-k", "64",
+    "--repeat-penalty", "1.0",
+    "--tensor-split", "1,1,1",
+    # --------------------------------
+  ]
+
+health:
+  interval: 5s
+  timeout: 3s
+  max_failures: 3
+
+balancer:
+  latency_window: 30s
+  high_load_threshold: 1
+  max_in_flight_per_gpu: 2

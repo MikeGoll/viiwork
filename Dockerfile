@@ -29,7 +29,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # b10361: contains 62bf73d (muse-glimmer arch, vision projector, ATEM
 # tool-call parser, DFlash speculative decoding). b10353 is the floor.
-ARG LLAMA_CPP_VERSION=b10361
+#ARG LLAMA_CPP_VERSION=b10361
+ARG LLAMA_CPP_VERSION=b10453
 RUN git clone --branch ${LLAMA_CPP_VERSION} --depth 1 \
     https://github.com/ggml-org/llama.cpp /llama.cpp
 WORKDIR /llama.cpp
