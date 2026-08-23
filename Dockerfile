@@ -96,7 +96,7 @@ RUN if ! grep -qa 'muse-glimmer' /llama.cpp/build/bin/llama-server; then \
 # -----------------------------------------------------------------------------
 # Stage 2: Build viiwork
 # -----------------------------------------------------------------------------
-FROM golang:1.23.6 AS go-build
+FROM golang:1.26.6 AS go-build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
