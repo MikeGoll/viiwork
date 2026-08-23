@@ -1,3 +1,9 @@
+# Overview
+
+This is a fork of the original repository and project created by Janit: https://github.com/janit/viiwork. This fork was created in order to apply custom patches and to tinker with the repository without danger to the original project.
+
+If somehow you stumbled across this repository, please check out the original repository / project.
+
 # viiwork
 
 LLM inference load balancer for AMD Radeon VII GPUs. Runs multiple llama-server instances and exposes a single OpenAI-compatible API with adaptive load balancing. Multiple nodes can form a mesh cluster where any node is an entry point and requests route by model.
