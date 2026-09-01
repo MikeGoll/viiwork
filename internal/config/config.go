@@ -4,9 +4,11 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/janit/viiwork/internal/pipeline"
+	"github.com/janit/viiwork/internal/power"
 	"gopkg.in/yaml.v3"
 )
 
@@ -30,6 +32,28 @@ func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
 type ServerConfig struct {
 	Host string `yaml:"host"`
 	Port int    `yaml:"port"`
+	// MeshPort is a second, well-known port whose "/" is the mesh dashboard.
+	// It exists because Port is not guessable: a host runs one instance per
+	// model, each on its own port, and knowing which of them is up is the
+	// thing you do not have when you want to look at the fleet. Every instance
+	// asks for MeshPort and exactly one gets it, so the address is the same on
+	// every host and stays up while any instance on that host does. 0 disables
+	// it; see proxy.ServeMeshPort.
+	MeshPort int        `yaml:"mesh_port"`
+	CORS     CORSConfig `yaml:"cors"`
+}
+
+// CORSConfig controls which browser origins may read this node's API. It
+// matters because viiwork authenticates nothing: see proxy.CORS for what an
+// origin allowlist is and is not doing on an unauthenticated service.
+type CORSConfig struct {
+	// AllowOrigins are host patterns. "*.example.com" matches subdomains only;
+	// anything else must match the host exactly. Empty disables CORS entirely.
+	AllowOrigins []string `yaml:"allow_origins"`
+	// AllowTailnetIPs also allows origins addressed by a literal Tailscale IP
+	// (100.64.0.0/10, fd7a:115c:a1e0::/48), since a tailnet host is reached by
+	// its address about as often as by its MagicDNS name.
+	AllowTailnetIPs *bool `yaml:"allow_tailnet_ips"`
 }
 
 type ModelConfig struct {
@@ -109,6 +133,16 @@ type HealthConfig struct {
 	EvictOnHardFailure bool `yaml:"evict_on_hard_failure"`
 }
 
+// ActivityConfig tunes the in-memory activity and prompt history a node keeps.
+// None of it is persisted; a restart clears everything here.
+type ActivityConfig struct {
+	// PromptHistory is how many recent requests keep their prompt and output
+	// available for lookup. Memory scales with it: roughly this many times up
+	// to 100 KB (a prompt and an output, each truncated at 50 000 characters).
+	// 0 uses the default.
+	PromptHistory int `yaml:"prompt_history"`
+}
+
 type BalancerConfig struct {
 	LatencyWindow     Duration `yaml:"latency_window"`
 	HighLoadThreshold int      `yaml:"high_load_threshold"`
@@ -143,15 +177,95 @@ type CostConfig struct {
 	VATPercent             float64        `yaml:"vat_percent"`
 }
 
+// PowerConfig selects how node wattage is read over IPMI. The right answer is
+// board-specific: the "Power Supply" sensor class carries wattage on some BMCs
+// and only presence flags on others (every Gigabyte board in the gfx906 fleet),
+// which is why probing replaced the single hardcoded command.
+type PowerConfig struct {
+	// Source is one of:
+	//   auto           probe dcmi, then the Power Supply class, then any
+	//                  Watts-valued sensor; keep the first that answers
+	//   dcmi           DCMI whole-node power reading
+	//   sdr            sum the Power Supply sensor class
+	//   sensor:<NAME>  read one named sensor, e.g. sensor:SYS_POWER
+	//   none           disable power monitoring without probing
+	// Empty means auto.
+	Source string `yaml:"source"`
+
+	// Control turns on chassis power control. Off by default, and off is the
+	// only safe default: this is the one part of the API that can switch a
+	// machine off, on a service that authenticates nothing.
+	Control PowerControlConfig `yaml:"control"`
+}
+
+// PowerControlConfig gates chassis power control.
+//
+// Hosts is an allowlist and there is no wildcard. On an API with no
+// authentication, "someone wrote this hostname down" is the whole guard, so it
+// has to be deliberate rather than inferred from the mesh — a node should not
+// gain power over a machine merely by having been peered with it.
+type PowerControlConfig struct {
+	Enabled bool     `yaml:"enabled"`
+	Hosts   []string `yaml:"hosts"`
+	// BMC is the out-of-band path, needed only for hosts that must be
+	// controllable while powered off. A running host is reached in-band, with
+	// no credentials at all.
+	BMC BMCConfig `yaml:"bmc"`
+}
+
+type BMCConfig struct {
+	Username string `yaml:"username"`
+	// PasswordEnv names the environment variable holding the BMC password.
+	// Preferred over Password: viiwork.yaml is deployment-specific but still a
+	// file people paste into issues, and .env is already how the ENTSO-E key
+	// is supplied. Defaults to BMC_PASSWORD.
+	PasswordEnv string `yaml:"password_env"`
+	// Password is the inline fallback. Works, but puts a credential that can
+	// power off a machine into a config file.
+	Password string `yaml:"password"`
+	// Addresses maps hostname to BMC address. Optional per host: a node
+	// discovers its own BMC address in-band and publishes it, so a host seen
+	// online at least once needs no entry. Write one for a host that must be
+	// reachable before this node has ever seen it up -- and note these are
+	// often DHCP, so a written address can go stale while a learned one cannot.
+	Addresses map[string]string `yaml:"addresses"`
+}
+
+// EnergyConfig configures the durable kWh store. Disabled by default: it needs
+// a writable directory that outlives the container, and defaulting it on would
+// happily write to a container filesystem and lose everything on restart --
+// durable in name only.
+//
+// Node wattage is a whole-host measurement. Running several viiwork instances on
+// one host (the way multi-model hosts are deployed) and enabling this on more
+// than one would record that same host draw several times over, so enable it on
+// exactly one instance per host.
+type EnergyConfig struct {
+	Enabled bool   `yaml:"enabled"`
+	Dir     string `yaml:"dir"`
+	// SampleInterval is how often power is read. Records are always one per
+	// minute; sampling faster is what makes that minute an average rather than
+	// a coin flip on a BMC that refreshes every ~60s.
+	SampleInterval Duration `yaml:"sample_interval"`
+	// Slot counts are ring lengths, and therefore the retention. Changing one
+	// changes the file geometry and discards that ring's history.
+	MinuteSlots int `yaml:"minute_slots"`
+	HourSlots   int `yaml:"hour_slots"`
+	DaySlots    int `yaml:"day_slots"`
+}
+
 type Config struct {
-	Server    ServerConfig                        `yaml:"server"`
-	Model     ModelConfig                         `yaml:"model"`
-	GPUs      GPUConfig                           `yaml:"gpus"`
-	Backend   BackendConfig                       `yaml:"backend"`
-	Health    HealthConfig                        `yaml:"health"`
-	Balancer  BalancerConfig                      `yaml:"balancer"`
-	Peers     PeersConfig                         `yaml:"peers"`
-	Cost      CostConfig                          `yaml:"cost"`
+	Server    ServerConfig                       `yaml:"server"`
+	Model     ModelConfig                        `yaml:"model"`
+	GPUs      GPUConfig                          `yaml:"gpus"`
+	Backend   BackendConfig                      `yaml:"backend"`
+	Health    HealthConfig                       `yaml:"health"`
+	Activity  ActivityConfig                     `yaml:"activity"`
+	Balancer  BalancerConfig                     `yaml:"balancer"`
+	Peers     PeersConfig                        `yaml:"peers"`
+	Cost      CostConfig                         `yaml:"cost"`
+	Power     PowerConfig                        `yaml:"power"`
+	Energy    EnergyConfig                       `yaml:"energy"`
 	Pipelines map[string]pipeline.PipelineConfig `yaml:"pipelines"`
 }
 
@@ -186,6 +300,9 @@ func (c *Config) Validate() error {
 	if c.Server.Port < 1 || c.Server.Port > 65535 {
 		return fmt.Errorf("server.port must be 1-65535")
 	}
+	if c.Server.MeshPort < 0 || c.Server.MeshPort > 65535 {
+		return fmt.Errorf("server.mesh_port must be 0-65535 (0 disables)")
+	}
 	if c.Balancer.MaxInFlightPerGPU < 1 {
 		return fmt.Errorf("balancer.max_in_flight_per_gpu must be >= 1")
 	}
@@ -200,6 +317,20 @@ func (c *Config) Validate() error {
 	}
 	if c.Health.RespawnGrace.Duration < 0 {
 		return fmt.Errorf("health.respawn_grace must be >= 0")
+	}
+	if err := validatePowerControl(&c.Power.Control); err != nil {
+		return err
+	}
+	if err := validatePowerSource(c.Power.Source); err != nil {
+		return err
+	}
+	if c.Energy.Enabled {
+		if c.Energy.Dir == "" {
+			return fmt.Errorf("energy.dir is required when energy.enabled is true")
+		}
+		if c.Energy.SampleInterval.Duration <= 0 {
+			return fmt.Errorf("energy.sample_interval must be positive")
+		}
 	}
 	if c.Backend.Threads < 0 {
 		return fmt.Errorf("backend.threads must be >= 0 (0 = auto-derive max(1, nproc/n_backends))")
@@ -271,6 +402,12 @@ func (c *Config) ApplyOverrides(overrides map[string]string) error {
 				return fmt.Errorf("invalid server.port: %w", err)
 			}
 			c.Server.Port = v
+		case "server.mesh_port":
+			v, err := strconv.Atoi(val)
+			if err != nil {
+				return fmt.Errorf("invalid server.mesh_port: %w", err)
+			}
+			c.Server.MeshPort = v
 		case "model.path":
 			c.Model.Path = val
 		case "model.context_size":
@@ -358,4 +495,41 @@ func (c *Config) ApplyOverrides(overrides map[string]string) error {
 		}
 	}
 	return nil
+}
+
+// validatePowerControl fails startup on a power-control block that would not do
+// what it appears to say. Enabling control with no hosts listed is the case
+// worth catching: it looks armed and controls nothing, and the operator finds
+// out by clicking a button that refuses.
+func validatePowerControl(pc *PowerControlConfig) error {
+	if !pc.Enabled {
+		return nil
+	}
+	if len(pc.Hosts) == 0 {
+		return fmt.Errorf("power.control.enabled is true but power.control.hosts is empty: list the hosts that may be controlled")
+	}
+	for _, h := range pc.Hosts {
+		if strings.TrimSpace(h) == "" {
+			return fmt.Errorf("power.control.hosts contains an empty hostname")
+		}
+	}
+	return nil
+}
+
+// validatePowerSource rejects a misspelled source at startup. Without this a
+// typo would fall through the sampler's probe and silently disable power and
+// cost tracking, which is exactly the failure mode this feature exists to end.
+func validatePowerSource(source string) error {
+	switch s := strings.TrimSpace(source); {
+	case s == "", s == power.SourceAuto, s == power.SourceDCMI,
+		s == power.SourceSDR, s == power.SourceNone:
+		return nil
+	case strings.HasPrefix(s, power.SourceSensorPrefix):
+		if strings.TrimSpace(strings.TrimPrefix(s, power.SourceSensorPrefix)) == "" {
+			return fmt.Errorf("power.source %q needs a sensor name, e.g. %qSYS_POWER", s, power.SourceSensorPrefix)
+		}
+		return nil
+	default:
+		return fmt.Errorf("power.source %q must be one of: auto, dcmi, sdr, none, sensor:<NAME>", s)
+	}
 }

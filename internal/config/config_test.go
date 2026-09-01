@@ -314,3 +314,60 @@ gpus:
 	if cfg.Cost.BiddingZone != "" { t.Errorf("expected empty default zone, got %s", cfg.Cost.BiddingZone) }
 	if cfg.GPUs.PowerLimitWatts != 0 { t.Errorf("expected 0 power limit, got %d", cfg.GPUs.PowerLimitWatts) }
 }
+
+func TestValidatePowerSource(t *testing.T) {
+	valid := []string{"", "auto", "dcmi", "sdr", "none", "sensor:SYS_POWER", " dcmi "}
+	for _, source := range valid {
+		if err := validatePowerSource(source); err != nil {
+			t.Errorf("power.source %q should be valid: %v", source, err)
+		}
+	}
+
+	// A typo must fail loudly at startup rather than silently disabling power
+	// and cost tracking, which is the failure this feature exists to end.
+	invalid := []string{"dmci", "ipmi", "sensor:", "sensor: ", "Auto"}
+	for _, source := range invalid {
+		if err := validatePowerSource(source); err == nil {
+			t.Errorf("power.source %q should be rejected", source)
+		}
+	}
+}
+
+func TestDefaultPowerSourceIsAuto(t *testing.T) {
+	if got := Defaults().Power.Source; got != "auto" {
+		t.Errorf("expected default power.source auto, got %q", got)
+	}
+}
+
+// The mesh port is only dependable if it is the same number without anyone
+// choosing it, so the default carries the feature and is worth pinning. 0 is
+// the documented way to opt out; anything outside a port's range is a typo.
+func TestValidateMeshPort(t *testing.T) {
+	if got := Defaults().Server.MeshPort; got != 8086 {
+		t.Errorf("default server.mesh_port = %d, want 8086", got)
+	}
+
+	tests := []struct {
+		name    string
+		port    int
+		wantErr bool
+	}{
+		{"default", 8086, false},
+		{"disabled", 0, false},
+		{"max", 65535, false},
+		{"negative", -1, true},
+		{"above range", 65536, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Defaults()
+			cfg.Model.Path = "/models/x.gguf"
+			cfg.GPUs.Count = 1
+			cfg.Server.MeshPort = tt.port
+			err := cfg.Validate()
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("Validate() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}

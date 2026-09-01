@@ -1,12 +1,41 @@
 package config
 
-import "time"
+import (
+	"time"
+
+	"github.com/janit/viiwork/energy"
+	"github.com/janit/viiwork/internal/activity"
+	"github.com/janit/viiwork/internal/power"
+)
 
 func Defaults() Config {
 	return Config{
 		Server: ServerConfig{
 			Host: "0.0.0.0",
 			Port: 8080,
+			// On by default, because the problem it solves is created by
+			// running viiwork at all: one instance per model means Port
+			// differs per instance and per host, and the mesh view is the
+			// one page you want to reach without looking anything up. A
+			// foreign service already holding 8086 costs nothing — the
+			// listener never binds and the node serves normally. Set 0 to
+			// stop asking for it.
+			MeshPort: 8086,
+			// Defaults cover the deployment viiwork documents — nodes on a
+			// tailnet — plus localhost for development. Your own application's
+			// origin is deployment-specific and belongs in your viiwork.yaml,
+			// not here.
+			//
+			// The API authenticates nothing, so this list is the only thing
+			// standing between it and any page a browser on your network
+			// happens to open. Narrow it rather than widen it; set
+			// allow_origins: [] to turn CORS off entirely.
+			CORS: CORSConfig{
+				AllowOrigins: []string{"*.ts.net", "localhost", "127.0.0.1"},
+			},
+		},
+		Activity: ActivityConfig{
+			PromptHistory: activity.DefaultPromptHistory,
 		},
 		Model: ModelConfig{
 			ContextSize: 13337,
@@ -44,6 +73,16 @@ func Defaults() Config {
 		},
 		Cost: CostConfig{
 			Timezone: "Europe/Helsinki",
+		},
+		Power: PowerConfig{
+			Source: power.SourceAuto,
+		},
+		Energy: EnergyConfig{
+			Dir:            "/var/lib/viiwork/energy",
+			SampleInterval: Duration{30 * time.Second},
+			MinuteSlots:    energy.DefaultMinuteSlots,
+			HourSlots:      energy.DefaultHourSlots,
+			DaySlots:       energy.DefaultDaySlots,
 		},
 	}
 }

@@ -14,6 +14,7 @@ import (
 
 	"github.com/janit/viiwork/internal/balancer"
 	"github.com/janit/viiwork/internal/model"
+	"github.com/janit/viiwork/meshapi"
 )
 
 func hostOfAddr(addr string) string {
@@ -26,6 +27,14 @@ func hostOfAddr(addr string) string {
 type PowerReader interface {
 	Watts() float64
 	Available() bool
+}
+
+// EnergyReader is the durable kWh store, as the API layer needs it: one
+// rolling figure. Kept narrow like PowerReader so a node without the store
+// enabled simply supplies nothing.
+type EnergyReader interface {
+	KWh24h() float64
+	KWh30d() float64
 }
 
 type CostReader interface {
@@ -51,6 +60,10 @@ type Registry struct {
 	cost       CostReader
 	listenAddr string
 	hostname   string
+	// promptHistory is this node's prompt-store capacity, published on
+	// /v1/status and /v1/cluster so the dashboard sizes its own list from the
+	// server's number instead of keeping a second copy that can drift.
+	promptHistory int
 }
 
 func NewRegistry(nodeID string, localModel string, backends []*balancer.BackendState, peers []*PeerState, timeout time.Duration) *Registry {
@@ -87,6 +100,9 @@ func (r *Registry) SetLocation(hostname, listenAddr string) {
 	r.hostname = hostname
 	r.listenAddr = listenAddr
 }
+func (r *Registry) SetPromptHistory(n int) { r.promptHistory = n }
+func (r *Registry) PromptHistory() int     { return r.promptHistory }
+
 func (r *Registry) Hostname() string   { return r.hostname }
 func (r *Registry) ListenAddr() string { return r.listenAddr }
 
@@ -176,71 +192,25 @@ func (r *Registry) AllModels() []model.ModelEntry {
 	return append(models, peerModels...)
 }
 
-type ClusterResponse struct {
-	NodeID                string            `json:"node_id"`
-	Version               string            `json:"version,omitempty"`
-	Hostname              string            `json:"hostname,omitempty"`
-	SingleHost            bool              `json:"single_host,omitempty"`
-	Local                 ClusterLocalInfo  `json:"local"`
-	Peers                 []ClusterPeerInfo `json:"peers"`
-	Models                []string          `json:"models"`
-	ClusterCostEURPerHour float64           `json:"cluster_cost_eur_per_hour,omitempty"`
-	ClusterCostTodayEUR   float64           `json:"cluster_cost_today_eur,omitempty"`
-}
-
-type ClusterLocalInfo struct {
-	GPUs []GPUInfo `json:"gpus,omitempty"`
-	Model          string               `json:"model"`
-	ListenAddr     string               `json:"listen_addr,omitempty"`
-	PowerWatts     float64              `json:"power_watts"`
-	PowerAvailable bool                 `json:"power_available"`
-	Backends       []ClusterBackendInfo `json:"backends"`
-	CostAvailable  bool                 `json:"cost_available,omitempty"`
-	CostEURPerHour float64              `json:"cost_eur_per_hour,omitempty"`
-	CostTodayEUR   float64              `json:"cost_today_eur,omitempty"`
-	HostMemTotalMB int64                `json:"host_mem_total_mb,omitempty"`
-	HostMemUsedMB  int64                `json:"host_mem_used_mb,omitempty"`
-}
-
-type ClusterBackendInfo struct {
-	GPUID int   `json:"gpu_id"`
-	GPUIDs []int `json:"gpu_ids,omitempty"`
-	// Model is per-backend rather than per-node because the mesh view groups by
-	// it. A node serves one model today, but reading it off the backend keeps
-	// the grouping correct if that ever stops being true.
-	Model      string `json:"model,omitempty"`
-	Status     string `json:"status"`
-	InFlight   int64  `json:"in_flight"`
-	RSSMB      int64  `json:"rss_mb,omitempty"`
-	SlotCtx    int64  `json:"slot_ctx,omitempty"`
-	SlotCount  int    `json:"slot_count,omitempty"`
-	SlotActive int    `json:"slot_active,omitempty"`
-	TokDecoded int64  `json:"tok_decoded,omitempty"`
-	TokRemain  int64  `json:"tok_remain,omitempty"`
-}
-
-type ClusterPeerInfo struct {
-	GPUs            []GPUInfo            `json:"gpus,omitempty"`
-	Addr            string               `json:"addr"`
-	Hostname        string               `json:"hostname,omitempty"`
-	Status          string               `json:"status"`
-	NodeID          string               `json:"node_id,omitempty"`
-	Models          []string             `json:"models,omitempty"`
-	Backends        []ClusterBackendInfo `json:"backends,omitempty"`
-	TotalInFlight   int64                `json:"total_in_flight,omitempty"`
-	HealthyBackends int                  `json:"healthy_backends,omitempty"`
-	PowerWatts      float64              `json:"power_watts,omitempty"`
-	PowerAvailable  bool                 `json:"power_available,omitempty"`
-	CostAvailable   bool                 `json:"cost_available,omitempty"`
-	CostEURPerHour  float64              `json:"cost_eur_per_hour,omitempty"`
-	CostTodayEUR    float64              `json:"cost_today_eur,omitempty"`
-}
+// The cluster snapshot types live in meshapi with the rest of the wire
+// contract, and are aliased here so this package keeps its familiar names.
+// See internal/peer/peer.go for why these are aliases rather than wrappers.
+type (
+	ClusterResponse    = meshapi.ClusterResponse
+	PowerControlInfo   = meshapi.PowerControlInfo
+	ClusterLocalInfo   = meshapi.ClusterLocalInfo
+	ClusterBackendInfo = meshapi.ClusterBackendInfo
+	ClusterPeerInfo    = meshapi.ClusterPeerInfo
+)
 
 func (r *Registry) ClusterState() ClusterResponse {
-	resp := ClusterResponse{NodeID: r.nodeID, Hostname: r.hostname, Local: ClusterLocalInfo{Model: r.localModel, ListenAddr: r.listenAddr}}
+	resp := ClusterResponse{NodeID: r.nodeID, Hostname: r.hostname, Local: ClusterLocalInfo{Model: r.localModel, ListenAddr: r.listenAddr, PromptHistory: r.promptHistory}}
 	if r.power != nil {
 		resp.Local.PowerWatts = r.power.Watts()
 		resp.Local.PowerAvailable = r.power.Available()
+		if named, ok := r.power.(interface{ SourceName() string }); ok && resp.Local.PowerAvailable {
+			resp.Local.PowerSource = named.SourceName()
+		}
 	}
 	if r.cost != nil && r.cost.Available() {
 		resp.Local.CostAvailable = true
@@ -268,15 +238,29 @@ func (r *Registry) ClusterState() ClusterResponse {
 	singleHost := r.hostname != "" && len(r.peers) > 0
 	reachableCount := 0
 	for _, p := range r.peers {
-		info := ClusterPeerInfo{Addr: p.Addr, Hostname: hostOfAddr(p.Addr), Status: p.Status().String()}
+		// Prefer the hostname the peer reports over the one derived from the
+		// address we happen to dial it on. They disagree exactly where it
+		// matters: co-located instances are configured by IP, so deriving
+		// from the address splits one machine into "gb1" (this node) and
+		// "192.168.1.41" (its own co-tenants) -- two hosts on screen, one
+		// host in the rack, and a per-host wattage that cannot be deduplicated.
+		// Falls back to the address for a peer too old to report it.
+		host := p.Hostname()
+		if host == "" { host = hostOfAddr(p.Addr) }
+		info := ClusterPeerInfo{Addr: p.Addr, Hostname: host, Status: p.Status().String()}
 		if p.Status() == StatusReachable {
 			reachableCount++
 			info.NodeID = p.NodeID()
 			info.Models = p.Models()
 			info.TotalInFlight = p.TotalInFlight()
 			info.HealthyBackends = p.HealthyBackends()
+			info.PromptHistory = p.PromptHistory()
 			info.PowerWatts = p.PowerWatts()
 			info.PowerAvailable = p.PowerAvailable()
+			info.PowerSource = p.PowerSource()
+			info.HostMemTotalMB, info.HostMemUsedMB = p.HostMem()
+			info.EnergyKWh24h = p.EnergyKWh24h()
+			info.EnergyKWh30d = p.EnergyKWh30d()
 			info.CostAvailable = p.CostAvailable()
 			info.CostEURPerHour = p.CostEURPerHour()
 			info.CostTodayEUR = p.CostTodayEUR()
@@ -307,4 +291,46 @@ func (r *Registry) ClusterState() ClusterResponse {
 	for m := range modelSet { resp.Models = append(resp.Models, m) }
 	sort.Strings(resp.Models)
 	return resp
+}
+
+// GPUModels maps every GPU on this host to the model occupying it.
+//
+// A multi-model host runs one viiwork instance per model, so this node's own
+// backends account for only a fraction of the box -- on the reference 10-GPU
+// host, one card in ten. Co-located instances already publish the rest on
+// /v1/status: their backends carry gpu_ids and a model, and a matching
+// hostname is what identifies them as sharing this machine rather than being
+// a remote peer.
+//
+// Unreachable peers are skipped: their last-known backends are no longer
+// serving, so their cards are idle and labelling them would attribute energy
+// to a model that is not running.
+func (r *Registry) GPUModels() map[int]string {
+	owned := make(map[int]string)
+	for _, p := range r.peers {
+		if p.Status() != StatusReachable { continue }
+		if h := p.Hostname(); h == "" || r.hostname == "" || h != r.hostname { continue }
+		for _, b := range p.Backends() {
+			for _, id := range backendGPUs(b.GPUID, b.GPUIDs) { owned[id] = b.Model }
+		}
+	}
+	// Local last: this node is authoritative for its own cards, so a peer
+	// entry that points back at this node cannot override them.
+	for _, b := range r.backends {
+		for _, id := range backendGPUs(b.GPUID, b.GPUIDs) { owned[id] = r.localModel }
+	}
+	return owned
+}
+
+// backendGPUs normalises the two ways a backend reports its cards: a
+// tensor-split group fills the group slice, a single-GPU replica only the
+// scalar. Negative ids mean "unassigned" and are dropped.
+func backendGPUs(single int, group []int) []int {
+	ids := group
+	if len(ids) == 0 { ids = []int{single} }
+	out := make([]int, 0, len(ids))
+	for _, id := range ids {
+		if id >= 0 { out = append(out, id) }
+	}
+	return out
 }

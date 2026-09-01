@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/janit/viiwork/energy"
 	"github.com/janit/viiwork/internal/activity"
 	"github.com/janit/viiwork/internal/balancer"
 	"github.com/janit/viiwork/internal/config"
@@ -82,7 +83,7 @@ func main() {
 	nodeID := generateNodeID()
 	log.Printf("viiwork %s starting with %d GPUs, model: %s", nodeID, cfg.GPUs.Count, cfg.Model.Path)
 
-	sampler := power.NewSampler()
+	sampler := power.NewSampler(cfg.Power.Source)
 
 	// Build peer list
 	var peers []*peer.PeerState
@@ -123,7 +124,7 @@ func main() {
 	bcast := gpu.NewBroadcaster()
 	collector := gpu.NewStatCollector(hist, bcast)
 
-	actLog := activity.NewLog()
+	actLog := activity.NewLogWithPromptHistory(cfg.Activity.PromptHistory)
 
 	mgr := process.NewManager(cfg, nil, sampler, costTracker, collector, actLog)
 	for _, b := range mgr.Backends {
@@ -144,14 +145,24 @@ func main() {
 	}
 	hostname, _ := os.Hostname()
 	reg.SetLocation(hostname, fmt.Sprintf("%s:%d", hostname, cfg.Server.Port))
+	reg.SetPromptHistory(actLog.PromptHistoryMax())
 	handler := proxy.NewMeshHandler(bal, reg, cfg.Balancer.LatencyWindow.Duration)
 	handler.SetMetrics(hist, bcast, collector.Available)
+	if ctl := newPowerController(cfg, hostname); ctl != nil {
+		handler.SetPowerControl(ctl)
+		proxy.SetStatusPowerControl(ctl)
+	}
 	// Publish GPU load to peers as well as locally. Without this the /mesh view
 	// can show GPU% for this node only, because peers learn everything they know
 	// about us from /v1/status.
 	proxy.SetStatusGPUSource(hist)
 	handler.SetActivity(actLog)
 	handler.SetEvictOnHardFailure(cfg.Health.EvictOnHardFailure)
+	if len(cfg.Server.CORS.AllowOrigins) > 0 {
+		tailnetIPs := cfg.Server.CORS.AllowTailnetIPs == nil || *cfg.Server.CORS.AllowTailnetIPs
+		handler.SetCORS(&proxy.CORS{Origins: cfg.Server.CORS.AllowOrigins, TailnetIPs: tailnetIPs})
+		log.Printf("CORS enabled for origins %v (tailnet IPs: %v)", cfg.Server.CORS.AllowOrigins, tailnetIPs)
+	}
 
 	if len(pipelines) > 0 {
 		resolver := proxy.NewPipelineResolver(pipelines)
@@ -175,6 +186,10 @@ func main() {
 	go mgr.RunHealthLoop(ctx)
 	go reg.Run(ctx, cfg.Peers.PollInterval.Duration)
 
+	if cfg.Energy.Enabled {
+		startEnergyRecorder(ctx, cfg, hist, sampler, reg)
+	}
+
 	if len(peers) > 0 {
 		log.Printf("mesh enabled with %d peer(s)", len(peers))
 	}
@@ -192,6 +207,19 @@ func main() {
 			log.Fatalf("server error: %v", err)
 		}
 	}()
+
+	// A second, well-known port whose "/" is the mesh dashboard. Every
+	// instance on the host asks for it and one gets it, so the address is the
+	// same everywhere and does not depend on knowing which model this node
+	// serves. Skipped when it would be the node's own port, which already
+	// answers.
+	if mp := cfg.Server.MeshPort; mp > 0 {
+		if mp == cfg.Server.Port {
+			log.Printf("server.mesh_port equals server.port (%d), not starting a second listener", mp)
+		} else {
+			go proxy.ServeMeshPort(ctx, fmt.Sprintf("%s:%d", cfg.Server.Host, mp), handler)
+		}
+	}
 
 	<-sigCh
 	log.Println("shutdown signal received")
@@ -225,4 +253,131 @@ func parseDotpathArgs(args []string) map[string]string {
 		}
 	}
 	return overrides
+}
+
+// startEnergyRecorder wires the durable kWh store to the power sampler and the
+// GPU collector. A failure here disables energy tracking and leaves the node
+// serving, matching how power, cost and GPU metrics already degrade: a node
+// that cannot write history is still a node that can answer requests.
+func startEnergyRecorder(ctx context.Context, cfg *config.Config, hist *gpu.History, sampler *power.Sampler, reg *peer.Registry) {
+	// Every GPU rocm-smi reports, not just this instance's. Attribution divides
+	// by total marginal draw across the host, so omitting a co-tenant's cards
+	// would charge their load to this instance's models.
+	gpuIDs := hist.GPUIDs()
+	if len(gpuIDs) == 0 {
+		gpuIDs = cfg.GPUs.ResolvedDevices()
+	}
+
+	loc, err := time.LoadLocation(cfg.Cost.Timezone)
+	if err != nil {
+		loc = time.UTC
+	}
+
+	// Stamp the history with which reading it was measured from. The sampler
+	// has already probed by now (NewSampler does it synchronously), so this is
+	// the source actually adopted rather than the one configured. When power
+	// is unavailable the label is left empty: nothing will be recorded anyway,
+	// and writing SourceName()'s "ipmitool" placeholder would claim a
+	// provenance no reading ever had.
+	powerSource := ""
+	if sampler.Available() {
+		powerSource = sampler.SourceName()
+	}
+
+	store, err := energy.Open(energy.Config{
+		Dir:         cfg.Energy.Dir,
+		GPUIDs:      gpuIDs,
+		MinuteSlots: cfg.Energy.MinuteSlots,
+		HourSlots:   cfg.Energy.HourSlots,
+		DaySlots:    cfg.Energy.DaySlots,
+		Location:    loc,
+		Source:      powerSource,
+	}, nil)
+	if err != nil {
+		log.Printf("[energy] disabled: %v", err)
+		return
+	}
+
+	nodeWatts := func() (float64, bool) { return sampler.Watts(), sampler.Available() }
+	readings := func() []energy.GPUReading {
+		// Resolved per sample, not once: peers may not have been polled yet
+		// at startup, and the host's GPU-to-model layout changes.
+		owned := reg.GPUModels()
+		out := make([]energy.GPUReading, 0, len(gpuIDs))
+		for _, id := range gpuIDs {
+			samples := hist.Samples(id)
+			if len(samples) == 0 {
+				continue
+			}
+			latest := samples[len(samples)-1]
+			if latest.PowerW <= 0 {
+				continue
+			}
+			out = append(out, energy.GPUReading{GPUID: id, Watts: latest.PowerW, Model: owned[id]})
+		}
+		return out
+	}
+
+	// Publish the cumulative total on /v1/status and /v1/cluster, so the mesh
+	// view can show kWh beside live watts without a second endpoint to poll.
+	proxy.SetStatusEnergySource(store)
+
+	recorder := energy.NewRecorder(store, cfg.Energy.SampleInterval.Duration, nodeWatts, readings, nil)
+	go func() {
+		recorder.Run(ctx)
+		store.Close()
+	}()
+	log.Printf("[energy] recording every %s for %d GPUs (node wattage is per-host: enable this on one instance per host)",
+		cfg.Energy.SampleInterval.Duration, len(gpuIDs))
+}
+
+// newPowerController builds the chassis power controller, or nil when power
+// control is not configured. Nil rather than a disabled instance so the
+// endpoints answer "not enabled on this node" from one check.
+func newPowerController(cfg *config.Config, hostname string) *power.Controller {
+	pc := cfg.Power.Control
+	if !pc.Enabled {
+		return nil
+	}
+
+	pass := pc.BMC.Password
+	if pass == "" {
+		env := pc.BMC.PasswordEnv
+		if env == "" {
+			env = "BMC_PASSWORD"
+		}
+		pass = os.Getenv(env)
+	}
+
+	bmcs := make(map[string]power.BMC, len(pc.BMC.Addresses))
+	for host, addr := range pc.BMC.Addresses {
+		bmcs[host] = power.BMC{Addr: addr, Username: pc.BMC.Username, Password: pass}
+	}
+	// A host named for control but given no address still gets an entry, so it
+	// can pick up the address it reports for itself while it is up. Written
+	// addresses go stale here -- these BMCs are on DHCP.
+	for _, host := range pc.Hosts {
+		if _, ok := bmcs[host]; !ok {
+			bmcs[host] = power.BMC{Username: pc.BMC.Username, Password: pass}
+		}
+	}
+
+	ctl := power.NewController(power.ControlConfig{
+		Enabled: true, Hosts: pc.Hosts, BMCs: bmcs,
+	}, hostname)
+
+	// Learn this host's own BMC address and publish it, so peers can reach it
+	// once this node is no longer running to be asked.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if addr := power.LocalBMCAddr(ctx); addr != "" {
+		ctl.LearnBMCAddr(hostname, addr)
+		log.Printf("[power] chassis control enabled for %v (own BMC at %s)", pc.Hosts, addr)
+	} else {
+		log.Printf("[power] chassis control enabled for %v (own BMC address unknown)", pc.Hosts)
+	}
+	if pass == "" {
+		log.Printf("[power] no BMC password set: hosts that are powered off cannot be reached (set BMC_PASSWORD)")
+	}
+	return ctl
 }
