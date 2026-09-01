@@ -1,5 +1,15 @@
 .PHONY: build mcp test clean docker docker-stable docker-gfx906 docker-experimental up down
 
+# Experimental track source: the milpster gfx906 llama.cpp fork on GitHub.
+# Pinned to a tag (not a moving branch) for reproducible rebuilds. Bump
+# MILPSTER_FORK_REF and rebuild to roll the fork upstream; no local clone
+# required — the Dockerfile clones it at build time.
+#   b10803 = ggml-org/llama.cpp fork specialized for AMD gfx906
+#            (Radeon VII / Instinct MI50–MI60); carries muse-glimmer,
+#            DeltaNet/qwen3_moe, and MTP arches.
+MILPSTER_FORK_URL ?= https://github.com/milpster/gfx906-llama-cpp
+MILPSTER_FORK_REF ?= b10803
+
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 
 build:
@@ -25,7 +35,7 @@ clean:
 # full comparison and rollout guidance.
 #
 #   docker / docker-stable           -> viiwork:latest  (upstream llama.cpp)
-#   docker-gfx906 / docker-experimental -> viiwork:gfx906 (stripped fork)
+#   docker-gfx906 / docker-experimental -> viiwork:gfx906 (milpster gfx906 fork)
 #
 # The two pairs are aliases so the Makefile reads symmetrically with
 # the language used in BUILDS.md and scripts/setup-node.sh, while
@@ -35,16 +45,16 @@ clean:
 docker docker-stable:
 	docker build -t viiwork .
 
-# Experimental track: gfx906-stripped fork build. Requires the local fork
-# tree at $(GFX906_FORK) and uses BuildKit's --build-context to pull it
-# into the build without bloating the main viiwork build context.
-GFX906_FORK ?= $(HOME)/gfx906-work/llama.cpp-gfx906
+# Experimental track: gfx906-specialized fork build from GitHub.
+# Clones ${MILPSTER_FORK_URL} @ ${MILPSTER_FORK_REF} inside the Dockerfile
+# (Dockerfile.gfx906-milpster), so no local fork tree or --build-context is
+# needed anymore. Go/build logic is otherwise untouched by the swap.
 docker-gfx906 docker-experimental:
-	@test -d "$(GFX906_FORK)/.git" || (echo "fork tree not found at $(GFX906_FORK)" >&2; exit 2)
 	DOCKER_BUILDKIT=1 docker build \
 	    -t viiwork:gfx906 \
-	    -f Dockerfile.gfx906 \
-	    --build-context fork=$(GFX906_FORK) \
+	    -f Dockerfile.gfx906-milpster \
+	    --build-arg MILPSTER_FORK_URL=$(MILPSTER_FORK_URL) \
+	    --build-arg MILPSTER_FORK_REF=$(MILPSTER_FORK_REF) \
 	    --build-arg VERSION=$(VERSION)-gfx906 \
 	    .
 

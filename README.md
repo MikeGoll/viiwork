@@ -312,9 +312,9 @@ viiwork ships in two parallel builds in this same repo. They share the Go server
 | | Stable foundation | Experimental track |
 |---|---|---|
 | Image | `viiwork:latest` | `viiwork:gfx906` |
-| Dockerfile | `Dockerfile` | `Dockerfile.gfx906` |
+| Dockerfile | `Dockerfile` | `Dockerfile.gfx906-milpster` |
 | Make target | `make docker` (alias `make docker-stable`) | `make docker-gfx906` (alias `make docker-experimental`) |
-| llama.cpp | Pinned upstream `ggml-org/llama.cpp` release | Local `llama.cpp-gfx906` fork tree (stripped, gfx906-specialized) |
+| llama.cpp | Pinned upstream `ggml-org/llama.cpp` release | GitHub fork `milpster/gfx906-llama-cpp` @ pinned tag (`b10803`) |
 | Status | Default. Production-stable, runs everywhere. | Bake-in track, opt-in per node. +3.0% sustained tok/s vs upstream and identical memory profile in the 4 h A/B soak (`milestone/gfx906-fork-4h-soak-2026-04-09`). |
 
 `scripts/setup-node.sh` asks which build to use as its very first prompt — option 1 (stable) is the default. To switch a running node between tracks in place without re-running setup, use `scripts/switch-node-build.sh`.
@@ -329,7 +329,7 @@ Both builds pin llama.cpp to a specific release tag and patch the HIP FP8 header
 docker compose build --build-arg LLAMA_CPP_VERSION=b8700
 ```
 
-The experimental build is pinned to a specific commit on the `llama.cpp-gfx906` fork — bump it by updating the fork tree at `$GFX906_FORK` (default `~/gfx906-work/llama.cpp-gfx906`) and re-running `make docker-gfx906`.
+The experimental build is pinned to a specific tag on the `milpster/gfx906-llama-cpp` fork — bump it by updating `MILPSTER_FORK_REF` in the `Makefile` (default `b10803`) and re-running `make docker-gfx906`. The Dockerfile clones the fork at build time, so no local fork tree is required.
 
 The FP8 patch is required because ROCm 6.2+ includes `<hip/hip_fp8.h>` for all architectures, but gfx906 has no FP8 hardware and the header fails to compile.
 

@@ -10,13 +10,15 @@ echo ""
 # --- llama.cpp variant selection ---
 # Two builds are available:
 #   1) Standard upstream llama.cpp via the default Dockerfile
-#   2) gfx906-stripped fork via Dockerfile.gfx906 (Phase 1 of the
-#      llama.cpp-gfx906 project: ~73% lines removed from llama-model.cpp,
-#      14 non-HIP backends gone, sampler/grammar trims, 9 of 20 HIP MMQ
-#      instances dropped). Sustained 3% throughput edge over upstream
-#      under the 4h A/B soak (milestone/gfx906-fork-4h-soak-2026-04-09)
-#      with bounded RSS and flat VRAM. Image must exist locally before
-#      `docker compose up` -- this script will not build it for you.
+#   2) gfx906 fork via Dockerfile.gfx906-milpster (milpster
+#      gfx906-llama-cpp @ pinned tag b10803: a ggml-org/llama.cpp fork
+#      specialized for AMD gfx906, inheriting upstream arch coverage
+#      incl. hybrid DeltaNet/qwen3_moe, MTP, and muse-glimmer).
+#      Sustained 3% throughput edge over upstream under the 4h A/B soak
+#      (milestone/gfx906-fork-4h-soak-2026-04-09) with bounded RSS and
+#      flat VRAM. Image must exist locally before `docker compose up`
+#      -- this script will not build it for you. Built with
+#      `make docker-gfx906`, which clones the fork at build time.
 echo "Which llama.cpp build do you want to use?"
 echo "  1) Standard upstream  (image: viiwork, built from Dockerfile)"
 echo "  2) gfx906 fork        (image: viiwork:gfx906, must exist locally)"
@@ -32,7 +34,7 @@ case "${llama_choice:-1}" in
         echo "  -> using gfx906 fork build"
         if ! docker image inspect viiwork:gfx906 >/dev/null 2>&1; then
             echo "  WARNING: viiwork:gfx906 image not found locally."
-            echo "           Build it on a node with the fork tree:"
+            echo "           Build it on a node with git access:"
             echo "             make docker-gfx906"
             echo "           Or transfer it from another node:"
             echo "             docker save viiwork:gfx906 | ssh THIS_NODE docker load"

@@ -58,10 +58,10 @@ case "${choice}" in
     2|experimental|gfx906|fork)
         target_track="experimental"
         target_image="viiwork:gfx906"
-        # Experimental images have no in-tree build context (the fork
-        # tree lives outside this repo on the dev node only). Drop the
-        # `build:` line so docker compose doesn't try to rebuild and
-        # fail.
+        # The experimental image has no in-tree build context (it's
+        # built by `make docker-gfx906`, which clones the fork at build
+        # time). Drop the `build:` line so docker compose doesn't try to
+        # rebuild from this repo and fail.
         target_build_line=""
         ;;
     q|Q|"")
