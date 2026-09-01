@@ -9,12 +9,12 @@ import (
 	"log"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/janit/viiwork/internal/activity"
 	"github.com/janit/viiwork/internal/logging"
 	"github.com/janit/viiwork/internal/peer"
+	"github.com/janit/viiwork/meshapi"
 )
 
 // clusterPushInterval is how often the snapshot is rebuilt and compared. It is
@@ -23,18 +23,27 @@ import (
 // nothing at all, because identical snapshots are suppressed.
 const clusterPushInterval = time.Second
 
+// frameBuffer absorbs a burst of producer events while the writer is busy. It
+// is backpressure, not a queue to be drained on shutdown: a producer that
+// cannot enqueue blocks until it can, or until ctx ends.
+const frameBuffer = 64
+
+// sseFrame is one encoded event on its way to the single writer.
+type sseFrame struct {
+	event string
+	data  []byte
+}
+
 // MeshEvent is an activity event tagged with the node it came from.
 //
 // The per-node dashboard can render bare activity.Event because everything on
 // screen belongs to one host. The mesh view cannot: two nodes both reporting
 // "gpu-0" are different GPUs, and an in-flight request has to be attributed to
 // a host before it means anything.
-type MeshEvent struct {
-	activity.Event
-	NodeID   string `json:"node_id,omitempty"`
-	Hostname string `json:"hostname,omitempty"`
-	Addr     string `json:"addr,omitempty"`
-}
+// MeshEvent is defined in meshapi and aliased here. It is an activity Event
+// tagged with the node it came from, as pushed on the "activity" channel of
+// /v1/mesh/stream.
+type MeshEvent = meshapi.MeshEvent
 
 // handleMeshStream serves everything the mesh view needs over ONE held-open
 // connection: activity events from this node and every reachable peer, plus
@@ -75,26 +84,54 @@ func (h *Handler) handleMeshStream(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
 
-	ctx := r.Context()
+	// Cancelling on the way out is what stops the producers below. They are
+	// deliberately not waited for -- see the note on frames.
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
 
-	// out serialises writes from the local subscriber and every peer reader.
-	// http.ResponseWriter is not safe for concurrent use, and this handler has
-	// N+1 goroutines writing into it.
-	var mu sync.Mutex
-	send := func(event string, payload any) bool {
-		b, err := json.Marshal(payload)
-		if err != nil {
-			return true
-		}
-		mu.Lock()
-		defer mu.Unlock()
-		if _, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, b); err != nil {
+	// Every byte of this response is written by this goroutine and no other.
+	//
+	// The handler runs N+1 producers: one follower per peer, plus the cluster
+	// snapshot loop. They used to write to w directly under a mutex, which made
+	// those writes mutually exclusive but said nothing about when they *stop*.
+	// The handler can return while a producer is still inside Fprintf, and
+	// writing to an http.ResponseWriter after ServeHTTP returns is a data race
+	// and a violation of net/http's contract. It reproduced under -race.
+	//
+	// Waiting for the producers instead would deadlock. An SSE response must not
+	// carry a WriteTimeout, so a connected-but-stalled client can block a write
+	// indefinitely -- and the handler would then be waiting on a producer that
+	// cannot finish. That case is real rather than theoretical: the activity log
+	// closes the oldest subscriber's channel when maxSubscribers is reached,
+	// which returns this handler with the client still perfectly healthy.
+	//
+	// Funnelling through a channel removes the question instead of answering it.
+	// A producer that has lost its reader is freed by ctx, and it never held a
+	// reference to w to begin with.
+	frames := make(chan sseFrame, frameBuffer)
+
+	write := func(event string, data []byte) bool {
+		if _, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, data); err != nil {
 			return false
 		}
 		flusher.Flush()
 		return true
 	}
-	emit := func(ev MeshEvent) bool { return send("activity", ev) }
+
+	// enqueue is the producers' half of that split. It never touches w.
+	enqueue := func(event string, payload any) bool {
+		b, err := json.Marshal(payload)
+		if err != nil {
+			return true
+		}
+		select {
+		case frames <- sseFrame{event: event, data: b}:
+			return true
+		case <-ctx.Done():
+			return false
+		}
+	}
+	emit := func(ev MeshEvent) bool { return enqueue("activity", ev) }
 
 	localID, localHost := "", ""
 	if h.registry != nil {
@@ -102,9 +139,26 @@ func (h *Handler) handleMeshStream(w http.ResponseWriter, r *http.Request) {
 		localHost = h.registry.Hostname()
 	}
 
-	// Local events.
+	// Local events. Subscribe before replaying the backlog so nothing falls
+	// between the two; the overlap that creates is deduplicated downstream.
 	sub := h.activity.Subscribe()
 	defer h.activity.Unsubscribe(sub)
+
+	// Replaying on open is what makes a dropped connection recoverable. The
+	// mesh view reconstructs in-flight requests from start/done pairs, so an
+	// event lost while a browser is away strands a row that never leaves —
+	// which is what a slept laptop or a throttled background tab produces.
+	// Peer backlogs arrive on their own: each peer's /v1/activity/stream
+	// replays too, and this handler opens fresh peer connections per client.
+	for _, ev := range h.activity.Backlog() {
+		b, err := json.Marshal(MeshEvent{Event: ev, NodeID: localID, Hostname: localHost})
+		if err != nil {
+			continue
+		}
+		if !write("activity", b) {
+			return
+		}
+	}
 
 	// Peer events. Each peer gets a goroutine that follows its activity stream
 	// and reconnects with backoff, so a peer that is down or restarting does not
@@ -122,21 +176,15 @@ func (h *Handler) handleMeshStream(w http.ResponseWriter, r *http.Request) {
 	if h.registry != nil {
 		go func() {
 			var last []byte
+			deadband := newHostMemDeadband()
 			ticker := time.NewTicker(clusterPushInterval)
 			defer ticker.Stop()
 			for {
 				state := BuildClusterState(h.registry)
-				// Host memory is stripped, not merely ignored. The mesh view does
-				// not show it, but it ticks every second on a live host, so
-				// leaving it in defeats the change-detection below entirely — the
-				// stream then pushes a full snapshot every second forever for a
-				// field nothing renders. Measured: 4 pushes in 4 idle seconds,
-				// every one of them differing only in host_mem_used_mb.
-				state.Local.HostMemTotalMB = 0
-				state.Local.HostMemUsedMB = 0
+				deadband.apply(&state)
 				if b, err := json.Marshal(state); err == nil && !bytes.Equal(b, last) {
 					last = b
-					if !send("cluster", state) {
+					if !enqueue("cluster", state) {
 						return
 					}
 				}
@@ -153,8 +201,15 @@ func (h *Handler) handleMeshStream(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-ctx.Done():
 			return
+		case f := <-frames:
+			if !write(f.event, f.data) {
+				return
+			}
 		case raw, ok := <-sub:
 			if !ok {
+				// The log evicted this subscriber to make room for a newer one.
+				// The connection is still healthy; there is simply nothing more
+				// to send on it.
 				return
 			}
 			// Subscribe delivers already-encoded JSON, so it has to be decoded
@@ -164,7 +219,11 @@ func (h *Handler) handleMeshStream(w http.ResponseWriter, r *http.Request) {
 			if err := json.Unmarshal(raw, &ev); err != nil {
 				continue
 			}
-			if !emit(MeshEvent{Event: ev, NodeID: localID, Hostname: localHost}) {
+			b, err := json.Marshal(MeshEvent{Event: ev, NodeID: localID, Hostname: localHost})
+			if err != nil {
+				continue
+			}
+			if !write("activity", b) {
 				return
 			}
 		}
@@ -245,4 +304,61 @@ func hostOnly(addr string) string {
 		return addr[:i]
 	}
 	return addr
+}
+
+// hostMemBuckets is how many distinct levels of host memory survive into the
+// pushed snapshot. 64 puts a step at ~1 GB on a 64 GB host and ~2 GB on a
+// 128 GB one, which is under a pixel on the strip that renders it.
+const hostMemBuckets = 64
+
+// hostMemDeadband coarsens host memory before the snapshot is diffed.
+//
+// This field used to be stripped outright, because it ticks every second on a
+// live host (measured on gb1: ~86 MB of movement per second, spiking past
+// 600 MB) and an exact value defeats the change detection in the push loop --
+// the stream then sends a full snapshot every second forever, every one of
+// them differing only in host_mem_used_mb. Stripping was the right call while
+// nothing rendered it. Now the mesh view draws a per-host memory strip, which
+// needs about a hundred levels, not a megabyte, so the field is made exactly
+// as precise as the only thing that reads it.
+//
+// Rounding alone is not enough: a host sitting near a bucket boundary flips
+// between two levels on every tick and pushes just as hard as before. So the
+// published value is held until the reading drifts a full step away from it.
+// That is a deadband, and it is what makes the suppression hold for a host
+// whose memory hovers rather than moves.
+//
+// State is per stream, and /v1/cluster keeps the exact figures for anything
+// that needs them.
+type hostMemDeadband struct{ published map[string]int64 }
+
+func newHostMemDeadband() *hostMemDeadband {
+	return &hostMemDeadband{published: make(map[string]int64)}
+}
+
+func (d *hostMemDeadband) apply(state *peer.ClusterResponse) {
+	state.Local.HostMemUsedMB = d.value("\x00local", state.Local.HostMemUsedMB, state.Local.HostMemTotalMB)
+	for i := range state.Peers {
+		p := &state.Peers[i]
+		p.HostMemUsedMB = d.value(p.Addr, p.HostMemUsedMB, p.HostMemTotalMB)
+	}
+}
+
+func (d *hostMemDeadband) value(key string, usedMB, totalMB int64) int64 {
+	// A node that reports no total -- an older peer, or an unreadable
+	// /proc/meminfo -- has nothing to scale a step from, so it passes through.
+	if usedMB <= 0 || totalMB <= 0 { return usedMB }
+	step := totalMB / hostMemBuckets
+	if step < 1 { return usedMB }
+	if prev, ok := d.published[key]; ok && absInt64(usedMB-prev) < step {
+		return prev
+	}
+	v := (usedMB + step/2) / step * step
+	d.published[key] = v
+	return v
+}
+
+func absInt64(v int64) int64 {
+	if v < 0 { return -v }
+	return v
 }

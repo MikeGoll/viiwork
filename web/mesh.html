@@ -81,6 +81,94 @@
   .arrow { color: var(--dimmer); }
   .empty { color: var(--dimmer); font-style: italic; padding: 10px 12px; font-size: 0.8rem; }
   .err { color: var(--bad); padding: 10px 12px; font-size: 0.8rem; }
+
+  /* prompt history — each row is a real <a> so cmd/middle-click opens a
+     background tab; that is the whole point of the full-page prompt view. */
+  a.prompt-row { color: inherit; text-decoration: none; }
+  .prompt-row:hover { background: rgba(255,255,255,0.04); }
+  .prompt-row.running .arrow { color: var(--warn); }
+  .promptlink { margin-left: auto; color: var(--accent); font-size: 0.76rem; white-space: nowrap; }
+
+  /* fleet totals — three readings, no charts. The first thing on the page,
+     because "is the fleet busy and is it full" is the question that brings
+     someone here. */
+  .totals { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-bottom: 18px; }
+  .tot { background: var(--card); border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; }
+  .tot .v { font-family: var(--mono); font-size: 1.35rem; font-weight: 600; letter-spacing: -0.02em;
+            line-height: 1.15; white-space: nowrap; }
+  .tot .k { font-size: 0.72rem; color: var(--dimmer); margin-top: 3px; }
+  @media (max-width: 560px) { .totals { grid-template-columns: 1fr; } }
+
+  /* fleet power */
+  .powerhead { display: flex; align-items: baseline; gap: 10px; padding: 10px 12px 2px; }
+  .hero { font-family: var(--mono); font-size: 1.7rem; font-weight: 600; letter-spacing: -0.02em; line-height: 1.1; }
+  .hero .unit { font-size: 0.85rem; font-weight: 400; color: var(--dim); margin-left: 3px; }
+  .hero .unit + .unit { margin-left: 0; }
+  .chartwrap { position: relative; padding: 2px 12px 8px; }
+  #powerChart { display: block; width: 100%; height: 140px; }
+  .tip { position: absolute; z-index: 5; pointer-events: none; background: rgba(13,17,23,0.96);
+         border: 1px solid var(--border); border-radius: 5px; padding: 6px 8px;
+         font-family: var(--mono); font-size: 0.74rem; white-space: nowrap;
+         box-shadow: 0 4px 14px rgba(0,0,0,0.55); }
+  .tip .when { color: var(--dimmer); margin-bottom: 4px; }
+  .tip .r { display: flex; gap: 8px; align-items: baseline; }
+  .tip .r .v { margin-left: auto; font-weight: 600; color: var(--fg); }
+  .tip .r .n { color: var(--dim); }
+  .tip .r.total { border-top: 1px solid var(--border); margin-top: 4px; padding-top: 4px; }
+  .swatch { display: inline-block; width: 9px; height: 9px; border-radius: 2px; flex: none; }
+  table.legend td { padding: 4px 12px; border-bottom: 0; }
+  table.legend td.sw { width: 1%; padding-right: 0; }
+  table.legend td.name { width: 1%; padding-right: 10px; }
+  table.legend .src { color: var(--dimmer); font-size: 0.74rem; }
+  table.legend .u { color: var(--dimmer); font-weight: 400; }
+  /* power control: recessive until hovered — this is the one control on the
+     page that can switch a machine off. */
+  table.legend td.pw { width: 1%; padding-left: 4px; }
+  .pwbtn { background: transparent; border: 1px solid var(--border); color: var(--dim);
+           border-radius: 5px; font: inherit; font-size: 0.7rem; font-family: var(--mono);
+           padding: 1px 8px; cursor: pointer; min-width: 34px; }
+  .pwbtn:hover:not(:disabled) { border-color: var(--bad); color: var(--bad); }
+  .pwbtn.on:hover:not(:disabled) { border-color: var(--ok); color: var(--ok); }
+  .pwbtn:disabled { opacity: 0.35; cursor: not-allowed; }
+  .pwbtn.busy { opacity: 0.5; cursor: progress; }
+  tr.offline td.name { color: var(--dimmer); }
+  tr.offline td.name::after { content: " off"; color: var(--bad); font-size: 0.68rem; }
+
+  table.legend td.val { text-align: right; font-family: var(--mono); white-space: nowrap; }
+  table.legend thead th { font-size: 0.66rem; letter-spacing: 0.08em; text-transform: uppercase;
+                          color: var(--dimmer); font-weight: 400; padding: 2px 12px 4px;
+                          border-bottom: 0; text-align: right; }
+  /* The month total sits at the far right of the headline, opposite the live
+     reading: same panel, opposite ends, so the eye is not asked to compare
+     two numbers of different meaning that happen to sit adjacent. */
+  .month { margin-left: auto; font-family: var(--mono); font-size: 0.82rem; color: var(--dim);
+           white-space: nowrap; align-self: baseline; }
+  .month b { font-weight: 600; color: var(--fg); }
+
+  /* host RAM film strip — deliberately recessive: it sits under the power
+     panel as context, not as a second headline. */
+  .strip { border-top: 1px solid var(--border); padding: 8px 12px 10px; }
+  .strip .cap { font-family: var(--mono); font-size: 0.68rem; letter-spacing: 0.08em;
+                text-transform: uppercase; color: var(--dimmer); margin-bottom: 6px; }
+  /* auto-fit so a full fleet divides the width evenly, plus a cap so a mesh
+     reporting one host gets a frame rather than a full-width bar. */
+  .frames { display: grid; grid-template-columns: repeat(auto-fit, minmax(92px, 1fr)); gap: 6px 14px; }
+  .frame { max-width: 190px; }
+  .frame .lbl { display: flex; align-items: baseline; gap: 5px; font-family: var(--mono);
+                font-size: 0.7rem; color: var(--dimmer); margin-bottom: 3px; }
+  /* The percentage sits next to its host name, not pushed to the frame's far
+     edge -- against the neighbouring frame it would read as that host's. */
+  .frame .lbl .h { color: var(--dim); overflow: hidden; text-overflow: ellipsis; flex: none; }
+  .frame .lbl .p { font-variant-numeric: tabular-nums; }
+  .frame canvas { display: block; width: 100%; height: 26px; }
+
+  /* halt */
+  .halt { background: transparent; border: 1px solid var(--border); color: var(--dim);
+          border-radius: 6px; padding: 4px 12px; font: inherit; font-size: 0.78rem;
+          cursor: pointer; }
+  .halt:hover { color: var(--fg); border-color: var(--dim); }
+  .halt.on { border-color: var(--warn); color: var(--warn); font-weight: 600; }
+  body.halted .mono-list, body.halted #backendsCard { outline: 1px solid rgba(210,153,34,0.35); }
 </style>
 </head>
 <body>
@@ -93,11 +181,20 @@
     <button data-mode="model" class="on">model</button>
     <button data-mode="host">host</button>
   </span>
+  <button class="halt" id="halt" title="Freeze the view so rows stop moving under the cursor (h)">halt</button>
 </header>
 
 <div class="cols">
   <!-- LEFT -->
   <div>
+    <section>
+      <div class="totals" id="totals">
+        <div class="tot"><div class="v" id="totGpu">—</div><div class="k" id="totGpuK">GPUs busy</div></div>
+        <div class="tot"><div class="v" id="totVram">—</div><div class="k" id="totVramK">VRAM</div></div>
+        <div class="tot"><div class="v" id="totRam">—</div><div class="k" id="totRamK">Host RAM</div></div>
+      </div>
+    </section>
+
     <section>
       <h2>Mesh Models</h2>
       <div class="pills" id="models"></div>
@@ -109,6 +206,11 @@
     </section>
 
     <section>
+      <h2>Prompts <span class="sub" id="promptCount"></span></h2>
+      <div class="card mono-list" id="prompts"><div class="empty">no requests yet</div></div>
+    </section>
+
+    <section>
       <h2>Activity</h2>
       <div class="card mono-list" id="activity"><div class="empty">waiting for events…</div></div>
     </section>
@@ -116,6 +218,31 @@
 
   <!-- RIGHT -->
   <div>
+    <section>
+      <h2>Fleet Power <span class="sub" id="powerScope"></span></h2>
+      <div class="card">
+        <div class="powerhead">
+          <span class="hero" id="powerNow">—<span class="unit">W</span></span>
+          <span class="sub" id="powerSub"></span>
+          <span class="month" id="powerMonth"></span>
+        </div>
+        <div class="chartwrap">
+          <canvas id="powerChart"></canvas>
+          <div class="tip" id="powerTip" hidden></div>
+        </div>
+        <table class="legend">
+          <thead id="powerLegendHead" hidden><tr>
+            <th></th><th></th><th></th><th>now</th><th>24h</th><th>30d</th><th></th>
+          </tr></thead>
+          <tbody id="powerLegend"></tbody>
+        </table>
+        <div class="strip" id="memStripWrap" hidden>
+          <div class="cap">Host RAM</div>
+          <div class="frames" id="memStrip"></div>
+        </div>
+      </div>
+    </section>
+
     <section>
       <h2>Backends <span class="sub" id="backendSummary"></span></h2>
       <div class="card" id="backendsCard">
@@ -146,6 +273,37 @@ let cluster = null;               // last /v1/cluster payload
 const inflight = new Map();       // rid -> {startMs, model, dest, task, host}
 const activityRows = [];          // newest-first, capped
 const MAX_ACTIVITY = 60;
+// Streams replay their ring when they open, so the same event can arrive twice:
+// once live before a disconnect, once replayed after it. In-flight and prompt
+// state is keyed and therefore idempotent, but the activity feed is an append
+// list and would show doubles. Held a few times deeper than the feed so a full
+// replay cannot re-admit a row the feed has already evicted.
+const seenEvents = new Set();
+const seenOrder = [];
+const MAX_SEEN = 600;
+
+// Prompt history: one entry per distinct (node, rid), oldest evicted past
+// maxPrompts. In memory only — nothing here is persisted or sent anywhere
+// except the on-demand fetch when a row is opened.
+const promptHistory = new Map();  // key -> {rid, addr, host, model, dest, task, t, done}
+const promptOrder = [];           // keys in first-seen order, oldest first
+// Sized from the server rather than hardcoded. Each node reports its own
+// prompt-store capacity on /v1/cluster, and this view merges several nodes, so
+// the list has to hold the largest of them or it would evict rows that the
+// owning node can still answer a lookup for. Nodes older than v1.1.1 report
+// nothing, hence the fallback.
+let maxPrompts = 1000;
+
+// Halt freezes the view. It queues incoming events instead of applying them,
+// rather than merely skipping the re-render, because the two lists evict as
+// they grow: a frozen render over a mutating map would leave rows on screen
+// whose entries had already been dropped underneath. Nothing is lost — the
+// queue drains in order on resume — and the queue is capped so a halt left on
+// overnight cannot grow without bound.
+let halted = false;
+let pendingEvents = [];           // raw activity events received while halted
+let pendingCluster = null;        // newest cluster snapshot received while halted
+const MAX_PENDING = 1000;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -188,7 +346,15 @@ function flattenBackends(c) {
   const rows = [];
   if (!c) return rows;
 
-  const push = (b, host, model, gpus, reachable) => {
+  // The listen port is what someone needs to actually call a model, and the
+  // fleet's port scheme encodes which family an instance belongs to — so it is
+  // the one piece of addressing worth surfacing next to a model name.
+  const portOf = addr => {
+    const i = String(addr || "").lastIndexOf(":");
+    return i > 0 ? String(addr).slice(i + 1) : "";
+  };
+
+  const push = (b, host, model, gpus, reachable, port) => {
     // GPU util/VRAM are reported per physical GPU; a tensor-split backend spans
     // several, so aggregate: utilisation is the max (the group is only as idle
     // as its busiest card) and VRAM is summed.
@@ -206,17 +372,19 @@ function flattenBackends(c) {
       gpuHTML: gpuLabel(b), inFlight: b.in_flight || 0,
       rssMB: b.rss_mb || 0, util, vramUsed: used, vramTotal: total,
       slotCtx: b.slot_ctx || 0, tokDecoded: b.tok_decoded || 0,
-      reachable
+      reachable, port
     });
   };
 
   const localHost = c.hostname || "local";
-  (c.local?.backends || []).forEach(b => push(b, localHost, c.local?.model, c.local?.gpus, true));
+  const localPort = portOf(c.local?.listen_addr);
+  (c.local?.backends || []).forEach(b => push(b, localHost, c.local?.model, c.local?.gpus, true, localPort));
 
   (c.peers || []).forEach(p => {
     const host = p.hostname || p.addr;
     const reachable = p.status === "reachable";
-    (p.backends || []).forEach(b => push(b, host, (p.models || [])[0], p.gpus, reachable));
+    const port = portOf(p.addr);
+    (p.backends || []).forEach(b => push(b, host, (p.models || [])[0], p.gpus, reachable, port));
   });
   return rows;
 }
@@ -242,6 +410,7 @@ function renderBackends() {
     groups.get(key(r)).push(r);
   }
 
+  const hostWatts = new Map(hostPower(cluster).map(h => [h.host, h.watts]));
   const totalInFlight = rows.reduce((a, r) => a + r.inFlight, 0);
   $("backendSummary").textContent =
     `${rows.length} backend${rows.length === 1 ? "" : "s"} · ${groups.size} ${groupMode}${groups.size === 1 ? "" : "s"} · ${totalInFlight} in flight`;
@@ -249,9 +418,23 @@ function renderBackends() {
   let html = "";
   for (const [name, list] of [...groups.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
     const busy = list.reduce((a, r) => a + r.inFlight, 0);
+    // Grouped by host, the host's own draw belongs on its header. Grouped by
+    // model it does not: node wattage is a whole-host figure and several
+    // models share a host, so printing it per model would imply a split the
+    // BMC cannot make. That split is the energy store's job, not this table's.
+    const w = groupMode === "host" ? hostWatts.get(name) : null;
+    // Ports on a model group, not a host group: a model is reached at a port,
+    // and the same model on several hosts usually shares one. Grouped by host
+    // the ports belong to different models and listing them together would
+    // imply an addressing that does not exist.
+    const ports = groupMode === "model"
+      ? [...new Set(list.map(r => r.port).filter(Boolean))].sort((a, b) => a - b)
+      : [];
     html += `<tr class="grouphead"><td colspan="8">${esc(name)}` +
             `<span class="cnt"> · ${list.length} backend${list.length === 1 ? "" : "s"}` +
-            `${busy ? " · " + busy + " in flight" : ""}</span></td></tr>`;
+            `${busy ? " · " + busy + " in flight" : ""}` +
+            `${w ? " · " + esc(fmtW(w)) + " W" : ""}` +
+            `${ports.length ? " · :" + ports.map(esc).join(" :") : ""}</span></td></tr>`;
     for (const r of list) {
       const ctxFrac = r.slotCtx ? r.tokDecoded / r.slotCtx : 0;
       const vramFrac = r.vramTotal ? r.vramUsed / r.vramTotal : 0;
@@ -321,6 +504,70 @@ function renderInflight() {
   }).join("");
 }
 
+// ---------------------------------------------------------------------------
+// Render: prompt history. Each row is an <a> to /prompt, not a click handler
+// opening a dialog — a real href is what makes cmd-click, middle-click and
+// "open in new tab" work, so a batch of requests can be sent to background
+// tabs and read side by side. target=_blank keeps this live view intact on a
+// plain click too. The prompt and output text itself is never carried here;
+// that page fetches it on demand, as the modal did.
+// ---------------------------------------------------------------------------
+function promptHref(r) {
+  const p = new URLSearchParams({ rid: String(r.rid), addr: r.addr || "" });
+  if (r.model) p.set("model", r.model);
+  if (r.dest) p.set("dest", r.dest);
+  if (r.host) p.set("host", r.host);
+  if (r.task) p.set("task", r.task);
+  return "/prompt?" + p.toString();
+}
+
+function renderPrompts() {
+  const el = $("prompts");
+  $("promptCount").textContent = promptOrder.length ? String(promptOrder.length) : "";
+  if (!promptOrder.length) { el.innerHTML = '<div class="empty">no requests yet</div>'; return; }
+
+  const keys = [...promptOrder].reverse(); // newest first
+  el.innerHTML = keys.map(key => {
+    const r = promptHistory.get(key);
+    if (!r) return "";
+    const t = new Date(r.t * 1000).toLocaleTimeString();
+    const cls = "row prompt-row" + (r.done ? "" : " running");
+    return `<a class="${cls}" href="${esc(promptHref(r))}" target="_blank" rel="noopener">` +
+      `<span class="host">${t}</span>` +
+      (r.task ? `<span class="task">[${esc(r.task)}]</span>` : "") +
+      `<span>${esc(r.model)}</span>` +
+      `<span class="arrow">→</span><span>${esc(r.dest)}</span>` +
+      `<span class="host">@${esc(r.host)}</span>` +
+      `<span class="promptlink">open ↗</span>` +
+      `</a>`;
+  }).join("");
+}
+
+// recordPrompt tracks one (node, rid) across its start and done/aborted
+// events, updating the same history row in place rather than appending a
+// second one — the map key stays stable across both events for a request.
+function recordPrompt(e, host) {
+  const key = (e.node_id || host) + "#" + e.rid;
+  const isDone = /finished|done|aborted/i.test(e.message || "");
+  const parts = (e.message || "").split("→");
+
+  if (!promptHistory.has(key)) {
+    promptOrder.push(key);
+    if (promptOrder.length > maxPrompts) {
+      promptHistory.delete(promptOrder.shift());
+    }
+  }
+  promptHistory.set(key, {
+    rid: e.rid, addr: e.addr || "", host,
+    model: (parts[0] || e.message || "").trim(),
+    dest: (parts[1] || "?").trim(),
+    task: e.task_id || "",
+    t: e.t || Math.floor(Date.now() / 1000),
+    done: isDone
+  });
+  renderPrompts();
+}
+
 function renderActivity() {
   const el = $("activity");
   if (!activityRows.length) { el.innerHTML = '<div class="empty">waiting for events…</div>'; return; }
@@ -333,16 +580,726 @@ function renderActivity() {
 }
 
 // ---------------------------------------------------------------------------
+// Fleet totals
+//
+// Three readings, no charts: how much of the fleet is working, how full its
+// VRAM is, and how full its RAM is.
+//
+// Every one of these has to be deduplicated by host, and the GPU list is the
+// sharpest case. rocm-smi reports every card on a machine, not only the ones an
+// instance owns, so each of the several viiwork instances on a multi-model host
+// publishes that host's full GPU list. Summing the payload as it arrives counts
+// them once per instance: measured on the reference fleet, 110 GPU entries for
+// 50 actual cards. Keyed by host and gpu_id, the totals come out right.
+// ---------------------------------------------------------------------------
+function meshGPUs(c) {
+  const seen = new Map();   // "host#gpu_id" -> gpu
+  const take = (host, gpus) => {
+    for (const g of (gpus || [])) {
+      if (!host || g.gpu_id == null) continue;
+      const k = host + "#" + g.gpu_id;
+      if (!seen.has(k)) seen.set(k, g);
+    }
+  };
+  if (c) {
+    take(c.hostname, c.local && c.local.gpus);
+    for (const p of (c.peers || [])) {
+      if (p.status !== "reachable") continue;
+      take(p.hostname || p.addr, p.gpus);
+    }
+  }
+  return [...seen.values()];
+}
+
+const fmtTB = mb => {
+  const gb = (mb || 0) / 1024;
+  return gb >= 1000 ? (gb / 1024).toFixed(2) + " TB" : gb.toFixed(1) + " GB";
+};
+
+function renderTotals() {
+  const gpus = meshGPUs(cluster);
+  // "Busy" is utilisation above zero rather than a loaded backend: a model
+  // sitting resident on an idle card is not work being done, and rocm-smi
+  // reports a genuine 0 for it.
+  const busy = gpus.filter(g => (g.util || 0) > 0).length;
+  const vramUsed = gpus.reduce((a, g) => a + (g.vram_used_mb || 0), 0);
+  const vramTotal = gpus.reduce((a, g) => a + (g.vram_total_mb || 0), 0);
+
+  const hosts = hostMem(cluster);
+  const ramUsed = hosts.reduce((a, h) => a + h.used, 0);
+  const ramTotal = hosts.reduce((a, h) => a + h.total, 0);
+
+  // The capacity sits in the label rather than beside the value: the reading is
+  // the number someone came for, and "of 815.2 GB" is the context that makes it
+  // mean something. Keeping them on one line makes the tile read as a fraction
+  // and buries the figure that matters.
+  const setTile = (vid, kid, value, label) => {
+    $(vid).textContent = value;
+    $(kid).textContent = label;
+  };
+
+  setTile("totGpu", "totGpuK", gpus.length ? `${busy}/${gpus.length}` : "—", "GPUs busy");
+  setTile("totVram", "totVramK", vramTotal ? fmtTB(vramUsed) : "—",
+          vramTotal ? "VRAM of " + fmtTB(vramTotal) : "VRAM");
+
+  // Host RAM covers only the hosts that report it, which is not necessarily
+  // every host in the mesh — a host on an older build reports none. The label
+  // says so only when they disagree, rather than carrying a count that is
+  // noise whenever the fleet is uniform.
+  const reporting = hosts.length, total = meshHosts(cluster).size;
+  let ramLabel = ramTotal ? "RAM of " + fmtTB(ramTotal) : "Host RAM";
+  if (ramTotal && total && reporting < total) ramLabel += ` · ${reporting}/${total} hosts`;
+  setTile("totRam", "totRamK", ramTotal ? fmtTB(ramUsed) : "—", ramLabel);
+}
+
+// ---------------------------------------------------------------------------
+// Chassis power control
+//
+// Rows come from the union of "hosts reporting power" and the node's
+// power.control allowlist, because the host an operator most wants to act on is
+// the one that is off — and a host that is off is absent from the mesh
+// entirely, so the allowlist is the only place its name still exists.
+//
+// The button is contextual rather than a toggle: a host in the mesh is up and
+// offers "off", a host missing from it offers "on". The action is named on the
+// button so what is about to happen is legible before the confirm, not only
+// inside it.
+// ---------------------------------------------------------------------------
+function powerControlInfo() {
+  const pc = cluster && cluster.power_control;
+  return (pc && Array.isArray(pc.hosts) && pc.hosts.length) ? pc : null;
+}
+
+async function sendPower(host, action, btn) {
+  // Native confirm on purpose: this switches a machine off, and a bespoke
+  // dialog is one CSS mistake away from being dismissed by accident.
+  const verb = action === "on" ? "Power ON" : "Power OFF";
+  if (!confirm(`${verb} ${host}?\n\nThis acts on the physical machine through its BMC.`)) return;
+
+  const label = btn.textContent;
+  btn.disabled = true;
+  btn.classList.add("busy");
+  btn.textContent = "…";
+  try {
+    const resp = await fetch("/v1/mesh/power", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ host, action })
+    });
+    const body = await resp.json().catch(() => ({}));
+    if (!resp.ok || body.error) {
+      alert(`${host}: ${body.error || ("HTTP " + resp.status)}`);
+    }
+  } catch (e) {
+    alert(`${host}: ${e}`);
+  } finally {
+    btn.classList.remove("busy");
+    btn.textContent = label;
+    // Left disabled: the mesh takes a poll interval to reflect the new state,
+    // and re-arming instantly invites a second click on a stale label.
+    setTimeout(() => { btn.disabled = false; }, 5000);
+  }
+}
+
+function powerButton(host, isOnline, pc) {
+  const btn = document.createElement("button");
+  btn.className = "pwbtn" + (isOnline ? "" : " on");
+  const action = isOnline ? "off" : "on";
+  btn.textContent = action;
+
+  const self = cluster && cluster.hostname;
+  if (self && host.toLowerCase() === String(self).toLowerCase()) {
+    // The node serving this page will not act on its own machine — the server
+    // refuses it too, this is just the honest version of that refusal.
+    btn.disabled = true;
+    btn.title = `${host} is serving this dashboard; open another node's /mesh to control it`;
+    return btn;
+  }
+  if (!isOnline && !(pc.out_of_band || []).some(h => h.toLowerCase() === host.toLowerCase())) {
+    btn.disabled = true;
+    btn.title = `${host} is off and has no out-of-band BMC configured, so it cannot be reached`;
+    return btn;
+  }
+  btn.title = `${action === "on" ? "Power on" : "Power off"} ${host}`;
+  btn.onclick = () => sendPower(host, action, btn);
+  return btn;
+}
+
+// ---------------------------------------------------------------------------
+// Fleet power
+//
+// Samples come off the cluster snapshots the stream already pushes, so this
+// adds no polling and no new payload. One snapshot carries every host at a
+// single instant, and that is what makes stacking honest: the bands share a
+// real time grid instead of being interpolated onto one.
+//
+// The window is therefore since page load, not durable history — a reload
+// starts it over, and a halt leaves a gap, because halted snapshots collapse
+// to the newest one rather than queueing. Durable per-host kWh is the
+// energy store's job (see the energy package), not this graph's.
+// ---------------------------------------------------------------------------
+
+// Categorical slots in fixed order, stepped for a dark surface. A host takes a
+// slot on first sight and keeps it: colour follows the host, never its rank,
+// so one host dropping out cannot repaint the others.
+const POWER_COLORS = ["#3987e5", "#d95926", "#199e70", "#c98500", "#d55181", "#008300", "#9085e9", "#e66767"];
+const hostColor = new Map();
+function colorFor(host) {
+  if (!hostColor.has(host)) hostColor.set(host, POWER_COLORS[hostColor.size % POWER_COLORS.length]);
+  return hostColor.get(host);
+}
+
+const MAX_POWER_SAMPLES = 720;
+let powerSeries = [];       // [{t, sig, hosts:[{host, watts, source}]}]
+let powerHoverIdx = null;   // sample index under the pointer, or null
+
+// Node wattage is a whole-host measurement, but a multi-model host runs one
+// viiwork instance per model and every one of them reports the same BMC
+// reading. Summing the payload as it arrives would count that host once per
+// instance — three times over on the reference gb1 layout. So: key by
+// hostname, first reading wins, local before peers.
+function hostPower(c) {
+  const seen = new Map();
+  const take = (host, watts, avail, source) => {
+    if (!host || !avail || !(watts > 0) || seen.has(host)) return;
+    seen.set(host, { host, watts, source: source || "" });
+  };
+  if (c) {
+    take(c.hostname, c.local && c.local.power_watts, c.local && c.local.power_available,
+         c.local && c.local.power_source);
+    for (const p of (c.peers || [])) {
+      if (p.status !== "reachable") continue;
+      take(p.hostname || p.addr, p.power_watts, p.power_available, p.power_source);
+    }
+  }
+  // Sorted by host name, not by value: a fleet reads as gb0, gb1, gb2… and a
+  // row that keeps its place is one you can find again. Ranking by watts made
+  // the legend reorder itself under the cursor every time load shifted.
+  // Colours are unaffected — those follow the host, assigned on first sight.
+  return [...seen.values()].sort((a, b) => a.host.localeCompare(b.host, undefined, { numeric: true }));
+}
+
+// Rolling 24h energy, deduplicated the same way and for a stronger reason: the
+// durable store runs on exactly one instance per host, so the others report
+// nothing at all here rather than a second copy. Keying by host is what keeps
+// that true if a second instance is ever enabled by mistake.
+function hostEnergy(c) {
+  const seen = new Map();   // host -> {d1, d30}
+  const take = (host, d1, d30) => {
+    if (!host || seen.has(host)) return;
+    if (!(d1 > 0) && !(d30 > 0)) return;
+    seen.set(host, { d1: d1 || 0, d30: d30 || 0 });
+  };
+  if (c) {
+    take(c.hostname, c.local && c.local.energy_kwh_24h, c.local && c.local.energy_kwh_30d);
+    for (const p of (c.peers || [])) {
+      if (p.status !== "reachable") continue;
+      take(p.hostname || p.addr, p.energy_kwh_24h, p.energy_kwh_30d);
+    }
+  }
+  return seen;
+}
+
+// Distinct hosts in the mesh, whether or not they can read power. The
+// difference between this and hostPower() is what the "n of m reporting" line
+// exists to show: a host with no /dev/ipmi0 is invisible to the graph and
+// should not be silently mistaken for a host drawing nothing.
+function meshHosts(c) {
+  const set = new Set();
+  if (c) {
+    if (c.hostname) set.add(c.hostname);
+    for (const p of (c.peers || [])) {
+      if (p.status === "reachable") set.add(p.hostname || p.addr);
+    }
+  }
+  return set;
+}
+
+function recordPower(c) {
+  const hosts = hostPower(c);
+  if (!hosts.length) return;
+  const t = Date.now();
+  const sig = hosts.map(h => h.host + "=" + h.watts).join(",");
+  const n = powerSeries.length;
+  // Snapshots are pushed whenever anything in the payload changes, and most
+  // changes are not power. An unchanged reading extends the current plateau
+  // instead of adding a step for someone else's change — two points, its
+  // start and its moving end.
+  if (n >= 2 && powerSeries[n - 1].sig === sig && powerSeries[n - 2].sig === sig) {
+    powerSeries[n - 1].t = t;
+    return;
+  }
+  powerSeries.push({ t, sig, hosts });
+  if (powerSeries.length > MAX_POWER_SAMPLES) powerSeries.shift();
+}
+
+const fmtW = w => Math.round(w).toLocaleString();
+
+function renderPowerNumbers() {
+  const hosts = hostPower(cluster);
+  const all = meshHosts(cluster);
+  const energy = hostEnergy(cluster);
+  const total = hosts.reduce((a, h) => a + h.watts, 0);
+
+  // Live draw and the last 24 hours on one line: the watts answer "what is it
+  // doing now", the kWh "what has it been doing", and they are read together.
+  // Built as nodes rather than markup because both are numbers off the wire.
+  const el = $("powerNow");
+  el.textContent = "";
+  const unit = (t) => { const u = document.createElement("span"); u.className = "unit"; u.textContent = t; return u; };
+  el.appendChild(document.createTextNode(total > 0 ? fmtW(total) : "—"));
+  el.appendChild(unit("W"));
+
+  let kwh = 0, kwh30 = 0;
+  for (const v of energy.values()) { kwh += v.d1; kwh30 += v.d30; }
+  if (kwh > 0) {
+    el.appendChild(unit(" / "));
+    el.appendChild(document.createTextNode(kwh.toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 })));
+    // The window is named once, here. The legend rows beneath sit inside the
+    // same card and inherit it; repeating "(24h)" on every row is noise.
+    el.appendChild(unit("kWh (24h)"));
+  }
+  const energyHosts = energy.size;
+  let scope = all.size ? `${hosts.length}/${all.size} hosts reporting` : "";
+  if (scope && energyHosts && energyHosts !== hosts.length) {
+    scope += ` · kWh from ${energyHosts}`;
+  }
+  $("powerScope").textContent = scope;
+  // Not "live" any more: half the line is a cumulative total, and calling it
+  // live would misread the kWh as an instantaneous figure.
+  $("powerSub").textContent = hosts.length
+    ? "across the mesh"
+    : "no host is reporting power — needs /dev/ipmi0 on the container";
+
+  const month = $("powerMonth");
+  month.textContent = "";
+  if (kwh30 > 0) {
+    const b = document.createElement("b");
+    b.textContent = kwh30.toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+    month.appendChild(b);
+    month.appendChild(document.createTextNode(" kWh (30d)"));
+  }
+
+  // The legend is also the table view: every series named, with its current
+  // value, reachable without hovering the chart.
+  const body = $("powerLegend");
+  body.textContent = "";
+  $("powerLegendHead").hidden = !(kwh > 0 || kwh30 > 0);
+
+  // Three columns rather than one packed cell: two bare kWh figures side by
+  // side are indistinguishable, and labelling each inline repeats the window on
+  // every row. The header names them once.
+  const fmtKWh = v => v.toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+  const cell = (v, unitText) => {
+    const td = document.createElement("td");
+    td.className = "val";
+    // A host with the BMC but no energy store shows a dash rather than a zero:
+    // the store is opt-in per host, so its absence is a configuration fact,
+    // not a reading of nothing.
+    if (v === null) { td.textContent = "—"; td.classList.add("src"); return td; }
+    td.appendChild(document.createTextNode(v));
+    const u = document.createElement("span");
+    u.className = "u";
+    u.textContent = " " + unitText;
+    td.appendChild(u);
+    return td;
+  };
+
+  // Rows are the union of hosts reporting power and hosts this node may
+  // control. A powered-off host reports nothing and is absent from the mesh, so
+  // without the allowlist it would have no row at all — and no way back on.
+  const pc = powerControlInfo();
+  const onlineHosts = meshHosts(cluster);
+  const rows = hosts.map(h => ({ ...h, online: true }));
+  if (pc) {
+    for (const name of pc.hosts) {
+      if (rows.some(r => r.host.toLowerCase() === name.toLowerCase())) continue;
+      rows.push({ host: name, watts: null, source: "", online: onlineHosts.has(name) });
+    }
+    rows.sort((a, b) => a.host.localeCompare(b.host, undefined, { numeric: true }));
+  }
+
+  for (const h of rows) {
+    const e = energy.get(h.host);
+    const tr = document.createElement("tr");
+    const sw = document.createElement("td");
+    sw.className = "sw";
+    const dot = document.createElement("span");
+    dot.className = "swatch";
+    dot.style.background = h.watts === null ? "var(--dimmer)" : colorFor(h.host);
+    sw.appendChild(dot);
+    const name = document.createElement("td");
+    name.className = "name";
+    name.textContent = h.host;                       // hostnames are peer-supplied
+    const src = document.createElement("td");
+    src.className = "src";
+    src.textContent = h.source;
+    const val = h.watts === null ? cell(null) : cell(fmtW(h.watts), "W");
+    const c24 = (e && e.d1 > 0) ? cell(fmtKWh(e.d1), "kWh") : cell(null);
+    const c30 = (e && e.d30 > 0) ? cell(fmtKWh(e.d30), "kWh") : cell(null);
+    tr.append(sw, name, src, val, c24, c30);
+    if (pc) {
+      const td = document.createElement("td");
+      td.className = "pw";
+      if (pc.hosts.some(x => x.toLowerCase() === h.host.toLowerCase())) {
+        td.appendChild(powerButton(h.host, h.online, pc));
+      }
+      tr.append(td);
+    }
+    if (!h.online) tr.className = "offline";
+    body.appendChild(tr);
+  }
+}
+
+function niceMax(v) {
+  if (!(v > 0)) return 100;
+  const pow = Math.pow(10, Math.floor(Math.log10(v)));
+  for (const m of [1, 1.2, 1.5, 2, 2.5, 3, 4, 5, 6, 8]) {
+    if (v <= m * pow) return m * pow;
+  }
+  return 10 * pow;
+}
+
+const hhmmss = ms => new Date(ms).toLocaleTimeString();
+
+// Stacked area: each band is a host, the top edge is the fleet total. Bands
+// are washed rather than saturated so the total edge stays the loudest thing
+// on the chart, and the boundaries are cut with a 2px stroke in the card
+// colour — the gap does the separating, not an outline.
+function drawPower() {
+  const canvas = $("powerChart");
+  if (!canvas) return;
+  const cssW = canvas.clientWidth || 420, cssH = 140;
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = Math.round(cssW * dpr);
+  canvas.height = Math.round(cssH * dpr);
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, cssW, cssH);
+
+  const surface = getComputedStyle(document.body).getPropertyValue("--card").trim() || "#161b22";
+  const grid = "#21262d", ink = "#8b949e";
+  ctx.font = '10px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
+
+  const pad = { l: 44, r: 8, t: 8, b: 16 };
+  const W = cssW - pad.l - pad.r, H = cssH - pad.t - pad.b;
+
+  if (powerSeries.length < 2) {
+    ctx.fillStyle = ink;
+    ctx.fillText(powerSeries.length ? "accumulating…" : "no readings yet", pad.l, pad.t + 12);
+    return;
+  }
+
+  // Bands stack in host-name order, matching the legend beneath, so a row and
+  // its band are found in the same place. Colour is independent of this — a
+  // host keeps the slot it was given on first sight, so a host appearing or
+  // dropping out never repaints the others.
+  const present = new Set();
+  for (const s of powerSeries) for (const h of s.hosts) present.add(h.host);
+  const order = [...present].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+
+  const totals = powerSeries.map(s => s.hosts.reduce((a, h) => a + h.watts, 0));
+  const yMax = niceMax(Math.max(...totals));
+  const tMin = powerSeries[0].t, tMax = powerSeries[powerSeries.length - 1].t;
+  const span = Math.max(1, tMax - tMin);
+  const X = t => pad.l + ((t - tMin) / span) * W;
+  const Y = w => pad.t + H - (w / yMax) * H;
+
+  // Gridlines: hairline, solid, recessive — and the y ticks carry the values
+  // no band is directly labelled with.
+  ctx.lineWidth = 1;
+  ctx.textAlign = "right";
+  ctx.textBaseline = "middle";
+  for (const f of [0, 0.5, 1]) {
+    const y = Math.round(Y(yMax * f)) + 0.5;
+    ctx.strokeStyle = grid;
+    ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(pad.l + W, y); ctx.stroke();
+    ctx.fillStyle = ink;
+    ctx.fillText(fmtW(yMax * f) + (f === 1 ? " W" : ""), pad.l - 6, y);
+  }
+
+  // Cumulative stack, bottom band first.
+  const at = (s, host) => { const h = s.hosts.find(x => x.host === host); return h ? h.watts : 0; };
+  let lower = powerSeries.map(() => 0);
+  for (const host of order) {
+    const upper = powerSeries.map((s, i) => lower[i] + at(s, host));
+    ctx.beginPath();
+    powerSeries.forEach((s, i) => { const x = X(s.t), y = Y(upper[i]); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
+    for (let i = powerSeries.length - 1; i >= 0; i--) ctx.lineTo(X(powerSeries[i].t), Y(lower[i]));
+    ctx.closePath();
+    ctx.fillStyle = colorFor(host);
+    ctx.globalAlpha = 0.32;
+    ctx.fill();
+    ctx.globalAlpha = 1;
+
+    // The band's own top edge, full hue, 2px round-joined.
+    ctx.beginPath();
+    powerSeries.forEach((s, i) => { const x = X(s.t), y = Y(upper[i]); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
+    ctx.strokeStyle = surface; ctx.lineWidth = 4; ctx.lineJoin = "round"; ctx.lineCap = "round";
+    ctx.stroke();                       // 2px of surface either side = the gap
+    ctx.strokeStyle = colorFor(host); ctx.lineWidth = 2;
+    ctx.stroke();
+    lower = upper;
+  }
+
+  ctx.textAlign = "left";
+  ctx.textBaseline = "alphabetic";
+  ctx.fillStyle = ink;
+  ctx.fillText(hhmmss(tMin), pad.l, cssH - 4);
+  ctx.textAlign = "right";
+  ctx.fillText(hhmmss(tMax), pad.l + W, cssH - 4);
+
+  // Crosshair: the reader aims at a time, not at a 2px line.
+  if (powerHoverIdx !== null && powerSeries[powerHoverIdx]) {
+    const x = Math.round(X(powerSeries[powerHoverIdx].t)) + 0.5;
+    ctx.strokeStyle = ink; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(x, pad.t); ctx.lineTo(x, pad.t + H); ctx.stroke();
+  }
+}
+
+// One tooltip, every series: the readout lists each host at that time plus the
+// fleet total, so the pointer never has to land on a band to get a value.
+function powerTooltip(ev) {
+  const canvas = $("powerChart"), tip = $("powerTip");
+  if (powerSeries.length < 2) return;
+  const r = canvas.getBoundingClientRect();
+  const pad = { l: 44, r: 8 };
+  const W = r.width - pad.l - pad.r;
+  const tMin = powerSeries[0].t, tMax = powerSeries[powerSeries.length - 1].t;
+  const frac = Math.max(0, Math.min(1, (ev.clientX - r.left - pad.l) / Math.max(1, W)));
+  const want = tMin + frac * Math.max(1, tMax - tMin);
+
+  let best = 0;
+  for (let i = 1; i < powerSeries.length; i++) {
+    if (Math.abs(powerSeries[i].t - want) < Math.abs(powerSeries[best].t - want)) best = i;
+  }
+  powerHoverIdx = best;
+  drawPower();
+
+  const s = powerSeries[best];
+  tip.textContent = "";
+  const when = document.createElement("div");
+  when.className = "when";
+  when.textContent = hhmmss(s.t);
+  tip.appendChild(when);
+  for (const h of s.hosts) {
+    const row = document.createElement("div");
+    row.className = "r";
+    const dot = document.createElement("span");
+    dot.className = "swatch";
+    dot.style.background = colorFor(h.host);
+    const n = document.createElement("span");
+    n.className = "n";
+    n.textContent = h.host;
+    const v = document.createElement("span");
+    v.className = "v";
+    v.textContent = fmtW(h.watts) + " W";
+    row.append(dot, n, v);
+    tip.appendChild(row);
+  }
+  if (s.hosts.length > 1) {
+    const row = document.createElement("div");
+    row.className = "r total";
+    const n = document.createElement("span");
+    n.className = "n";
+    n.textContent = "fleet";
+    const v = document.createElement("span");
+    v.className = "v";
+    v.textContent = fmtW(s.hosts.reduce((a, h) => a + h.watts, 0)) + " W";
+    row.append(n, v);
+    tip.appendChild(row);
+  }
+
+  tip.hidden = false;
+  const wrap = canvas.parentElement.getBoundingClientRect();
+  const left = ev.clientX - wrap.left + 12;
+  tip.style.left = Math.min(left, wrap.width - tip.offsetWidth - 6) + "px";
+  tip.style.top = Math.max(4, ev.clientY - wrap.top - tip.offsetHeight - 10) + "px";
+}
+
+// ---------------------------------------------------------------------------
+// Host RAM film strip
+//
+// One small frame per host under the power panel: same time window in every
+// frame, so the strip is read across rather than one chart at a time. Each
+// frame's y axis is 0..that host's total, so height means memory pressure and
+// hosts with different amounts of RAM stay comparable.
+//
+// Host memory reaches the stream coarsened (see hostMemDeadband in
+// meshactivity.go): an exact figure moves every second and would make the
+// server push a full snapshot that often. The strip is sized so a bucket is
+// under a pixel, which is why it can be coarsened without the reader noticing.
+// ---------------------------------------------------------------------------
+const MAX_MEM_SAMPLES = 240;
+const memSeries = new Map();   // host -> [{t, used, total}]
+
+// Same whole-host reasoning as hostPower(): several viiwork instances on one
+// box all report that box's RAM, so key by hostname and take one.
+function hostMem(c) {
+  const seen = new Map();
+  const take = (host, used, total) => {
+    if (!host || !(total > 0) || !(used > 0) || seen.has(host)) return;
+    seen.set(host, { host, used, total });
+  };
+  if (c) {
+    take(c.hostname, c.local && c.local.host_mem_used_mb, c.local && c.local.host_mem_total_mb);
+    for (const p of (c.peers || [])) {
+      if (p.status !== "reachable") continue;
+      take(p.hostname || p.addr, p.host_mem_used_mb, p.host_mem_total_mb);
+    }
+  }
+  return [...seen.values()].sort((a, b) => a.host.localeCompare(b.host, undefined, { numeric: true }));
+}
+
+function recordMem(c) {
+  const t = Date.now();
+  for (const h of hostMem(c)) {
+    let a = memSeries.get(h.host);
+    if (!a) { a = []; memSeries.set(h.host, a); }
+    const last = a[a.length - 1];
+    // Coarsened upstream, so an unchanged value is genuinely "no visible
+    // movement" rather than a lost reading: extend the plateau.
+    if (a.length >= 2 && last.used === h.used && a[a.length - 2].used === h.used) {
+      last.t = t;
+    } else {
+      a.push({ t, used: h.used, total: h.total });
+      if (a.length > MAX_MEM_SAMPLES) a.shift();
+    }
+  }
+}
+
+function renderMemStrip() {
+  const hosts = hostMem(cluster);
+  const wrap = $("memStripWrap"), grid = $("memStrip");
+  wrap.hidden = hosts.length === 0;
+  if (!hosts.length) return;
+
+  // Rebuild only when the host set changes; redrawing canvases every snapshot
+  // is cheap, recreating DOM is not.
+  const key = hosts.map(h => h.host).join("|");
+  if (grid.dataset.key !== key) {
+    grid.dataset.key = key;
+    grid.textContent = "";
+    for (const h of hosts) {
+      const f = document.createElement("div");
+      f.className = "frame";
+      const lbl = document.createElement("div");
+      lbl.className = "lbl";
+      const name = document.createElement("span");
+      name.className = "h";
+      name.textContent = h.host;
+      const pct = document.createElement("span");
+      pct.className = "p";
+      lbl.append(name, pct);
+      const cv = document.createElement("canvas");
+      f.append(lbl, cv);
+      f.dataset.host = h.host;
+      grid.appendChild(f);
+    }
+  }
+
+  // One time window across every frame, so the strip reads left to right as a
+  // single span rather than as N charts with N different axes.
+  let tMin = Infinity, tMax = -Infinity;
+  for (const h of hosts) {
+    for (const s of (memSeries.get(h.host) || [])) {
+      if (s.t < tMin) tMin = s.t;
+      if (s.t > tMax) tMax = s.t;
+    }
+  }
+
+  for (const f of grid.children) {
+    const h = hosts.find(x => x.host === f.dataset.host);
+    if (!h) continue;
+    f.querySelector(".p").textContent = Math.round((h.used / h.total) * 100) + "%";
+    f.title = `${h.host} — ${fmtGB(h.used)} of ${fmtGB(h.total)} in use`;
+    drawMemSpark(f.querySelector("canvas"), h, tMin, tMax);
+  }
+}
+
+function drawMemSpark(canvas, h, tMin, tMax) {
+  const cssW = canvas.clientWidth || 92, cssH = 26;
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = Math.round(cssW * dpr);
+  canvas.height = Math.round(cssH * dpr);
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, cssW, cssH);
+
+  // A hairline floor, so an empty or nearly-empty frame still reads as a chart
+  // rather than as a rendering failure.
+  ctx.strokeStyle = "#21262d";
+  ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(0, cssH - 0.5); ctx.lineTo(cssW, cssH - 0.5); ctx.stroke();
+
+  const series = memSeries.get(h.host) || [];
+  if (!series.length) return;
+
+  const Y = mb => cssH - Math.max(0, Math.min(1, mb / h.total)) * (cssH - 2) - 1;
+  const col = colorFor(h.host);
+
+  // A frame with one reading is drawn flat across the window at that level
+  // rather than left blank. The level is the thing the strip is for, and it is
+  // the state a host stays in whenever memory is not moving -- which, since the
+  // stream coarsens this field, is most of the time. Waiting for a second
+  // sample would leave a host that never changes looking unmonitored.
+  const flat = series.length < 2 || !(tMax > tMin);
+  const pts = flat
+    ? [{ x: 0, y: Y(series[series.length - 1].used) }, { x: cssW, y: Y(series[series.length - 1].used) }]
+    : series.map(s => ({ x: ((s.t - tMin) / (tMax - tMin)) * cssW, y: Y(s.used) }));
+
+  const line = new Path2D();
+  pts.forEach((p, i) => (i ? line.lineTo(p.x, p.y) : line.moveTo(p.x, p.y)));
+
+  const area = new Path2D(line);
+  area.lineTo(pts[pts.length - 1].x, cssH);
+  area.lineTo(pts[0].x, cssH);
+  area.closePath();
+
+  ctx.fillStyle = col;
+  ctx.globalAlpha = 0.14;
+  ctx.fill(area);
+  ctx.globalAlpha = 0.65;
+  ctx.strokeStyle = col;
+  ctx.lineWidth = 1.5;
+  ctx.lineJoin = "round";
+  ctx.stroke(line);
+  ctx.globalAlpha = 1;
+}
+
+function wirePowerChart() {
+  const canvas = $("powerChart");
+  if (!canvas) return;
+  canvas.addEventListener("pointermove", powerTooltip);
+  canvas.addEventListener("pointerleave", () => {
+    powerHoverIdx = null;
+    $("powerTip").hidden = true;
+    drawPower();
+  });
+  addEventListener("resize", () => { drawPower(); renderMemStrip(); });
+}
+
+// ---------------------------------------------------------------------------
 // Data: cluster snapshots arrive pushed, not polled
 // ---------------------------------------------------------------------------
 function applyCluster(c) {
   cluster = c;
+  syncPromptCap(c);
   const peers = (cluster.peers || []);
   const up = peers.filter(p => p.status === "reachable").length;
   $("scope").textContent =
     `${esc(cluster.hostname || "?")} · ${peers.length ? `${up}/${peers.length} peers reachable` : "no peers"} · v${esc(cluster.version || "?")}`;
   renderModels();
   renderBackends();
+  // Power last: it reads the snapshot the same way the tables do, and a halt
+  // gates it here rather than in the stream handler, so a frozen view stops
+  // accumulating instead of drawing a straight line across the pause.
+  recordPower(c);
+  renderPowerNumbers();
+  drawPower();
+  recordMem(c);
+  renderMemStrip();
+  renderTotals();
 }
 
 // ---------------------------------------------------------------------------
@@ -359,14 +1316,54 @@ function connectStream() {
   // server suppresses identical ones so an idle mesh is silent.
   const es = new EventSource("/v1/mesh/stream");
 
+  // A reconnect rebuilds the in-flight set rather than carrying it across.
+  //
+  // In-flight is reconstructed from start/done pairs, so anything that finished
+  // while the connection was down leaves a start with no done — a row that ages
+  // in red forever. That is exactly what a slept laptop or a throttled
+  // background tab produces. The server replays its ring when the stream opens,
+  // so clearing here is not a loss: whatever is genuinely still running is
+  // re-added within milliseconds by the replay, and only the phantoms stay
+  // gone. A request older than the node's ring is dropped and not re-added,
+  // which under-reports rather than inventing work — and the Backends table
+  // keeps showing the true count either way.
+  es.onopen = () => {
+    inflight.clear();
+    renderInflight();
+  };
+
   es.addEventListener("cluster", ev => {
-    try { applyCluster(JSON.parse(ev.data)); } catch {}
+    let c;
+    try { c = JSON.parse(ev.data); } catch { return; }
+    // Snapshots are whole state, not deltas, so a halt keeps only the newest
+    // one rather than a queue of them.
+    if (halted) { pendingCluster = c; updateHaltLabel(); return; }
+    applyCluster(c);
   });
 
   es.addEventListener("activity", ev => {
     let e;
     try { e = JSON.parse(ev.data); } catch { return; }
+    if (halted) {
+      pendingEvents.push(e);
+      if (pendingEvents.length > MAX_PENDING) pendingEvents.shift();
+      updateHaltLabel();
+      return;
+    }
+    applyActivity(e);
+  });
 
+  es.onerror = () => {
+    // EventSource reconnects on its own; surface it without tearing anything
+    // down. Assigning rather than appending: onerror can fire repeatedly while
+    // a network is down, and appending grew the line once per attempt.
+    $("scope").textContent = "stream reconnecting…";
+  };
+}
+
+// applyActivity folds one event into the view. Split out of the stream handler
+// so a halt can queue events and replay them here, unchanged, on resume.
+function applyActivity(e) {
     const host = e.hostname || e.addr || "local";
     if (e.type === "request" && e.rid) {
       const key = (e.node_id || host) + "#" + e.rid;
@@ -386,17 +1383,58 @@ function connectStream() {
         });
       }
       renderInflight();
+      recordPrompt(e, host);
     }
+
+    // State above is keyed, so replaying it is free. The feed is not: dedupe
+    // before appending, or a reconnect repaints every row it already shows.
+    const seenKey = (e.node_id || host) + "#" + (e.rid || 0) + "#" + (e.t || 0) + "#" + (e.message || "");
+    if (seenEvents.has(seenKey)) return;
+    seenEvents.add(seenKey);
+    seenOrder.push(seenKey);
+    if (seenOrder.length > MAX_SEEN) seenEvents.delete(seenOrder.shift());
 
     activityRows.unshift({ t: e.t, host, message: e.message || "" });
     if (activityRows.length > MAX_ACTIVITY) activityRows.length = MAX_ACTIVITY;
     renderActivity();
-  });
+}
 
-  es.onerror = () => {
-    // EventSource reconnects on its own; surface it without tearing anything down.
-    $("scope").textContent += " · stream reconnecting…";
-  };
+// syncPromptCap adopts the largest prompt-history capacity any node reports,
+// and trims the list if the number shrank. Taking the max rather than the local
+// node's own value matters because the list is cluster-wide: a peer configured
+// deeper than this node can still answer lookups for rows this node would
+// otherwise have dropped.
+function syncPromptCap(c) {
+  if (!c) return;
+  let cap = c.local?.prompt_history || 0;
+  for (const p of (c.peers || [])) cap = Math.max(cap, p.prompt_history || 0);
+  if (!cap || cap === maxPrompts) return;
+  maxPrompts = cap;
+  while (promptOrder.length > maxPrompts) promptHistory.delete(promptOrder.shift());
+  renderPrompts();
+}
+
+// ---------------------------------------------------------------------------
+// Halt: freeze the view for reading, without dropping what arrives meanwhile
+// ---------------------------------------------------------------------------
+function updateHaltLabel() {
+  const n = pendingEvents.length + (pendingCluster ? 1 : 0);
+  $("halt").textContent = halted ? (n ? `resume (${n})` : "resume") : "halt";
+}
+
+function setHalted(on) {
+  halted = on;
+  $("halt").classList.toggle("on", on);
+  document.body.classList.toggle("halted", on);
+  if (!on) {
+    // Drain in arrival order, so the reconstructed in-flight set lands in the
+    // same state it would have reached had the halt never happened.
+    const queued = pendingEvents;
+    pendingEvents = [];
+    for (const e of queued) applyActivity(e);
+    if (pendingCluster) { applyCluster(pendingCluster); pendingCluster = null; }
+  }
+  updateHaltLabel();
 }
 
 // ---------------------------------------------------------------------------
@@ -408,9 +1446,22 @@ $("groupToggle").querySelectorAll("button").forEach(b => b.onclick = () => {
   renderBackends();
 });
 
+$("halt").onclick = () => setHalted(!halted);
+
+// A one-key toggle earns its place here: the reason to halt is usually that a
+// row is about to move out from under the pointer.
+document.addEventListener("keydown", ev => {
+  if (ev.key !== "h" || ev.metaKey || ev.ctrlKey || ev.altKey) return;
+  const el = document.activeElement;
+  if (el && /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName)) return;
+  setHalted(!halted);
+});
+
+wirePowerChart();
 connectStream();
-// In-flight ages must tick even when no events arrive.
-setInterval(renderInflight, 200);
+// In-flight ages must tick even when no events arrive — but not while halted,
+// since a running counter is exactly the movement halt exists to stop.
+setInterval(() => { if (!halted) renderInflight(); }, 200);
 </script>
 </body>
 </html>

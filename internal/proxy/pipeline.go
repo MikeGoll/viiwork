@@ -107,6 +107,7 @@ func (h *Handler) handlePipeline(w http.ResponseWriter, r *http.Request, p *pipe
 	rid := activity.NewRequestID()
 	if h.activity != nil {
 		h.activity.EmitRequestTask(rid, -1, taskID, "[pipeline] %s started", modelName)
+		h.activity.StorePrompt(rid, modelName, sourceText)
 	}
 
 	start := time.Now()
@@ -142,6 +143,9 @@ func (h *Handler) handlePipeline(w http.ResponseWriter, r *http.Request, p *pipe
 			parts = append(parts, fmt.Sprintf("%s:%s", st.Name, st.Duration.Round(time.Millisecond)))
 		}
 		h.activity.EmitRequestTask(rid, -1, taskID, "[pipeline] %s done (%s) [%s]", modelName, elapsed.Round(time.Millisecond), strings.Join(parts, ","))
+		// A pipeline assembles its own response below rather than proxying one,
+		// so there is no stream to capture — the final text is already in hand.
+		h.activity.StoreOutput(rid, modelName, result.Content, elapsed.Milliseconds())
 	}
 
 	// Pipeline headers

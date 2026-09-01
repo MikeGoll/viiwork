@@ -2,6 +2,7 @@
 package peer
 
 import (
+	"github.com/janit/viiwork/meshapi"
 	"sync"
 	"sync/atomic"
 )
@@ -18,61 +19,20 @@ func (s PeerStatus) String() string {
 	return "unreachable"
 }
 
-type StatusResponse struct {
-	NodeID          string        `json:"node_id"`
-	Hostname        string        `json:"hostname,omitempty"`
-	ListenAddr      string        `json:"listen_addr,omitempty"`
-	Models          []string      `json:"models"`
-	Backends        []BackendInfo `json:"backends"`
-	TotalInFlight   int64         `json:"total_in_flight"`
-	HealthyBackends int           `json:"healthy_backends"`
-	TotalBackends   int           `json:"total_backends"`
-	PowerWatts      float64       `json:"power_watts"`
-	PowerAvailable  bool          `json:"power_available"`
-	CostAvailable  bool               `json:"cost_available"`
-	CostEURPerHour float64            `json:"cost_eur_per_hour,omitempty"`
-	CostTodayEUR   float64            `json:"cost_today_eur,omitempty"`
-	CostBreakdown  *CostBreakdownJSON `json:"cost_breakdown,omitempty"`
-	// GPUs lets any node render GPU load for every host in the mesh, not just
-	// its own. omitempty keeps this compatible with nodes that predate it.
-	GPUs []GPUInfo `json:"gpus,omitempty"`
-}
-
-type BackendInfo struct {
-	GPUID    int    `json:"gpu_id"`
-	GPUIDs   []int  `json:"gpu_ids,omitempty"` // populated in tensor-split mode
-	Model    string `json:"model"`
-	Status   string `json:"status"`
-	InFlight int64  `json:"in_flight"`
-	// Everything below is additive and omitempty: a node running an older
-	// build simply omits these and the mesh view degrades to blanks for that
-	// host rather than breaking. Without them a peer's backends arrive with
-	// no RSS or context figures, which is most of what the mesh view shows.
-	RSSMB      int64 `json:"rss_mb,omitempty"`
-	SlotCtx    int64 `json:"slot_ctx,omitempty"`
-	SlotCount  int   `json:"slot_count,omitempty"`
-	SlotActive int   `json:"slot_active,omitempty"`
-	TokDecoded int64 `json:"tok_decoded,omitempty"`
-	TokRemain  int64 `json:"tok_remain,omitempty"`
-}
-
-// GPUInfo is a single GPU's live utilisation, propagated across the mesh so any
-// node can render GPU load for every host. Locally this comes from the gpu
-// collector; for peers it arrives on the /v1/status poll.
-type GPUInfo struct {
-	GPUID       int     `json:"gpu_id"`
-	Util        float64 `json:"util"`
-	VRAMUsedMB  float64 `json:"vram_used_mb"`
-	VRAMTotalMB float64 `json:"vram_total_mb"`
-}
-
-type CostBreakdownJSON struct {
-	SpotCentsKWh     float64 `json:"spot_cents_kwh"`
-	TransferCentsKWh float64 `json:"transfer_cents_kwh"`
-	TaxCentsKWh      float64 `json:"tax_cents_kwh"`
-	VATPercent       float64 `json:"vat_percent"`
-	TotalCentsKWh    float64 `json:"total_cents_kwh"`
-}
+// The wire types below live in meshapi, the public definition of the mesh
+// protocol, and are aliased here so this package keeps its familiar names
+// while there is exactly one definition of every field that crosses a host
+// boundary. Aliases rather than wrappers: peer.StatusResponse and
+// meshapi.StatusResponse are the same type, so a second implementation of the
+// protocol can hand values straight to code written against either name.
+//
+// See meshapi's package doc for the compatibility rules these carry.
+type (
+	StatusResponse    = meshapi.StatusResponse
+	BackendInfo       = meshapi.BackendInfo
+	GPUInfo           = meshapi.GPUInfo
+	CostBreakdownJSON = meshapi.CostBreakdownJSON
+)
 
 type PeerState struct {
 	Addr string
@@ -96,10 +56,16 @@ type PeerState struct {
 	totalBackends   int
 	powerWatts      float64
 	powerAvailable  bool
+	powerSource     string
+	hostMemTotalMB  int64
+	hostMemUsedMB   int64
+	energyKWh24h    float64
+	energyKWh30d    float64
 	costAvailable  bool
 	costEURPerHour float64
 	costTodayEUR   float64
 	gpus           []GPUInfo
+	promptHistory  int
 }
 
 // GPUs returns a copy of the peer's last reported GPU utilisation.
@@ -129,10 +95,16 @@ func (p *PeerState) Update(resp StatusResponse) {
 	p.totalBackends = resp.TotalBackends
 	p.powerWatts = resp.PowerWatts
 	p.powerAvailable = resp.PowerAvailable
+	p.powerSource = resp.PowerSource
+	p.hostMemTotalMB = resp.HostMemTotalMB
+	p.hostMemUsedMB = resp.HostMemUsedMB
+	p.energyKWh24h = resp.EnergyKWh24h
+	p.energyKWh30d = resp.EnergyKWh30d
 	p.costAvailable = resp.CostAvailable
 	p.costEURPerHour = resp.CostEURPerHour
 	p.costTodayEUR = resp.CostTodayEUR
 	p.gpus = append(p.gpus[:0], resp.GPUs...)
+	p.promptHistory = resp.PromptHistory
 }
 
 func (p *PeerState) MarkUnreachable() {
@@ -144,6 +116,11 @@ func (p *PeerState) MarkUnreachable() {
 	p.gpus = nil
 	p.powerWatts = 0
 	p.powerAvailable = false
+	p.powerSource = ""
+	p.hostMemTotalMB = 0
+	p.hostMemUsedMB = 0
+	p.energyKWh24h = 0
+	p.energyKWh30d = 0
 	p.costAvailable = false
 	p.costEURPerHour = 0
 	p.costTodayEUR = 0
@@ -196,11 +173,33 @@ func (p *PeerState) DecLocalInFlight() { p.localInFlight.Add(-1) }
 func (p *PeerState) LocalInFlight() int64 { return p.localInFlight.Load() }
 func (p *PeerState) HealthyBackends() int { p.mu.RLock(); defer p.mu.RUnlock(); return p.healthyBackends }
 
+func (p *PeerState) PromptHistory() int { p.mu.RLock(); defer p.mu.RUnlock(); return p.promptHistory }
+
 func (p *PeerState) PowerWatts() float64 {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return p.powerWatts
 }
+
+func (p *PeerState) EnergyKWh24h() float64 {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.energyKWh24h
+}
+
+func (p *PeerState) EnergyKWh30d() float64 {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.energyKWh30d
+}
+
+func (p *PeerState) HostMem() (totalMB, usedMB int64) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.hostMemTotalMB, p.hostMemUsedMB
+}
+
+func (p *PeerState) PowerSource() string { p.mu.RLock(); defer p.mu.RUnlock(); return p.powerSource }
 
 func (p *PeerState) PowerAvailable() bool {
 	p.mu.RLock()
