@@ -51,6 +51,7 @@ ${SED_INPLACE} "s#^([[:space:]]*path:[[:space:]]*).*#\1${SAFE_PATH}#" "$CONFIG_F
 # Verify the change
 if grep -q "^ *path:.*${NEW_PATH}" "$CONFIG_FILE"; then
     echo "SUCCESS: Path updated in '$CONFIG_FILE'"
+    vim "$CONFIG_FILE" #Open the viiwork config to update the llama-server config
     echo "Restarting docker with 'docker compose down && docker compose up -d'"
     sudo docker compose down && sudo docker compose up -d
 else
