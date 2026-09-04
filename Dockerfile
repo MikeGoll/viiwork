@@ -71,6 +71,29 @@ RUN set -eux; \
     fi; \
     echo "OK: gfx906 FP8 block disabled (stable-track sed)."
 
+# b10803's common/speculative.cpp has a copy-paste bug in the dflash
+# gap-fill path: it references `features_buf` — a member that only
+# exists on the eagle3 draft class — so llama-common fails with
+# "features_buf was not declared in this scope". Insert a local scratch
+# vector right before the sole use site (the buffer is assigned and
+# consumed inside the same block), keeping the patch loud if the fork's
+# layout ever changes.
+RUN set -eux; \
+    f=common/speculative.cpp; \
+    n=$(grep -cF 'features_buf.assign((size_t) n_fill * n_embd_enc, 0.0f);' "$f" || true); \
+    if [ "$n" -ne 1 ]; then \
+        echo "############################################################"; \
+        echo "FATAL: dflash gap-fill anchor found $n times in $f (expected 1) -- fork layout changed?"; \
+        grep -n 'features_buf' "$f" || true; \
+        echo "############################################################"; \
+        exit 1; \
+    fi; \
+    sed -i 's|features_buf\.assign((size_t) n_fill \* n_embd_enc, 0\.0f);|std::vector<float> features_buf; // build-time fix: undeclared in fork b10803\n                    features_buf.assign((size_t) n_fill * n_embd_enc, 0.0f);|' "$f"; \
+    if ! grep -qF 'std::vector<float> features_buf; // build-time fix' "$f"; then \
+        echo "FATAL: dflash features_buf patch did not apply."; exit 1; \
+    fi; \
+    echo "OK: dflash features_buf scratch declared."
+
 # BUILD_SHARED_LIBS=OFF -> self-contained static binaries, no .so shuffling
 # in the runtime stage (the fragile find -name '*.so*' step is dropped).
 # GPU_TARGETS + AMDGPU_TARGETS -> newer CMake prefers the former, this
