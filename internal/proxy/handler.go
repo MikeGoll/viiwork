@@ -17,7 +17,9 @@ import (
 	"github.com/janit/viiwork/internal/gpu"
 	"github.com/janit/viiwork/internal/logging"
 	"github.com/janit/viiwork/internal/peer"
+	"github.com/janit/viiwork/meshapi"
 	"github.com/janit/viiwork/internal/pipeline"
+	"github.com/janit/viiwork/internal/power"
 	"github.com/janit/viiwork/web"
 )
 
@@ -37,6 +39,8 @@ type Handler struct {
 	pipelineResolver   *PipelineResolver
 	pipelineExecutor   *pipeline.Executor
 	evictOnHardFailure bool
+	cors               *CORS
+	powerCtl           *power.Controller
 }
 
 // NewHandler creates a standalone handler (no mesh). Preserved for backward compatibility.
@@ -54,7 +58,7 @@ func NewMeshHandler(bal *balancer.Balancer, reg *peer.Registry, latencyWindow ti
 		balancer:       bal,
 		registry:       reg,
 		latencyWindow:  latencyWindow,
-		statusHandler:  NewStatusHandler(reg.NodeID(), reg.LocalModel(), reg.Backends(), reg.Power(), reg.Cost(), StatusLocation{Hostname: reg.Hostname(), ListenAddr: reg.ListenAddr()}),
+		statusHandler:  NewStatusHandler(reg.NodeID(), reg.LocalModel(), reg.Backends(), reg.Power(), reg.Cost(), StatusLocation{Hostname: reg.Hostname(), ListenAddr: reg.ListenAddr(), PromptHistory: reg.PromptHistory()}),
 		clusterHandler: NewClusterHandler(reg),
 	}
 }
@@ -64,6 +68,12 @@ func (h *Handler) SetMetrics(history *gpu.History, broadcaster *gpu.Broadcaster,
 	h.metricsBroadcaster = broadcaster
 	h.metricsAvailable = available
 }
+
+// SetPowerControl attaches the chassis power controller. Left unset, both
+// power endpoints answer 503 rather than 404: the routes exist on every build,
+// so a consumer can tell "this node will not do that" from "this node is too
+// old to know what you mean".
+func (h *Handler) SetPowerControl(c *power.Controller) { h.powerCtl = c }
 
 func (h *Handler) SetActivity(actLog *activity.Log) {
 	h.activity = actLog
@@ -76,6 +86,14 @@ func (h *Handler) SetEvictOnHardFailure(enabled bool) {
 	h.evictOnHardFailure = enabled
 }
 
+// SetCORS enables cross-origin access for the listed origins. Leave it unset
+// and no CORS header is ever sent, which is the pre-existing behaviour: the
+// API is then reachable only from a server-side caller or a page served by the
+// node itself.
+func (h *Handler) SetCORS(c *CORS) {
+	h.cors = c
+}
+
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer func() {
 		if rv := recover(); rv != nil {
@@ -85,6 +103,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "internal server error", http.StatusInternalServerError)
 		}
 	}()
+
+	// CORS runs before routing for two reasons: the allow header has to land on
+	// every response including the SSE streams and the error paths, and a
+	// preflight has to be answered here or not at all — the switch below
+	// matches only GET and POST, so an OPTIONS would fall through to 404.
+	if h.cors != nil && h.cors.apply(w, r) {
+		return
+	}
 
 	switch {
 	case r.URL.Path == "/health" && r.Method == "GET":
@@ -111,6 +137,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Write(web.MeshHTML)
 	case r.URL.Path == "/v1/mesh/stream" && r.Method == "GET":
 		h.handleMeshStream(w, r)
+	case r.URL.Path == "/prompt" && r.Method == "GET":
+		// A full page rather than the dashboard's old in-place modal: the point
+		// is that each row is a real link, so a middle- or cmd-click opens one
+		// in a background tab and a batch can be triaged side by side.
+		w.Header().Set("Content-Type", "text/html")
+		w.Write(web.PromptHTML)
 	case r.URL.Path == "/chat" && r.Method == "GET":
 		w.Header().Set("Content-Type", "text/html")
 		w.Write(web.ChatHTML)
@@ -128,6 +160,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleActivity(w, r)
 	case r.URL.Path == "/v1/activity/stream" && r.Method == "GET":
 		h.handleActivityStream(w, r)
+	case r.URL.Path == "/v1/prompts" && r.Method == "GET":
+		h.handlePromptLookup(w, r)
+	case r.URL.Path == "/v1/mesh/prompt" && r.Method == "GET":
+		h.handleMeshPrompt(w, r)
+	case r.URL.Path == "/v1/power" && r.Method == "POST":
+		h.handlePower(w, r)
+	case r.URL.Path == "/v1/mesh/power" && r.Method == "POST":
+		h.handleMeshPower(w, r)
 	case r.URL.Path == "/v1/embeddings" && r.Method == "POST":
 		h.handleProxy(w, r)
 	default:
@@ -235,6 +275,33 @@ var (
 	escapePrefix = []byte(`\u`)
 )
 
+// promptExtract pulls just enough of a chat/completions body to recover the
+// user-facing prompt text for the dashboard's prompt history. It mirrors the
+// same last-user-message convention handlePipeline already uses for
+// sourceText, plus the legacy /v1/completions "prompt" string field.
+type promptExtract struct {
+	Messages []struct {
+		Role    string `json:"role"`
+		Content string `json:"content"`
+	} `json:"messages"`
+	Prompt string `json:"prompt"`
+}
+
+// extractPromptText is best-effort: a body with multimodal content parts (an
+// array instead of a plain string) fails to decode into Content for that one
+// message, same as elsewhere in this file, and simply yields no text there
+// rather than an error the caller has to handle.
+func extractPromptText(body []byte) string {
+	var p promptExtract
+	json.Unmarshal(body, &p)
+	for i := len(p.Messages) - 1; i >= 0; i-- {
+		if p.Messages[i].Role == "user" && p.Messages[i].Content != "" {
+			return p.Messages[i].Content
+		}
+	}
+	return p.Prompt
+}
+
 // extractModelFast returns the value of a top-level "model" key without parsing
 // the rest of the body, reporting false when it cannot do so safely.
 //
@@ -335,14 +402,12 @@ func (h *Handler) handleProxy(w http.ResponseWriter, r *http.Request) {
 		Think *bool  `json:"think"`
 		Task  string `json:"task"`
 	}
-
 	if model, ok := extractModelFast(bodyBytes); ok {
 		// Fast path proved think/task absent, so the zero values are correct.
 		reqBody.Model = model
 	} else {
 		json.Unmarshal(bodyBytes, &reqBody)
 	}
-
 	// Original
 	//thinkDisabled := reqBody.Think == nil || !*reqBody.Think
 
@@ -458,12 +523,24 @@ func (h *Handler) handleProxy(w http.ResponseWriter, r *http.Request) {
 	model := reqBody.Model
 	start := time.Now()
 	rid := activity.NewRequestID()
+	if h.activity != nil {
+		h.activity.StorePrompt(rid, model, extractPromptText(bodyBytes))
+		// Capture the response on its way back to the client so the dashboard
+		// can show what came out, not only what went in. Wrapping here covers
+		// both branches below at once, local and peer-routed alike, and the
+		// deferred store runs after whichever one ran has finished writing.
+		var capw *captureWriter
+		w, capw = newCaptureWriter(w)
+		defer func() {
+			h.activity.StoreOutput(rid, model, capw.Output(), time.Since(start).Milliseconds())
+		}()
+	}
 	if route.Type == peer.RouteLocal {
 		if logging.DebugEnabled() {
 			log.Printf("[debug] %s → gpu-%d (in_flight=%d)", model, route.Backend.GPUID, route.Backend.InFlight())
 		}
 		if h.activity != nil {
-			h.activity.EmitRequestTask(rid, route.Backend.GPUID, taskID, "%s → %s", model, route.Backend.Label())
+			h.activity.EmitRequestTask(rid, route.Backend.GPUID, taskID, "%s", meshapi.RequestStarted(model, route.Backend.Label()))
 		}
 		aborted := proxyRequest(w, r, route.Backend, h.latencyWindow, thinkDisabled, h.evictOnHardFailure)
 		elapsed := time.Since(start).Round(time.Millisecond)
@@ -472,9 +549,9 @@ func (h *Handler) handleProxy(w http.ResponseWriter, r *http.Request) {
 		}
 		if h.activity != nil {
 			if aborted {
-				h.activity.EmitRequestTask(rid, route.Backend.GPUID, taskID, "%s → %s aborted by client (%s)", model, route.Backend.Label(), elapsed)
+				h.activity.EmitRequestTask(rid, route.Backend.GPUID, taskID, "%s", meshapi.RequestAborted(model, route.Backend.Label(), elapsed))
 			} else {
-				h.activity.EmitRequestTask(rid, route.Backend.GPUID, taskID, "%s → %s done (%s)", model, route.Backend.Label(), elapsed)
+				h.activity.EmitRequestTask(rid, route.Backend.GPUID, taskID, "%s", meshapi.RequestDone(model, route.Backend.Label(), elapsed))
 			}
 		}
 	} else {
@@ -482,7 +559,7 @@ func (h *Handler) handleProxy(w http.ResponseWriter, r *http.Request) {
 			log.Printf("[debug] %s → peer %s", model, route.Addr)
 		}
 		if h.activity != nil {
-			h.activity.EmitRequestTask(rid, -1, taskID, "%s → peer %s", model, route.Addr)
+			h.activity.EmitRequestTask(rid, -1, taskID, "%s", meshapi.RequestStarted(model, meshapi.PeerLabel(route.Addr)))
 		}
 		// Write-through in-flight: subsequent picks on this node see the
 		// dispatch immediately, before the next poll of /v1/status updates
@@ -499,7 +576,7 @@ func (h *Handler) handleProxy(w http.ResponseWriter, r *http.Request) {
 			log.Printf("[debug] %s → peer %s finished (elapsed=%s)", model, route.Addr, elapsed)
 		}
 		if h.activity != nil {
-			h.activity.EmitRequestTask(rid, -1, taskID, "%s → peer %s done (%s)", model, route.Addr, elapsed)
+			h.activity.EmitRequestTask(rid, -1, taskID, "%s", meshapi.RequestDone(model, meshapi.PeerLabel(route.Addr), elapsed))
 		}
 	}
 }
@@ -587,6 +664,99 @@ func (h *Handler) handleActivity(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]any{"events": h.activity.Recent()})
 }
 
+// handlePromptLookup serves this node's own stored prompt for a request id.
+// It is also what handleMeshPrompt proxies to on the peer that actually owns
+// a given rid — request ids are a per-process counter, not cluster-wide, so
+// a lookup only ever makes sense against the node that minted it.
+func (h *Handler) handlePromptLookup(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	rid, err := strconv.ParseInt(r.URL.Query().Get("rid"), 10, 64)
+	if err != nil || h.activity == nil {
+		http.NotFound(w, r)
+		return
+	}
+	entry, ok := h.activity.GetPrompt(rid)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	json.NewEncoder(w).Encode(entry)
+}
+
+// handleMeshPrompt is the fan-out entry point the mesh dashboard's prompt
+// modal calls. An empty addr means the request originated on whichever node
+// the browser's /v1/mesh/stream connection landed on (mirroring how
+// handleMeshStream leaves MeshEvent.Addr unset for its own local events), so
+// it is served from this node's own store. A non-empty addr names a peer, and
+// the browser may not be able to reach it directly — LAN-addressed peers,
+// possibly tunnelled to only one node — so this proxies server-side instead,
+// the same reasoning as the rest of the mesh fan-out.
+func (h *Handler) handleMeshPrompt(w http.ResponseWriter, r *http.Request) {
+	addr := r.URL.Query().Get("addr")
+	if addr == "" {
+		h.handlePromptLookup(w, r)
+		return
+	}
+	// addr is attacker-controllable: it arrives as a query parameter, and this
+	// handler fetches it and echoes the response back. Forwarding it verbatim
+	// would turn any node into an SSRF probe for its own network — the mesh is
+	// on a LAN alongside IPMI and management interfaces. Only addresses this
+	// node already peers with are allowed; the dashboard never needs any other.
+	if !h.isPeerAddr(addr) {
+		http.Error(w, `{"error":{"message":"unknown peer","type":"invalid_request"}}`, http.StatusBadRequest)
+		return
+	}
+	// Re-serialise rid from the parsed integer rather than passing the raw
+	// string through, so nothing can smuggle extra query parameters or path
+	// segments into the peer request.
+	rid, err := strconv.ParseInt(r.URL.Query().Get("rid"), 10, 64)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	url := "http://" + addr + "/v1/prompts?rid=" + strconv.FormatInt(rid, 10)
+	req, err := http.NewRequestWithContext(r.Context(), "GET", url, nil)
+	if err != nil {
+		http.Error(w, `{"error":{"message":"bad peer address","type":"invalid_request"}}`, http.StatusBadRequest)
+		return
+	}
+	// peerClient carries a timeout; http.DefaultClient does not, and a peer
+	// that accepts the connection but never answers would otherwise pin this
+	// goroutine and its response writer indefinitely.
+	resp, err := peerClient.Do(req)
+	if err != nil {
+		http.Error(w, `{"error":{"message":"peer unreachable","type":"server_error"}}`, http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(resp.StatusCode)
+	// Bound the copy: the body is a prompt entry from a peer, and a peer that
+	// is compromised or simply wrong should not be able to stream unbounded
+	// data through this node into the browser.
+	io.Copy(w, io.LimitReader(resp.Body, maxPromptResponseBytes))
+}
+
+// maxPromptResponseBytes caps a proxied peer prompt response. The store
+// truncates prompts well below this, so the slack only covers JSON overhead.
+const maxPromptResponseBytes = 1 << 20
+
+// isPeerAddr reports whether addr is one of this node's configured peers.
+// Matching is exact against the configured host:port — the peer list comes
+// from config, so no normalisation or DNS resolution is involved, and none
+// should be: resolving here would reintroduce the SSRF this guards against.
+func (h *Handler) isPeerAddr(addr string) bool {
+	if h.registry == nil {
+		return false
+	}
+	for _, p := range h.registry.Peers() {
+		if p.Addr == addr {
+			return true
+		}
+	}
+	return false
+}
+
 func (h *Handler) handleActivityStream(w http.ResponseWriter, r *http.Request) {
 	f, ok := w.(http.Flusher)
 	if !ok {
@@ -601,8 +771,21 @@ func (h *Handler) handleActivityStream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 
+	// Subscribe before reading the backlog, never after: an event landing
+	// between the two would otherwise fall in the gap and be delivered by
+	// neither. The overlap this creates instead — an event in both the backlog
+	// and the live feed — is the safe direction, and consumers deduplicate.
 	ch := h.activity.Subscribe()
 	defer h.activity.Unsubscribe(ch)
+
+	for _, ev := range h.activity.Backlog() {
+		b, err := json.Marshal(ev)
+		if err != nil {
+			continue
+		}
+		fmt.Fprintf(w, "data: %s\n\n", b)
+	}
+	f.Flush()
 
 	for {
 		select {

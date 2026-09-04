@@ -451,7 +451,7 @@ func TestProxyThinkTruePassesThrough(t *testing.T) {
 	}
 }
 
-func TestProxyNoThinkParamStripsReasoning(t *testing.T) {
+func TestProxyNoThinkParamPassesReasoningThrough(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"choices":[{"message":{"content":"","reasoning_content":"<think>\nreasoning\n</think>\n\nthe answer"}}]}`))
@@ -463,7 +463,9 @@ func TestProxyNoThinkParamStripsReasoning(t *testing.T) {
 	bal := balancer.New([]*balancer.BackendState{state}, 7, 4)
 	h := NewHandler(bal, "/models/test.gguf", 30*time.Second)
 
-	// No think param — reasoning stripped by default
+	// No think param — reasoning passes through by default. Local behaviour
+	// (deliberate divergence from upstream): viiwork does not strip thinking
+	// out of the request or the response, and leaves it to llama-server.
 	req := httptest.NewRequest("POST", "/v1/chat/completions",
 		strings.NewReader(`{"model":"test","messages":[{"role":"user","content":"hi"}]}`))
 	req.Header.Set("Content-Type", "application/json")
@@ -475,11 +477,11 @@ func TestProxyNoThinkParamStripsReasoning(t *testing.T) {
 	choices := resp["choices"].([]any)
 	msg := choices[0].(map[string]any)["message"].(map[string]any)
 
-	if msg["content"] != "the answer" {
-		t.Errorf("expected 'the answer', got %q", msg["content"])
+	if _, has := msg["reasoning_content"]; !has {
+		t.Error("expected reasoning_content to pass through by default")
 	}
-	if _, has := msg["reasoning_content"]; has {
-		t.Error("expected reasoning_content to be stripped by default")
+	if msg["content"] != "" {
+		t.Errorf("expected content to be untouched, got %q", msg["content"])
 	}
 }
 
