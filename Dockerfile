@@ -35,29 +35,41 @@ ARG MILPSTER_FORK_REF=b10803
 RUN git clone --depth 1 --branch ${MILPSTER_FORK_REF} ${MILPSTER_FORK_URL} /llama.cpp
 WORKDIR /llama.cpp
 
-# FP8 handling already ships in the fork (the gfx906 FP8 header issue is
-# resolved upstream here — __hip_fp8_e4m3 is gated by HIP_VERSION and the
-# usage sites are guarded by FP8_AVAILABLE), so no in-place sed patch is
-# needed the way the stock upstream build requires. Keep a loud, conditional
-# build-time assertion so a future ROCm/fork break fails the build visibly
-# instead of at 04:42 in a container log.
+# gfx906 (Radeon VII) has no FP8 hardware. The public fork's hip.h still
+# carries the stock version-only gate
+#
+#   #if HIP_VERSION >= 60200000
+#       #include <hip/hip_fp8.h>
+#       typedef __hip_fp8_e4m3 __nv_fp8_e4m3;
+#       #define FP8_AVAILABLE
+#   #endif
+#
+# which is TRUE on ROCm 6.2.4, but ROCm's amd_hip_fp8.h defines
+# __hip_fp8_e4m3 only for gfx94x, so the typedef fails to compile for
+# gfx906. (The old private fork carried the fix as a real commit; the
+# public one does not.) Disable the FP8 block the same way the stable
+# track does: rewrite the gate to an impossible version. FP8_AVAILABLE
+# then stays undefined and every FP8 usage site in the fork (all guarded
+# by it) compiles out. The greps keep this loud: if the fork's layout
+# changes, fail the build here instead of at 04:42 in a container log.
 RUN set -eux; \
     f=ggml/src/ggml-cuda/vendors/hip.h; \
     if [ ! -f "$f" ]; then \
         echo "FATAL: $f does not exist -- fork layout changed."; exit 1; \
     fi; \
-    if grep -q 'HIP_VERSION >= 60200000' "$f" && \
-       grep -q '__hip_fp8_e4m3 __nv_fp8_e4m3' "$f"; then \
-        echo "OK: gfx906 FP8 handling present in fork."; \
-    else \
+    if ! grep -q '#if HIP_VERSION >= 60200000' "$f"; then \
         echo "############################################################"; \
-        echo "FATAL: expected FP8 handling not found in $f."; \
-        echo "This fork should ship the gfx906 FP8 fix. Current fp8 lines:"; \
+        echo "FATAL: stock FP8 gate not found in $f -- fork layout changed?"; \
+        echo "Current fp8/HIP_VERSION lines:"; \
         grep -n -i 'fp8\|HIP_VERSION' "$f" || true; \
-        echo "Use a fork ref that includes the fix, or port the small guard."; \
         echo "############################################################"; \
         exit 1; \
-    fi
+    fi; \
+    sed -i 's/#if HIP_VERSION >= 60200000/#if HIP_VERSION >= 99999999/' "$f"; \
+    if ! grep -q '#if HIP_VERSION >= 99999999' "$f"; then \
+        echo "FATAL: FP8 gate rewrite did not apply."; exit 1; \
+    fi; \
+    echo "OK: gfx906 FP8 block disabled (stable-track sed)."
 
 # BUILD_SHARED_LIBS=OFF -> self-contained static binaries, no .so shuffling
 # in the runtime stage (the fragile find -name '*.so*' step is dropped).
