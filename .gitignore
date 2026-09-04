@@ -3,7 +3,6 @@ models
 models/
 opencode.json
 docker-compose.yaml
-viiwork.yaml
 viiwork-*.yaml
 .env
 .worktrees/
@@ -13,3 +12,4 @@ bench-harness/results/
 *.swp
 configs/docker-compose.qwen36-pair-gpu56.yaml
 configs/viiwork.qwen36-pair-gpu56.yaml
+venv/
