@@ -186,3 +186,73 @@ func TestLoad(t *testing.T) {
 		t.Errorf("missing file: err = %v", err)
 	}
 }
+
+// The catalogue is on by default: it is a read-only rendering of models the
+// node already publishes, and an operator who has to find a flag to turn it on
+// will not find it at all.
+func TestCatalogDefaultsAreServedAndOffline(t *testing.T) {
+	c := Defaults()
+
+	if !c.API.Catalog.Enabled.Resolve(true) {
+		t.Error("catalog is not enabled by default")
+	}
+	if c.API.Catalog.ProviderID != "viiwork" {
+		t.Errorf("provider_id = %q, want viiwork", c.API.Catalog.ProviderID)
+	}
+	if c.API.Catalog.Upstream != "" {
+		t.Errorf("upstream = %q, want none: a node makes no outbound request unasked", c.API.Catalog.Upstream)
+	}
+}
+
+// OpenCode sorts its picker by provider name, byte by byte. The default name
+// has to sort before the ordinary capitalised ones or the fleet lands at the
+// bottom of every list, under every hosted provider.
+func TestCatalogDefaultNameSortsFirst(t *testing.T) {
+	got := Defaults().API.Catalog.ProviderName
+
+	for _, other := range []string{"Anthropic", "GitHub Copilot", "OpenAI", "Zai", "viiwork"} {
+		if got >= other {
+			t.Errorf("default provider name %q does not sort before %q", got, other)
+		}
+	}
+}
+
+func TestCatalogValidation(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		edit func(*Config)
+		want string
+	}{
+		{"empty provider id", func(c *Config) { c.API.Catalog.ProviderID = "" }, "api.catalog.provider_id"},
+		{"provider id with a slash", func(c *Config) { c.API.Catalog.ProviderID = "vii/work" }, "api.catalog.provider_id"},
+		{"upstream without a scheme", func(c *Config) { c.API.Catalog.Upstream = "models.opencode.ai" }, "api.catalog.upstream"},
+		{"upstream carrying the suffix", func(c *Config) { c.API.Catalog.Upstream = "https://models.opencode.ai/api.json" }, "api.catalog.upstream"},
+		{"upstream with no ttl", func(c *Config) {
+			c.API.Catalog.Upstream = "https://models.opencode.ai"
+			c.API.Catalog.UpstreamTTL = Duration{}
+		}, "api.catalog.upstream_ttl"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := validConfig()
+			tc.edit(c)
+			err := c.Validate(envOf(nil))
+			if err == nil {
+				t.Fatalf("accepted %s", tc.name)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error %q does not name %s", err, tc.want)
+			}
+		})
+	}
+}
+
+// A disabled catalogue is not configured, so its fields are not checked.
+func TestDisabledCatalogIsNotValidated(t *testing.T) {
+	c := validConfig()
+	c.API.Catalog.Enabled = ToggleOff
+	c.API.Catalog.ProviderID = ""
+
+	if err := c.Validate(envOf(nil)); err != nil {
+		t.Errorf("disabled catalog rejected: %v", err)
+	}
+}

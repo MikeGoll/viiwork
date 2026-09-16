@@ -14,7 +14,9 @@ import (
 	"time"
 
 	"github.com/janit/viiwork/v2/internal/activity"
+	"github.com/janit/viiwork/v2/internal/catalog"
 	"github.com/janit/viiwork/v2/internal/gpu"
+	"github.com/janit/viiwork/v2/internal/modelinfo"
 	"github.com/janit/viiwork/v2/internal/power"
 	"github.com/janit/viiwork/v2/mesh"
 	"github.com/janit/viiwork/v2/meshapi"
@@ -53,6 +55,8 @@ type ServerDeps struct {
 	GPUAvailable   func() bool
 	PowerControl   *power.Controller // nil = power endpoints answer 503
 	CORS           *CORS             // nil = no CORS headers
+	Catalog        http.Handler      // *catalog.Handler; nil = /api.json is 404
+	ModelInfo      http.Handler      // *modelinfo.Handler; nil = /v1/model/info is 404
 	Health         func() (healthy, total int, models int)
 }
 
@@ -94,6 +98,16 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case path == meshapi.PathModels, path == meshapi.PathCapacity, path == meshapi.PathFleetCapacity,
 		path == meshapi.PathChatCompletions, path == meshapi.PathCompletions, path == meshapi.PathEmbeddings:
 		s.d.Inference.ServeHTTP(w, r)
+	case path == catalog.Path && get && s.d.Catalog != nil:
+		// Not a /v1 endpoint: the path is OpenCode's to choose, since it
+		// appends /api.json to whatever URL it is pointed at.
+		s.d.Catalog.ServeHTTP(w, r)
+	case path == modelinfo.Path && get && s.d.ModelInfo != nil:
+		// LiteLLM's path, and LiteLLM's document — but only the document.
+		// Inference stays on the OpenAI-compatible endpoints above, which is
+		// the transport these clients speak anyway: a node must never
+		// advertise a dialect it will not then accept requests in.
+		s.d.ModelInfo.ServeHTTP(w, r)
 	case path == meshapi.PathAliases || strings.HasPrefix(path, meshapi.PathAliases+"/"):
 		s.d.Aliases.ServeHTTP(w, r)
 	case path == meshapi.PathStatus && get:

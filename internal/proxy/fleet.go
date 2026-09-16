@@ -21,17 +21,7 @@ import (
 // capacity report, refreshed every mesh.capacity_poll, so this is a read of
 // state that exists and adds no inter-node traffic.
 func (h *Handler) handleFleetCapacity(w http.ResponseWriter, r *http.Request) {
-	var local []meshapi.ModelCapacity
-	if h.d.Local != nil {
-		local = h.d.Local.Capacity()
-	}
-	var reports []capacity.Report
-	if h.d.Reports != nil {
-		reports = h.d.Reports.Reports()
-	}
-
-	out := aggregateFleet(h.d.Self, local, reports, time.Now(), h.d.StaleAfter)
-	out.Ver = h.d.Version
+	out := h.fleetView()
 
 	// A consumer that wants one model should not have to parse the fleet. An
 	// unknown name yields an empty list rather than 404: "no capacity for that
@@ -85,7 +75,7 @@ func filterModel(models []meshapi.FleetModel, want string, resolve Resolver) ([]
 // fleetAcc accumulates one model while walking hosts.
 type fleetAcc struct {
 	model meshapi.FleetModel
-	seen  bool // a fresh host has contributed a Ctx
+	seen  bool // a fresh host WITH SLOTS has contributed a Ctx
 }
 
 // aggregateFleet builds the fleet view from this node's own capacity plus every
@@ -130,10 +120,22 @@ func aggregateFleet(self string, local []meshapi.ModelCapacity, reports []capaci
 		a.model.Busy += m.Busy
 		a.model.Queued += m.Queued
 		// The floor a consumer can rely on, not a mean no backend will honour.
-		if !a.seen || m.Ctx < a.model.Ctx {
-			a.model.Ctx = m.Ctx
+		//
+		// Only a host with SLOTS sets it. A draining or slot-less backend
+		// contributes no capacity the router will ever use, so letting its
+		// window depress the floor would publish a number no request is ever
+		// sized by — and it is the smallest windows that drain first. When no
+		// host has a slot the floor stays unset, which is correct: absent is
+		// not zero, and nothing can promise a window it cannot serve.
+		//
+		// The host keeps its own numbers in the per-host list either way:
+		// "gb2 is draining" and "gb2 is gone" call for different reactions.
+		if m.Slots > 0 {
+			if !a.seen || m.Ctx < a.model.Ctx {
+				a.model.Ctx = m.Ctx
+			}
+			a.seen = true
 		}
-		a.seen = true
 		a.model.Hosts = append(a.model.Hosts, host)
 	}
 
@@ -168,4 +170,26 @@ func aggregateFleet(self string, local []meshapi.ModelCapacity, reports []capaci
 	// iteration order.
 	sort.Slice(out.Models, func(i, j int) bool { return out.Models[i].Name < out.Models[j].Name })
 	return out
+}
+
+// fleetView is this node's aggregate of the whole mesh, unfiltered.
+func (h *Handler) fleetView() meshapi.FleetCapacityResponse {
+	var local []meshapi.ModelCapacity
+	if h.d.Local != nil {
+		local = h.d.Local.Capacity()
+	}
+	var reports []capacity.Report
+	if h.d.Reports != nil {
+		reports = h.d.Reports.Reports()
+	}
+	out := aggregateFleet(h.d.Self, local, reports, time.Now(), h.d.StaleAfter)
+	out.Ver = h.d.Version
+	return out
+}
+
+// FleetModels is the fleet's per-model capacity, which carries the context
+// window. It is exported as one half of discovery.Source: every serializer
+// that advertises a window to a client sizes it from these figures.
+func (h *Handler) FleetModels() []meshapi.FleetModel {
+	return h.fleetView().Models
 }

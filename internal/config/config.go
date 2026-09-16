@@ -112,9 +112,36 @@ type NodeConfig struct {
 }
 
 type APIConfig struct {
-	Host string     `yaml:"host"`
-	Port int        `yaml:"port"`
-	CORS CORSConfig `yaml:"cors"`
+	Host    string        `yaml:"host"`
+	Port    int           `yaml:"port"`
+	CORS    CORSConfig    `yaml:"cors"`
+	Catalog CatalogConfig `yaml:"catalog"`
+}
+
+// CatalogConfig is the OpenCode model catalogue served on /api.json, which
+// lets a coding client discover the fleet instead of listing it by hand. See
+// internal/catalog and docs/autodiscovery.md.
+type CatalogConfig struct {
+	Enabled Toggle `yaml:"enabled"`
+	// ProviderID is the provider key, and so the prefix a user types:
+	// "viiwork/granite-4.2-8b".
+	ProviderID string `yaml:"provider_id"`
+	// ProviderName is the display name. OpenCode orders its model picker by
+	// provider name, byte by byte, so this string decides where the fleet
+	// appears in that list — see the default.
+	ProviderName string `yaml:"provider_name"`
+	// BaseURL overrides the endpoint advertised to clients. Empty means the
+	// address the request arrived on, which is right for every node in a mesh
+	// where any node is an entry point; set it only behind a proxy that
+	// rewrites the host.
+	BaseURL string `yaml:"base_url"`
+	// Upstream chains another models.dev-shaped catalogue, without the
+	// /api.json suffix, so that a client pointed at a node keeps its hosted
+	// providers as well: "https://models.opencode.ai". Empty means none, and
+	// a node that makes no outbound request.
+	Upstream string `yaml:"upstream"`
+	// UpstreamTTL is how long a fetched upstream is reused.
+	UpstreamTTL Duration `yaml:"upstream_ttl"`
 }
 
 // CORSConfig is unchanged from v1: the browser-origin allowlist of an API

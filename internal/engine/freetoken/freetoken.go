@@ -52,9 +52,11 @@ func (e *Engine) DefaultStartupTimeout() time.Duration { return 30 * time.Minute
 // Command builds the `ft serve` command line.
 //
 // Which card to take is NOT here (Decision 11). The node's pinning sets
-// CUDA_DEVICE_ORDER=PCI_BUS_ID and CUDA_VISIBLE_DEVICES, which is correct on
-// both engine generations; --gpu is correct on only the newer one, so an engine
-// package that generated it would break the release the fleet actually runs.
+// CUDA_DEVICE_ORDER=PCI_BUS_ID and CUDA_VISIBLE_DEVICES before the child
+// starts. 0.1.3 added --gpu, taking an nvidia-smi index or a UUID, and that is
+// a reason to keep generating nothing: an index means whatever ordering the
+// process was given, and the node has already narrowed that to one card. Two
+// layers pinning the same backend is how a backend ends up on a neighbour.
 func (e *Engine) Command(s engine.Spec) (engine.Command, error) {
 	opts := defaultOptions()
 	if err := engine.DecodeOptions(s, &opts); err != nil {
@@ -83,14 +85,17 @@ func (e *Engine) Command(s engine.Spec) (engine.Command, error) {
 		// Decisions 1 and 2: both always passed, from the node's own numbers.
 		"--max-running-requests", strconv.Itoa(s.Parallel),
 		"--max-seq-len-override", strconv.Itoa(s.Context),
-		// Builds after 0.1.2 call this --moe-strategy and keep --moe-backend
-		// as a deprecated alias that logs a warning. The old spelling stays
-		// because 0.1.2 knows no other.
-		"--moe-backend", opts.MoEBackend,
+		// 0.1.3 renamed this from --moe-backend, which survives as a
+		// deprecated alias that warns on every start. The operator key is
+		// still moe_backend, because C1 freezes the YAML an operator writes;
+		// only the generated flag moved.
+		"--moe-strategy", opts.MoEBackend,
 	}
 	if opts.KVReserveTokens > 0 {
-		// Task 3: the reserve flag only when non-zero. See F7 — this flag is
-		// not emitted anywhere in the source repo.
+		// Only when non-zero, and zero is not "no reserve": the engine's own
+		// default is 8192 tokens, so omitting the flag leaves that floor in
+		// place rather than removing it. Spike finding F7 — which recorded
+		// this flag as unverifiable — is closed: 0.1.3 documents it.
 		args = append(args, "--kv-reserve-tokens", strconv.Itoa(opts.KVReserveTokens))
 	}
 

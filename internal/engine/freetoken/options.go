@@ -18,12 +18,31 @@ import (
 type Options struct {
 	Binary      string  `yaml:"binary"`
 	MemoryRatio float64 `yaml:"memory_ratio"`
-	MoEBackend  string  `yaml:"moe_backend"`
-	// KVReserveTokens is SPIKE FINDING F7: it appears in v2.0's
-	// config.FreeTokenOptions and in v2.2 Task 3's command line, but
-	// `--kv-reserve-tokens` is emitted nowhere in viiwork-freetoken's Args and
-	// the string does not occur anywhere in that repository. Kept because the
-	// plan mandates it; unverifiable from the permitted sources.
+	// MoEBackend generates `--moe-strategy`, which is what 0.1.3 calls it. The
+	// key keeps the older name: C1 freezes the YAML an operator writes, and a
+	// second key spelled moe_strategy would buy a rule about which wins.
+	MoEBackend string `yaml:"moe_backend"`
+	// KVReserveTokens is the KV token floor the engine holds back before
+	// `--moe-cache-auto` fills MoE experts.
+	//
+	// Zero is not "no reserve" — it means the flag is not generated and the
+	// engine's own default of 8192 tokens stands. That default is small by
+	// design, because the expert cache has priority over KV.
+	//
+	// This key is NOT inert, though this package said it was until 0.1.3 was
+	// read properly. viiwork never generates --moe-cache-auto, but the engine
+	// turns it on itself for every offload-family strategy (offload, cpu,
+	// hybrid) that was given no cache-sizing flag — which is what
+	// moe_backend: auto resolves to on a MoE model. So on the models this
+	// engine exists to run, the floor is always live, and leaving it at zero
+	// caps KV at 8192 tokens however much context the node publishes.
+	//
+	// Set it equal to context x parallel on an offload-family model.
+	//
+	// This also closes spike finding F7, which recorded the flag as
+	// unverifiable because it is emitted nowhere in viiwork-freetoken. It is
+	// real: FreeToken 0.1.3 documents it, and defaults it to 8192 in
+	// freetoken/engine/config.py.
 	KVReserveTokens int `yaml:"kv_reserve_tokens"`
 }
 

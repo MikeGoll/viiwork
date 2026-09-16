@@ -14,6 +14,23 @@ api:
   host: 0.0.0.0
   port: 8086
 
+  # The OpenCode model catalogue, served on /api.json. An OpenCode client set
+  # to OPENCODE_MODELS_URL=http://<this node>:8086 discovers every model on the
+  # mesh, correctly sized, and keeps up as the fleet changes — its whole config
+  # is `"provider": { "viiwork": {} }`. See docs/autodiscovery.md.
+  catalog:
+    enabled: true
+    provider_id: viiwork
+    # OpenCode sorts its model picker by provider NAME, byte by byte. The
+    # leading space is what puts the fleet at the top of that list, above the
+    # capitalised hosted providers; drop it and "viiwork" sorts below them all.
+    provider_name: " viiwork"
+    # Pointing a client here REPLACES its whole catalogue, so it would lose
+    # every hosted provider. Chaining one back in keeps both. Empty is the
+    # default: a node makes no outbound request unless an operator asks for it.
+    upstream: ""             # e.g. https://models.opencode.ai
+    upstream_ttl: 1h
+
 mesh:
   network: tailnet           # tailnet | lan
   open: false
@@ -93,20 +110,38 @@ models:
   #   context: 32768           # -> --max-seq-len-override
   #   parallel: 4              # -> --max-running-requests
   #   startup_timeout: 45m
+  #   # Everything the ENGINE decides rather than the node goes here, including
+  #   # all of 0.1.3's image-input and quantization flags. Two worth knowing:
+  #   # --text-model-only serves a multimodal checkpoint text-only (and is what
+  #   # an FTW converted before its family served images now needs), and
+  #   # --quant-backend layer[.kind]=name replaces the retired --nvfp4-backend.
   #   args: ["--attention-backend", "flashinfer"]
   #   freetoken:               # optional; these are the defaults
-  #     binary: ft
+  #     binary: ft             # FreeToken 0.1.3 or newer
   #     memory_ratio: 0.90
+  #     # Generates --moe-strategy, which is what 0.1.3 calls the flag the
+  #     # engine used to spell --moe-backend. The key keeps the older name.
   #     moe_backend: auto      # auto | fused | offload | cpu | hybrid
   #     # KV-cache token floor, reserved before --moe-cache-auto fills MoE
-  #     # experts. It does NOTHING on its own: viiwork never generates
-  #     # --moe-cache-auto, so this only bites if you add that flag to `args:`.
+  #     # experts. SET THIS on any offload-family model: it is not optional and
+  #     # it is not inert.
   #     #
-  #     # If you do, set this to at least context x parallel. That expert cache
-  #     # is MoE-priority and will take VRAM the KV cache needs; below that
-  #     # floor the backend serves less context than the node publishes to the
-  #     # mesh, which is the one number a dashboard must not be wrong about.
-  #     kv_reserve_tokens: 0
+  #     # viiwork never generates --moe-cache-auto, but the engine turns it on
+  #     # itself whenever the strategy is offload, cpu or hybrid and no
+  #     # cache-sizing flag was given — which is exactly what moe_backend: auto
+  #     # resolves to on a MoE model. The expert cache is MoE-priority and will
+  #     # take VRAM the KV cache needs.
+  #     #
+  #     # Zero is not "no reserve": the flag is simply not generated and the
+  #     # engine keeps its own default of 8192 tokens — so the backend serves
+  #     # 8192 tokens of context however much the node publishes to the mesh,
+  #     # which is the one number a dashboard must not be wrong about.
+  #     #
+  #     # context x parallel is the ceiling — every slot full at full context.
+  #     # The fleet's FreeToken nodes set it equal to `context` instead, which
+  #     # is the floor worth defending: one slot can always use the window the
+  #     # node advertises. Match your context here.
+  #     kv_reserve_tokens: 32768
 
 power:
   source: none               # auto | dcmi | sdr | sensor:<NAME> | none

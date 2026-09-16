@@ -159,9 +159,9 @@ type statsDoc struct {
 	SWA   *pool `json:"swa"`
 
 	VRAMBytes int64 `json:"vram_bytes"`
-	// GPUs is the engine's own account of the card it bound. Added upstream
-	// after 0.1.2 and therefore absent on the released engine, which is why a
-	// missing entry reads as "unknown" rather than as a mismatch.
+	// GPUs is the engine's own account of the card it bound, present since
+	// 0.1.3. The engine sends an empty list when it has nothing to report, so
+	// a missing entry still reads as "unknown" rather than as a mismatch.
 	//
 	// Index is deliberately not read: under one-card-per-process pinning
 	// exactly one device is visible, so it is always 0 and carries no
@@ -241,8 +241,8 @@ func (e *Engine) Load(ctx context.Context, s engine.Spec, addr string) (engine.L
 }
 
 // BoundGPU is engine.GPUBindingReader: the card the engine says it actually
-// bound. ok is false on an engine at or before 0.1.2, which reports no UUID —
-// that is "unknown", not a mismatch.
+// bound. ok is false when the engine reports no UUID — that is "unknown", not
+// a mismatch.
 //
 // Worth reporting because the failure it catches is otherwise silent. Pinning
 // happens through CUDA_VISIBLE_DEVICES, whose index CUDA resolves in whatever

@@ -1,5 +1,197 @@
 # Changelog
 
+## v2.3.0
+
+### The fleet describes itself
+
+**Point a coding client at any node and it discovers the models, the context
+window it can actually rely on, and the capabilities — with no model list
+written into a client config and no numbers typed in by hand.** Nothing to
+regenerate when the fleet changes, because the fleet is the source.
+
+The market standardised the transport and never standardised discovery.
+OpenAI's `/v1/models` returns `{id, object, created, owned_by}` and has never
+been extended, so every client either ships a hardcoded table of the models it
+has heard of or makes the user type the numbers in. viiwork is unusually well
+placed to answer: every format trying to close that gap assumes one host with
+one model loaded, while a node already computes the minimum context across the
+hosts its router would route to. That figure — the **served context** — is what
+a client can safely size a prompt against, and it is what all three surfaces
+below publish. `docs/autodiscovery.md` is the guide.
+
+- **`/v1/models` now carries the window**, in both spellings the ecosystem
+  converged on: `max_model_len` (vLLM's) and `context_length` (OpenRouter's).
+  Both formats define their field as a prompt+completion total, which is what
+  makes one figure correct as both; LiteLLM's prompt-only `max_input_tokens` is
+  a different quantity and is deliberately not here. Widest reach for the least
+  code, and a deliberate C4 change in its permitted form — additive, `omitempty`,
+  so a node one version behind says "cannot say" rather than zero.
+- **`/api.json` is the OpenCode model catalogue.** OpenCode has no `/v1/models`
+  discovery for openai-compatible providers — an open feature request, not a
+  feature — and no vLLM provider either, so a config naming one does nothing.
+  What it has is `OPENCODE_MODELS_URL`, from which it fetches `<url>/api.json`.
+  The client config is `"provider": { "viiwork": {} }` and one environment
+  variable.
+- **`/v1/model/info` is LiteLLM's shape, and it is what makes Roo Code work
+  with no configuration at all** — the same client that otherwise makes you
+  hand-type every number. Serving the document does not make a node a LiteLLM
+  proxy: inference stays on the OpenAI-compatible endpoints, which is the
+  transport these clients speak anyway. A node must never advertise a dialect
+  it will not then accept requests in.
+- **One canonical record behind all three.** `internal/discovery` holds what
+  viiwork actually knows and every format is a thin serializer over it. Three
+  formats each assembling their own view would be three things to keep true,
+  and the first one written would quietly become the source of truth for the
+  rest. A node test asserts all three name the same models and report the same
+  number, because no single client would ever notice if they drifted.
+
+**What viiwork will not claim.** There is no output ceiling distinct from the
+shared window — a slot's context is one prompt+completion budget and the split
+is the client's to choose — so `/v1/models` and `/v1/model/info` emit none, and
+the models.dev document's required `limit.output` is documented in the code as
+the client-side budgeting hint it is rather than as a capability. No cost, no
+modality beyond text, and no architectural maximum, which no node knows.
+`max_input_tokens` is the one knowing approximation, and it is a decision: it
+is a slightly generous true bound, and the alternative is not "no claim" but
+the 200000 Roo Code invents when the field is absent.
+
+**The claim NOT to make**: universal zero-config for every client. Cline, and
+Roo Code configured as a generic openai-compatible provider, still require
+manual entry and will not read the enriched fields. OpenCode's own five-minute
+catalogue cache also means discovery is up to five minutes stale during churn,
+whatever viiwork does.
+
+### The context floor is a promise again
+
+**`/v1/fleet/capacity`'s `ctx` is now the minimum across fresh hosts that have
+slots**, where it used to be the minimum across any fresh host. A draining or
+slot-less backend could depress the window every client sizes its prompts
+against while contributing no capacity the router would ever use — and it is
+the smallest windows that drain first, so the wrong number was the likely one.
+When no host has a slot the figure is now absent rather than borrowed from a
+host that cannot serve it. This changes published numbers, so it is a
+deliberate refinement with its own tests.
+
+- **`api.catalog.upstream` chains a hosted catalogue back in.** Setting
+  `OPENCODE_MODELS_URL` replaces the client's whole catalogue, so on its own it
+  costs the user Anthropic, OpenAI and the rest; with an upstream configured the
+  node serves both, its own entry winning on a collision. Off by default, fetched
+  once per `upstream_ttl` (which must be positive, or every request would
+  refetch), and an enrichment rather than a dependency — an unreachable
+  upstream is logged and the fleet is served alone. A node on a tailnet does not
+  acquire a route off it because a config file said nothing.
+- **`api.catalog.provider_name` decides where the fleet sits in the picker.**
+  OpenCode sorts providers by name, byte by byte, so the default is `" viiwork"`
+  with a leading space — that is the whole mechanism, and a plain `viiwork`
+  sorts below every capitalised hosted provider.
+- **`api` is the node the client reached**, not a name baked in at build time:
+  any node is an entry point and every node serves the whole mesh.
+- `scripts/setup-opencode.sh` writes the two-line config against a node that
+  serves a catalogue, and falls back to enumerating `/v1/models` once against
+  one that does not.
+
+### FreeToken 0.1.3
+
+**The `freetoken` engine now generates FreeToken 0.1.3's command line, and
+0.1.3 is the floor.** Upstream renamed `--moe-backend` to `--moe-strategy` and
+left the old spelling as a deprecated alias that warns on every start; viiwork
+generates the new one, which an engine below 0.1.3 rejects outright — the
+backend dies at load with an argparse error rather than degrading. The pypi
+channel of `docker/Dockerfile.freetoken` defaults to `0.1.3` instead of to
+"whatever PyPI has today", so a rebuild reproduces the inference stack.
+
+- **`models[].freetoken.moe_backend` keeps its name.** C1 freezes the YAML an
+  operator writes; only the generated flag moved, and a second key spelled
+  `moe_strategy` would buy nothing but a rule about which one wins.
+- **Card selection stays the node's**, through `CUDA_DEVICE_ORDER` and
+  `CUDA_VISIBLE_DEVICES`. 0.1.3 added `ft serve --gpu`, taking an `nvidia-smi`
+  index or a UUID, and that is an argument for generating nothing rather than
+  against: an index resolves against whatever ordering the process was handed,
+  and the node has already narrowed the child to one card. The design decision
+  to leave card selection to the node now rests on that instead of on the
+  flag's absence.
+- **`kv_reserve_tokens` is settled.** The clean-room spike had left it
+  unverified. `--kv-reserve-tokens` is real and documented, the engine enables
+  the expert cache it guards on its own for any offload-family strategy, and
+  `kv_reserve_tokens: 0` does not mean "no reserve" — the flag is simply not
+  generated and the engine keeps its own floor of 8192 tokens. The comment
+  that called the flag unverifiable, and the example config, both said
+  otherwise.
+- **`/v1/stats` reports the bound card from 0.1.3 on**, so `BoundGPU` gets a
+  real UUID rather than the "unknown" every 0.1.2 backend returned. The
+  graceful-unknown branch stays: the engine still sends an empty list when it
+  has nothing to say, and unknown is not a mismatch.
+- **Nothing of 0.1.3's new surface is generated.** Image input
+  (`--text-model-only`, `--image-max-tokens`, `--allowed-media-domains`) and
+  the rebuilt quantization path (`--quant-backend layer[.kind]=name`, which
+  retires `--nvfp4-backend`) are model properties, and model properties belong
+  in `models[].args`. The engine package generates what the *node* decides.
+
+**Upgrading a FreeToken host is not only a version bump.** Multimodal
+checkpoints build their vision tower by default now, so an FTW converted before
+its family served images carries no encoder and `ft serve` refuses it — a
+backend that loaded yesterday walks down the health ladder to `dead` today.
+`--text-model-only` in `models[].args` is the quick answer; NVFP4 dense exports
+and Qwen3.8-Flash-Next may need a real repair (`ft checkpoint`, or upstream's
+`scripts/ftw_hotfix.py`). `BUILDS.md` has the list.
+
+### The README is a front door again
+
+The README had grown to 949 lines and still opened
+with a v2.0 migration notice and a Radeon-VII-only premise that the code had
+outgrown — three engines now, ROCm *and* CUDA. It is 325 lines, and the detail it
+used to carry lives in seven new references that are actually linked.
+
+A visitor now meets the screenshot and what viiwork is; an operator follows one
+hyperlink to the depth they came for. Outbound documentation links went from
+**2 to 26**, and every one is checked.
+
+#### The fan-out
+
+| New document | What moved into it |
+|---|---|
+| `docs/configuration.md` | Every config key: models, tensor-split, reloading, pipelines, GPU power limits, environment variables, host requirements |
+| `docs/mesh.md` | Discovery, secured and open mode, routing and refusal handling, aliases |
+| `docs/dashboards.md` | `/`, `/mesh`, `/chat`, `/prompt`; how the live view is reconstructed; prompt and output history |
+| `docs/power-and-energy.md` | Fleet power, ENTSO-E cost tracking, the durable energy store, IPMI chassis control |
+| `docs/models.md` | The measured catalogue, the gfx906 tuning rules, and **large models on one card via FreeToken's MoE offload** |
+| `docs/security.md` | The trust model, what the lack of authentication exposes, CORS |
+| `docs/operations.md` | Scripts, `viiwork-accept` acceptance checks, the MCP server |
+
+Content moved largely verbatim; this is a relocation, not a rewrite. Seven
+existing documents that the README had never linked — `api-integration`,
+`consuming-fleet-capacity`, `thinking-models`, `energy-store-format`,
+`tensor-split-design` among them — are now reachable from a Documentation index.
+
+#### FreeToken's large-model story is written down
+
+The README stated the "must fit in one card or pay a ~3× tax" rule as universal.
+It is not: that is a property of dense models on llama.cpp, and the `freetoken`
+lane breaks it deliberately. FreeToken runs **one card per process** and reaches
+models larger than the card by keeping only a sparse MoE's hot experts resident
+and streaming the rest from host memory — which is how the fleet serves
+DeepSeek-V4-Flash on RTX 5090s.
+
+Three things an operator needs before planning one, now documented: the slow load
+**is** the offload working (hence the 30-minute default `startup_timeout` against
+llama.cpp's 10); `kv_reserve_tokens` must be set to at least `context`, because
+the engine enables its expert cache on its own and `0` leaves an 8192-token
+floor; and **the advertised context is not the servable
+context** — a live capture shows 1,048,576 advertised against a 64,128 KV pool, a
+factor of 16, which viiwork does not correct.
+
+#### Fixes carried in the move
+
+- `BUILDS.md` absorbs the README's duplicate "Docker Build" section, and gains
+  the missing reason the gfx906 FP8 patch exists
+- Host requirements covered AMD only; CUDA and CDI are now there
+- Cost tracking said "Nord Pool" and then configured ENTSO-E
+- The `setup-node.sh` removal was explained twice, at length
+- Scripts gained `deploy.sh`, `version.sh`, `verify-environment.sh`,
+  `download-*.sh` and `fetch-engine.py`
+- Prose cross-references ("see *Energy History*") are anchors that click
+
+
 ## v2.2.0
 
 **Three engines, and the fleet now runs all three at once.** llama.cpp on

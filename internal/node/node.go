@@ -20,12 +20,14 @@ import (
 	"github.com/janit/viiwork/v2/energy"
 	"github.com/janit/viiwork/v2/internal/activity"
 	"github.com/janit/viiwork/v2/internal/alias"
+	"github.com/janit/viiwork/v2/internal/catalog"
 	"github.com/janit/viiwork/v2/internal/config"
 	"github.com/janit/viiwork/v2/internal/cost"
 	_ "github.com/janit/viiwork/v2/internal/engine/freetoken" // registers the FreeToken engine
 	_ "github.com/janit/viiwork/v2/internal/engine/llamacpp"  // registers the llama.cpp engine
 	_ "github.com/janit/viiwork/v2/internal/engine/vllm"      // registers the vLLM engine
 	"github.com/janit/viiwork/v2/internal/gpu"
+	"github.com/janit/viiwork/v2/internal/modelinfo"
 	"github.com/janit/viiwork/v2/internal/pipeline"
 	"github.com/janit/viiwork/v2/internal/power"
 	"github.com/janit/viiwork/v2/internal/proxy"
@@ -279,6 +281,13 @@ func New(cfg *config.Config, o Options) (*Node, error) {
 	}
 	n.handler = NewServer(ServerDeps{
 		Self: n.name, Version: o.Version, Started: n.started, StreamCtx: n.streamCtx,
+		Catalog: buildCatalog(cfg, inference),
+		// Unconditional, unlike the OpenCode catalogue: this renders exactly
+		// what /v1/models already publishes, in another client's spelling, so
+		// there is no exposure to opt out of. api.catalog.enabled exists
+		// because /api.json REPLACES a client's whole catalogue, which is a
+		// decision about that client rather than about this node.
+		ModelInfo: modelinfo.NewHandler(inference),
 		Inference: inference, Aliases: alias.NewHandler(n.aliasService, aliasAuth),
 		AliasInfo: func() meshapi.AliasesResponse { return meshapi.AliasesResponse{Aliases: n.resolver.Info()} },
 		Status:    n.status, Cluster: n.cluster, Members: mem.Members, Activity: n.activity,
@@ -574,4 +583,21 @@ func newPowerController(cfg *config.Config, hostname string, lookupEnv func(stri
 		logf("[power] no BMC password set: hosts that are powered off cannot be reached (set BMC_PASSWORD)")
 	}
 	return ctl
+}
+
+// buildCatalog returns the OpenCode catalogue handler, or nil when the node
+// serves none. The source is the inference handler, which already holds both
+// views the catalogue renders.
+func buildCatalog(cfg *config.Config, src catalog.Source) http.Handler {
+	c := cfg.API.Catalog
+	if !c.Enabled.Resolve(true) {
+		return nil
+	}
+	return catalog.NewHandler(catalog.Config{
+		ProviderID:   c.ProviderID,
+		ProviderName: c.ProviderName,
+		BaseURL:      c.BaseURL,
+		Upstream:     c.Upstream,
+		UpstreamTTL:  c.UpstreamTTL.Duration,
+	}, src)
 }

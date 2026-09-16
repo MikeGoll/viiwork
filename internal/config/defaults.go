@@ -24,6 +24,18 @@ func Defaults() Config {
 			Host: "0.0.0.0",
 			Port: 8086,
 			CORS: CORSConfig{AllowOrigins: []string{"*.ts.net", "localhost", "127.0.0.1"}},
+			Catalog: CatalogConfig{
+				Enabled:    ToggleOn,
+				ProviderID: "viiwork",
+				// The leading space is load bearing, not a typo. OpenCode
+				// sorts its model picker by provider name with a byte
+				// comparison, so a space (0x20) puts the fleet above every
+				// ordinary name; "viiwork" on its own would sort below even
+				// the capitalised hosted providers. Rename it freely — this
+				// is the only thing that decides the position.
+				ProviderName: " viiwork",
+				UpstreamTTL:  Duration{time.Hour},
+			},
 		},
 		Mesh: MeshConfig{
 			Network:        NetworkTailnet,

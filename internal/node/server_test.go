@@ -240,3 +240,36 @@ func jsonInt(n int64) string {
 	b, _ := json.Marshal(n)
 	return string(b)
 }
+
+// The catalogue is its own handler on its own path, so a node that is not
+// serving one must 404 rather than fall through to something else.
+func TestCatalogRoute(t *testing.T) {
+	d, _ := fakeServer(t)
+	d.Catalog = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"viiwork":{"id":"viiwork"}}`)
+	})
+	s := NewServer(d)
+
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api.json", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"viiwork"`) {
+		t.Errorf("GET /api.json = %d %q", rec.Code, rec.Body.String())
+	}
+
+	rec = httptest.NewRecorder()
+	s.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api.json", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("POST /api.json = %d, want 404", rec.Code)
+	}
+}
+
+func TestCatalogDisabledIs404(t *testing.T) {
+	s := NewServer(fakeServerDeps(t)) // no Catalog handler
+
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api.json", nil))
+
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("GET /api.json with no catalog = %d, want 404", rec.Code)
+	}
+}

@@ -48,10 +48,14 @@ type FleetModel struct {
 	// beside fleet totals is read as a fleet total. A consumer wanting one
 	// node's figure has the per-host entry.
 	Queued int `json:"queued"`
-	// Ctx is the MINIMUM context per slot across fresh hosts. Nothing stops an
-	// operator serving one model at different contexts on different machines,
-	// and a consumer sizing prompts needs the floor it can rely on rather than
-	// a mean no backend will honour.
+	// Ctx is the MINIMUM context per slot across fresh hosts THAT HAVE SLOTS.
+	// Nothing stops an operator serving one model at different contexts on
+	// different machines, and a consumer sizing prompts needs the floor it can
+	// rely on rather than a mean no backend will honour.
+	//
+	// The slot condition is what keeps the floor a promise: a draining host
+	// takes no work, so its window is not one the fleet is offering. Absent
+	// when no host has a slot — nothing can promise a window it cannot serve.
 	Ctx   int64       `json:"ctx,omitempty"`
 	Hosts []FleetHost `json:"hosts"`
 }

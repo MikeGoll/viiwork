@@ -338,3 +338,44 @@ func TestFilterModelWithoutAQueryReturnsEverything(t *testing.T) {
 		t.Errorf("resolved_from = %q, want empty", from)
 	}
 }
+
+// A host with no slots contributes no capacity the router will ever use, so it
+// must not set the floor either. A draining backend reporting a small window
+// would otherwise depress the number every client sizes its prompts against,
+// while never accepting one of them.
+func TestFleetCtxIgnoresHostsWithNoSlots(t *testing.T) {
+	got := aggregateFleet("gb1",
+		[]meshapi.ModelCapacity{mc("tg", 4, 0, 0, 98304)},
+		[]capacity.Report{
+			rep("gb2", "10.0.0.2:8086", time.Millisecond, mc("tg", 0, 0, 0, 4096)),
+		}, fleetNow, 3*time.Second)
+
+	m := model(t, got, "tg")
+	if m.Ctx != 98304 {
+		t.Errorf("ctx = %d, want 98304 — a slotless host sets no floor", m.Ctx)
+	}
+	// It stays in the list with its real numbers: "gb2 is draining" and "gb2
+	// is gone" call for different reactions, as for a stale host.
+	if h := host(t, m, "gb2"); h.Slots == nil || *h.Slots != 0 || h.Ctx == nil || *h.Ctx != 4096 {
+		t.Errorf("gb2 = %+v, want its measured zero and its own window", h)
+	}
+}
+
+// When NO host has a slot, there is no window anyone can promise. Absent is
+// not zero: Ctx is omitempty, so the field simply does not appear, and every
+// serializer over it decides for itself what a format with no "unknown" does.
+func TestFleetCtxIsUnsetWhenNoHostHasSlots(t *testing.T) {
+	got := aggregateFleet("gb1",
+		[]meshapi.ModelCapacity{mc("tg", 0, 0, 0, 98304)},
+		[]capacity.Report{
+			rep("gb2", "10.0.0.2:8086", time.Millisecond, mc("tg", 0, 0, 0, 4096)),
+		}, fleetNow, 3*time.Second)
+
+	m := model(t, got, "tg")
+	if m.Ctx != 0 {
+		t.Errorf("ctx = %d, want 0 (absent) — nothing can serve it", m.Ctx)
+	}
+	if len(m.Hosts) != 2 {
+		t.Errorf("hosts = %+v, want both still listed", m.Hosts)
+	}
+}

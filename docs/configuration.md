@@ -1,0 +1,194 @@
+# Configuration
+
+One file per machine. `viiwork --config /etc/viiwork/viiwork.yaml` (the default
+path) is the only input — there are no command-line overrides. The node
+validates the whole file at startup and on every reload, and names the offending
+field when something is wrong. A viiwork 1.x file is refused with a pointer to
+[migrating-to-v2.md](migrating-to-v2.md).
+
+Copy [`viiwork.yaml.example`](../viiwork.yaml.example) and edit it.
+
+- [Models](#models)
+- [Tensor-split mode](#tensor-split-mode)
+- [Reloading](#reloading)
+- [GPU power limits](#gpu-power-limits)
+- [Pipelines](#pipelines)
+- [Client discovery](#client-discovery)
+- [Environment variables](#environment-variables)
+- [Host requirements](#host-requirements)
+
+## Models
+
+A machine's models are entries under `models:`. Each has an explicit `name` (the
+model id clients send), its host GPU indices, and its slots:
+
+```yaml
+models:
+  - name: Qwen3.8-27B
+    engine: llamacpp
+    path: /models/Qwen3.8-27B-UD-Q4_K_XL.gguf
+    gpus: [0, 1]
+    gpus_per_backend: 2      # one backend across both cards
+    context: 49152           # tokens PER SLOT
+    parallel: 2
+  - name: granite-4.2-8b
+    engine: llamacpp
+    path: /models/granite-4.2-8b-Q4_K_M.gguf
+    gpus: [2, 3, 4, 5]       # gpus_per_backend defaults to 1: four replicas
+    context: 16384
+    parallel: 2
+```
+
+A GPU belongs to at most one model. Every model on every machine is visible from
+any node.
+
+**`models[].context` is the context of one slot**, for every engine: llama.cpp is
+started with `--ctx-size context × parallel`. viiwork 1.x's `model.context_size`
+was llama.cpp's total, divided across slots — carrying the old number over
+multiplies VRAM use by `parallel`.
+
+The engine named in `engine:` owns the YAML block below it (`llamacpp:`, `vllm:`,
+`freetoken:`); see [Engines](../README.md#engines) in the README and
+[adding-an-engine.md](adding-an-engine.md).
+
+`startup_timeout` is per model, and its default comes from the engine: **10
+minutes** for llama.cpp, **20** for vLLM, **30** for FreeToken, which fills a GPU
+expert cache from host memory before it serves. Size it from your observed
+cold-load time: a backend
+that has not answered by then is given up on and respawned, discarding whatever
+it had already placed in VRAM. See [models.md](models.md) for both the gfx906
+measurement behind that rule and the FreeToken offload case.
+
+## Tensor-split mode
+
+For models that don't fit in a single GPU's VRAM, one backend spans several
+GPUs. Set `gpus_per_backend` to the group size: a model's `gpus` are cut into
+groups of that size, one backend per group.
+
+```yaml
+models:
+  - name: gpt-oss-120b
+    engine: llamacpp
+    path: /models/gpt-oss-120b-MXFP4_MOE.gguf
+    gpus: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+    gpus_per_backend: 5      # two backends of five cards each
+    context: 32768
+    parallel: 2
+    llamacpp:
+      split_mode: layer      # "layer" is the only mode that works on gfx906
+```
+
+Trade-offs against one backend per GPU:
+
+| | Replicas (`gpus_per_backend: 1`) | Split groups (`gpus_per_backend: N`) |
+|---|---|---|
+| Concurrency | N backends, each with `parallel` slots | one backend per group |
+| Model size cap | Must fit in 1 GPU | Can span N GPUs |
+| Throughput | Higher (parallel) | Lower (a group computes one card at a time) |
+| Use case | Models ≤13GB on 16GB cards | Models >13GB that need 2+ cards |
+
+On the reference fleet's gfx906 mining-rig topology (PCIe gen1 x1 risers), the
+measured tensor-split penalty is -2 to -13% for 2-GPU and -7 to -20% for 4-GPU
+splits. On PCIe gen3/4/5 the penalty is smaller.
+
+Layer split runs a group's cards strictly sequentially, so **extra GPUs in a
+group buy VRAM and context, never throughput** — for throughput run more
+backends, not wider ones. The full rationale and the measurements behind it are
+in [models.md](models.md); the design record is
+[tensor-split-design.md](tensor-split-design.md).
+
+## Reloading
+
+`SIGHUP` (`docker kill -s HUP viiwork`) applies an edited model list: added
+models start, removed ones drain and stop, and a changed entry restarts that
+model only. The whole file is re-validated first, so a bad edit is refused
+rather than half-applied.
+
+There is no interactive setup script. `scripts/setup-node.sh` wrote viiwork 1.x
+instance configs, which a v2 node refuses, and was removed in v2.1.0 rather than
+left as a trap. Write the machine's file from `viiwork.yaml.example` and check
+it with `viiwork-accept config` (see [operations.md](operations.md));
+[migrating-to-v2.md](migrating-to-v2.md) converts existing 1.x instances.
+
+## GPU power limits
+
+Optionally limit power draw per card:
+
+```yaml
+gpu:
+  power_limit_watts: 180  # applied via rocm-smi when a backend starts
+```
+
+`scripts/power-perf-sweep.sh` measures tok/s, watts and temperature across cap
+settings and recommends a value — see [operations.md](operations.md).
+
+## Pipelines
+
+Pipelines chain multiple LLM steps into virtual models. A consumer calls a
+virtual model name (for example `localize-fi` or `improve-en`) and viiwork
+executes a sequence of prompts across one or more real backend models.
+
+Two pipeline types are included:
+
+- **Localization** — translate, culturally adapt and QC text in a single
+  request. Supports locale aliases and per-locale glossaries.
+- **Text improvement** — generate text then rewrite it to remove AI writing
+  patterns (de-slop).
+
+Each step specifies a model, a Go template prompt and a temperature. Steps
+execute sequentially, each step's output feeding the next. Configure pipelines
+in `viiwork.yaml` — see the example config for both types.
+
+A pipeline is node-local: it is absent from capacity reports and status, and is
+dispatched only on the node that received the request. It therefore cannot be an
+alias target — see [mesh.md](mesh.md#aliases).
+
+## Client discovery
+
+`/v1/models` and `/v1/model/info` need no configuration. The OpenCode catalogue on
+`/api.json` has a block of its own under `api:`, shown here with its defaults:
+
+```yaml
+api:
+  catalog:
+    enabled: true
+    provider_id: viiwork       # the prefix a user types: viiwork/<model>
+    provider_name: " viiwork" # OpenCode sorts by name; the space sorts it first
+    base_url: ""              # empty: the address the request arrived on
+    upstream: ""              # e.g. https://models.opencode.ai, without /api.json
+    upstream_ttl: 1h          # must be positive when upstream is set
+```
+
+`base_url` is for a node behind a proxy that rewrites the host. `upstream` is
+off by default, so a node makes no outbound request unless asked; set, it chains
+a hosted catalogue back in so a client keeps its other providers. What each
+field means to a client, and why the defaults are what they are:
+[autodiscovery.md](autodiscovery.md).
+
+## Environment variables
+
+| Variable | Purpose |
+|----------|---------|
+| `VIIWORK_MESH_SECRET` | Mesh secret, base64 of exactly 32 bytes (`openssl rand -base64 32`). Unset requires `mesh.open: true`. See [mesh.md](mesh.md#secured-and-open) |
+| `VIIWORK_MESH_SECRET_PREV` | The previous secret, while rotating |
+| `VIIWORK_DEBUG=1` | Verbose `[debug]` logging on the request path. Off by default — these sit on hot paths, and on a host whose cores are shared with `llama-server` writing a line per request costs CPU that inference needs. Turn it on when diagnosing routing. |
+| `ENTSOE_API_KEY` | ENTSO-E API key for cost tracking — see [power-and-energy.md](power-and-energy.md#cost-tracking) |
+| `BMC_PASSWORD` | BMC password for out-of-band power control — see [power-and-energy.md](power-and-energy.md#power-control) |
+
+## Host requirements
+
+- Linux, Docker with GPU device access
+- **AMD / ROCm:** `amdgpu` kernel driver loaded (standard on modern kernels) and
+  `/dev/kfd`, `/dev/dri` passed to the container. No ROCm installation is needed
+  on the host — the image carries it.
+- **NVIDIA / CUDA:** the NVIDIA container runtime, with GPUs granted through
+  **CDI** (`--device nvidia.com/gpu=all`, after `nvidia-ctk cdi generate`). The
+  images ship no `nvidia-smi` and no `libcuda` on purpose — the runtime injects
+  them from the host so they always match the running driver. See
+  [BUILDS.md](../BUILDS.md).
+- `huggingface-cli` for model downloads (`pip install huggingface-hub`)
+- Optional: `jq` for "I'm feeling lucky" model discovery
+- Optional: [llmfit](https://www.llmfit.org/) for hardware-aware model
+  recommendations
+- Optional: `/dev/ipmi0` passed through for chassis power readings — see
+  [power-and-energy.md](power-and-energy.md)

@@ -100,6 +100,9 @@ func (c *Config) Validate(lookupEnv func(string) (string, bool)) error {
 	if c.API.Port < 1 || c.API.Port > 65535 {
 		return fmt.Errorf("api.port must be 1-65535, got %d", c.API.Port)
 	}
+	if err := c.validateCatalog(); err != nil {
+		return err
+	}
 	if err := c.validateMesh(); err != nil {
 		return err
 	}
@@ -349,4 +352,37 @@ func validatePowerSource(source string) error {
 	default:
 		return fmt.Errorf("power.source %q must be one of: auto, dcmi, sdr, none, sensor:<NAME>", s)
 	}
+}
+
+// validateCatalog checks the OpenCode catalogue. A disabled catalogue is not
+// configured, so nothing in it is checked.
+func (c *Config) validateCatalog() error {
+	cat := c.API.Catalog
+	if !cat.Enabled.Resolve(true) {
+		return nil
+	}
+	id := strings.TrimSpace(cat.ProviderID)
+	if id == "" {
+		return fmt.Errorf("api.catalog.provider_id is required when the catalog is enabled")
+	}
+	// The id becomes half of "provider/model" in a client, and a key in a JSON
+	// document a third party parses. Keep it to what both can carry.
+	if strings.ContainsAny(id, "/ \\\t") {
+		return fmt.Errorf("api.catalog.provider_id must not contain a slash or whitespace, got %q", cat.ProviderID)
+	}
+	if cat.Upstream != "" {
+		if !strings.HasPrefix(cat.Upstream, "http://") && !strings.HasPrefix(cat.Upstream, "https://") {
+			return fmt.Errorf("api.catalog.upstream must start with http:// or https://, got %q", cat.Upstream)
+		}
+		// The suffix is appended, so carrying it here fetches /api.json/api.json.
+		if strings.HasSuffix(strings.TrimRight(cat.Upstream, "/"), "/api.json") {
+			return fmt.Errorf("api.catalog.upstream must omit the /api.json suffix, got %q", cat.Upstream)
+		}
+		// Zero never counts as fresh, so every client request would refetch
+		// the upstream, serialised behind the handler's lock.
+		if cat.UpstreamTTL.Duration <= 0 {
+			return fmt.Errorf("api.catalog.upstream_ttl must be positive when an upstream is set")
+		}
+	}
+	return nil
 }

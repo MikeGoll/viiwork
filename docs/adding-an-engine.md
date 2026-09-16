@@ -553,12 +553,24 @@ whose timeout is under 45 minutes, and the fix is `models[].startup_timeout` in
 the operator's file rather than a bigger default — the engine cannot see the
 split from `DefaultStartupTimeout()`, which takes no `Spec`.
 
-**A flag that is real can still do nothing.** FreeToken accepts
-`--kv-reserve-tokens`, but it is a floor consulted only by `--moe-cache-auto`,
-which viiwork never generates. Shipping the key was right; documenting it as
-inert unless the operator adds that flag to `args:` was the part that had to be
-got right. Check what a flag *interacts with*, not only that the binary accepts
-it.
+**Check what a flag interacts with, not only that the binary accepts it — and
+then check who turns that interaction on.** This section used to say the
+opposite of the truth, and it is worth keeping as the example rather than
+quietly correcting. `--kv-reserve-tokens` is a floor consulted only by
+`--moe-cache-auto`, and viiwork never generates `--moe-cache-auto`; from that
+it concluded the key was inert unless an operator added the flag to `args:`.
+
+The engine turns it on itself. `ft serve` enables `moe_cache_auto` for any
+offload-family strategy — offload, cpu, hybrid — that was given no cache-sizing
+flag, which is precisely what `moe_backend: auto` resolves to on a MoE model.
+So the floor is live on every model this engine exists to run, and its 8192
+default silently caps context. The fleet found this the hard way before the
+source was read: yeti's config carries the comment "experts eat the budget and
+KV landed at exactly 8192 tokens on a checkpoint declaring 262,144".
+
+Tracing one hop — from the flag viiwork generates to the flag it interacts with
+— was right. Stopping there, at "we do not generate it", was the mistake: the
+*engine* is also a party that can set its own flags.
 
 **Blank imports are three places, not two.** `internal/node/node.go` and
 `cmd/viiwork-accept/main.go` register the engine for the binaries;

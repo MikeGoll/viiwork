@@ -137,8 +137,8 @@ func serveFakeFreeToken() {
 	wantFlag(args, "--served-model-name", os.Getenv("FAKE_WANT_NAME"))
 	wantFlag(args, "--max-seq-len-override", os.Getenv("FAKE_WANT_CTX"))
 	wantFlag(args, "--max-running-requests", os.Getenv("FAKE_WANT_PARALLEL"))
-	// The old spelling stays because 0.1.2 knows no other.
-	wantFlag(args, "--moe-backend", os.Getenv("FAKE_WANT_MOE"))
+	// 0.1.3's spelling. The operator key is still moe_backend.
+	wantFlag(args, "--moe-strategy", os.Getenv("FAKE_WANT_MOE"))
 
 	ln := listenOn(argValue(args, "--port"))
 	status := os.Getenv("FAKE_STATUS")

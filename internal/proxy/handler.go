@@ -13,6 +13,7 @@ import (
 
 	"github.com/janit/viiwork/v2/internal/activity"
 	"github.com/janit/viiwork/v2/internal/api"
+	"github.com/janit/viiwork/v2/internal/discovery"
 	"github.com/janit/viiwork/v2/internal/logging"
 	"github.com/janit/viiwork/v2/internal/pipeline"
 	"github.com/janit/viiwork/v2/internal/route"
@@ -386,9 +387,37 @@ func (h *Handler) writeAcquireError(w http.ResponseWriter, err error, model, hos
 	}
 }
 
-// handleModels lists local models, then peers', pipelines' and the extra
-// entries; a duplicate id keeps its first entry in that order.
+// handleModels serves /v1/models: the OpenAI-compatible list, enriched with
+// the window a client may size a prompt against.
+//
+// The enrichment happens HERE rather than in ModelEntries because
+// discovery.Models reads ModelEntries to build the record — enriching the
+// input would make the endpoint its own source. ModelEntries stays the raw
+// list of what exists; this is one rendering of the record over it.
 func (h *Handler) handleModels(w http.ResponseWriter) {
+	models := discovery.Models(h)
+	data := make([]meshapi.ModelEntry, 0, len(models))
+	for _, m := range models {
+		// Both spellings carry ServedContext, and both are omitted when no
+		// host can say. Neither gets an output ceiling: viiwork has none
+		// distinct from the shared window, and this format lets a field be
+		// absent, so saying nothing is both easier and true.
+		data = append(data, meshapi.ModelEntry{
+			ID: m.Name, Object: "model", OwnedBy: m.Kind, Target: m.Target,
+			MaxModelLen: m.ServedContext, ContextLength: m.ServedContext,
+		})
+	}
+	writeJSON(w, http.StatusOK, meshapi.ModelsResponse{Object: "list", Data: data})
+}
+
+// ModelEntries is everything this node lists on /v1/models, in the same order,
+// and without the discovered numbers — it is discovery.Models' input, not its
+// output. It is exported so the record can be built from exactly the models
+// the API names: one list, many renderings.
+//
+// It collects local models, then peers', pipelines' and the extra entries; a
+// duplicate id keeps its first entry in that order.
+func (h *Handler) ModelEntries() []meshapi.ModelEntry {
 	seen := map[string]bool{}
 	data := []meshapi.ModelEntry{}
 	add := func(e meshapi.ModelEntry) {
@@ -427,7 +456,7 @@ func (h *Handler) handleModels(w http.ResponseWriter) {
 		}
 	}
 	sort.Slice(data, func(i, j int) bool { return data[i].ID < data[j].ID })
-	writeJSON(w, http.StatusOK, meshapi.ModelsResponse{Object: "list", Data: data})
+	return data
 }
 
 func (h *Handler) handleCapacity(w http.ResponseWriter) {

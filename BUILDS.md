@@ -34,8 +34,16 @@ ROCm with reliable gfx906 support.
 and the older `b9222` rejects that architecture at load time with "unknown model
 architecture" rather than anything self-explanatory.
 
-Build: `make docker` (or `docker compose up -d`, whose `build:` directive
-triggers it the first time).
+The FP8 patch is required because ROCm 6.2+ ships `<hip/hip_fp8.h>` for all
+architectures, but gfx906 has no FP8 hardware and the header fails to compile.
+
+Build: `make docker`. To try a different llama.cpp release, override the pin —
+and check the architectures your models need, since an older tag can refuse them
+at load:
+
+```bash
+docker build --build-arg LLAMA_CPP_VERSION=<tag> -f docker/Dockerfile.rocm -t viiwork .
+```
 
 ## `docker/Dockerfile.vllm`
 
@@ -79,6 +87,41 @@ build is slow (torch and its CUDA wheels) and the image is several GB.
   build args**; `/opt/freetoken/engine.json` records the pair it holds.
 
 Build: `make docker-freetoken`, off-peak.
+
+### FreeToken 0.1.3 is the floor (viiwork 2.3.0)
+
+`FREETOKEN_VERSION` defaults to `0.1.3` rather than to empty, so a rebuild
+reproduces the inference stack instead of taking whatever PyPI has that day.
+The floor is not advisory: 0.1.3 renamed `--moe-backend` to `--moe-strategy`,
+viiwork generates the new spelling, and an older engine rejects it — every
+backend on the node dies at load with an argparse error.
+
+Upgrading an existing host is two flags and a checkpoint question:
+
+- **`models[].freetoken.moe_backend` does not change.** The operator key keeps
+  its name (C1 freezes the YAML an operator writes); only the generated flag
+  moved. `--nvfp4-backend` in `args:` does have to become
+  `--quant-backend moe.nvfp4=<kernel>`.
+- **Multimodal checkpoints now build their vision tower by default**, which is
+  the change most likely to take a backend down. Qwen3.6, Qwen3.8-Flash-Next,
+  Gemma-4, GLM-5.3-Flash, MiniMax-M3 and Muse-Glimmer-30B serve images out of
+  the box; `--text-model-only` in `models[].args` restores the text-only
+  footprint. It also restores the *load*, because an FTW converted before its
+  family served images holds no vision encoder and `ft serve` refuses it.
+- **Some older FTW checkpoints need repairing** before 0.1.3 loads them at all
+  — NVFP4 dense exports missing the `input_scale` their scheme declares, and
+  Qwen3.8-Flash-Next, whose PLE table now lives beside the FTW. Reconvert with
+  `ft checkpoint`, or patch in place with upstream's `scripts/ftw_hotfix.py`.
+- **`ft checkpoint --device` and `ft bench bw --device` are gone**; both take
+  `--gpu <uuid|index>`. This only affects scripts you run by hand — viiwork
+  spawns neither, and still pins `ft serve` with `CUDA_VISIBLE_DEVICES` rather
+  than the new `ft serve --gpu`, because the node has already narrowed the
+  child to one card and two layers pinning one backend is how it lands on a
+  neighbour.
+
+None of this changes the kernel-cache step: the URL it builds from the
+installed release resolves to the published
+`freetoken_kernel_cache-0.1.3+cu130` wheel unchanged.
 
 ## Running either engine natively
 

@@ -67,7 +67,7 @@ func TestCommandOmitsKVReserveWhenZero(t *testing.T) {
 		"--memory-ratio", "0.92",
 		"--max-running-requests", "4",
 		"--max-seq-len-override", "65536",
-		"--moe-backend", "offload",
+		"--moe-strategy", "offload",
 		"--page-size", "128",
 	}
 	if !slices.Equal(cmd.Args, want) {
@@ -91,13 +91,17 @@ func TestCommandIncludesKVReserveWhenSet(t *testing.T) {
 		t.Errorf("--kv-reserve-tokens = %q, want 4096", got)
 	}
 	// The default moe_backend must still be passed.
-	if got := argOf(cmd.Args, "--moe-backend"); got != "auto" {
-		t.Errorf("--moe-backend = %q, want the default auto", got)
+	if got := argOf(cmd.Args, "--moe-strategy"); got != "auto" {
+		t.Errorf("--moe-strategy = %q, want the default auto", got)
 	}
 }
 
-// Decision 11: no device variable, and no --gpu. The node's pinning is correct
-// on both engine generations; --gpu is correct on only the newer one.
+// Decision 11: no device variable, and no --gpu. 0.1.3 does have --gpu, which
+// takes an nvidia-smi index or a UUID — and that is the argument against
+// generating it, not for. The node has already pinned the backend with
+// CUDA_DEVICE_ORDER and CUDA_VISIBLE_DEVICES, so an index handed to --gpu is
+// resolved against a different ordering than the one the node chose. Pinning
+// belongs to one layer and it is not this one.
 func TestCommandLeavesCardSelectionToTheNode(t *testing.T) {
 	s := spec(t, engine.Spec{
 		Name: "m", Path: "/models/m", GPUs: []int{3}, Port: 1, Context: 8192, Parallel: 1,
@@ -107,7 +111,7 @@ func TestCommandLeavesCardSelectionToTheNode(t *testing.T) {
 		t.Fatalf("Command: %v", err)
 	}
 	if slices.Contains(cmd.Args, "--gpu") {
-		t.Error("--gpu must not be generated: FreeToken 0.1.2 has no such flag")
+		t.Error("--gpu must not be generated: card selection is the node's, through CUDA_VISIBLE_DEVICES")
 	}
 	for _, kv := range cmd.Env {
 		if strings.Contains(kv, "VISIBLE_DEVICES") || strings.Contains(kv, "CUDA_DEVICE_ORDER") {
@@ -403,9 +407,10 @@ func TestBoundGPU(t *testing.T) {
 			t.Errorf("BoundGPU = (%q, %v, %v), want (%q, true, nil)", got, ok, err, uuid)
 		}
 	})
-	t.Run("engine at 0.1.2 reports none", func(t *testing.T) {
-		// The live capture predates the gpus field. ok=false is "unknown",
-		// which is NOT a mismatch — Decision 8.
+	t.Run("engine reports no card", func(t *testing.T) {
+		// 0.1.3 fills gpus from the engine state and sends [] when it has
+		// none, and the live capture below predates the field entirely. Both
+		// read as "unknown", which is NOT a mismatch — Decision 8.
 		srv := serving(t, map[string]string{"/v1/stats": string(read(t, "stats-live-dsv4.json"))})
 		defer srv.Close()
 		_, ok, err := New().BoundGPU(t.Context(), hostPort(srv))

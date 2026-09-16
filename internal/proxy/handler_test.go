@@ -717,3 +717,91 @@ func TestHandlerCapacity(t *testing.T) {
 		t.Errorf("H23: %+v", resp)
 	}
 }
+
+// The catalogue served to a coding client and the list served to an API client
+// have to name the same models: a model in one and not the other is a model a
+// user can see but not call, or call but not see.
+func TestModelEntriesMatchTheModelsEndpoint(t *testing.T) {
+	f := newHandlerFx(t)
+	f.capacity = fakeCapacity{{Name: "m"}}
+	f.reports.add("P", "127.0.0.1:1", time.Now().Add(-time.Hour), peerModel("x", 1, 0))
+	f.pipelines = NewPipelineResolver([]*pipeline.Pipeline{testPipeline(map[string]string{}, "fi")})
+	f.extra = func() []meshapi.ModelEntry {
+		return []meshapi.ModelEntry{{ID: "stable", OwnedBy: meshapi.OwnedByAlias, Target: "m"}}
+	}
+	f.build()
+
+	rec := f.do(http.MethodGet, "/v1/models", "")
+	var resp meshapi.ModelsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("%q: %v", rec.Body.String(), err)
+	}
+
+	got := f.h.ModelEntries()
+	if len(got) != len(resp.Data) {
+		t.Fatalf("ModelEntries listed %d models, /v1/models listed %d", len(got), len(resp.Data))
+	}
+	for i, e := range got {
+		if e.ID != resp.Data[i].ID || e.Target != resp.Data[i].Target {
+			t.Errorf("entry %d = %+v, /v1/models had %+v", i, e, resp.Data[i])
+		}
+	}
+}
+
+// Context comes off the fleet view, so the catalogue needs the same numbers
+// /v1/fleet/capacity publishes.
+func TestFleetModelsCarryContext(t *testing.T) {
+	f := newHandlerFx(t)
+	f.capacity = fakeCapacity{{Name: "m", Slots: 1, Ctx: 32768}}
+	f.build()
+
+	got := f.h.FleetModels()
+
+	if len(got) != 1 || got[0].Name != "m" || got[0].Ctx != 32768 {
+		t.Errorf("FleetModels = %+v, want m with ctx 32768", got)
+	}
+}
+
+// OpenAI's /v1/models carries no window, so every client either ships a
+// hardcoded table of models it knows or makes the user type the number in.
+// Both spellings the ecosystem converged on carry the fleet's served context,
+// which is the figure a client can actually size a prompt against.
+func TestModelsEndpointCarriesTheServedContext(t *testing.T) {
+	f := newHandlerFx(t)
+	f.capacity = fakeCapacity{{Name: "m", Slots: 1, Ctx: 32768}}
+	f.pipelines = NewPipelineResolver([]*pipeline.Pipeline{testPipeline(map[string]string{}, "fi")})
+	f.extra = func() []meshapi.ModelEntry {
+		return []meshapi.ModelEntry{{ID: "stable", OwnedBy: meshapi.OwnedByAlias, Target: "m"}}
+	}
+	f.build()
+
+	rec := f.do(http.MethodGet, "/v1/models", "")
+	var resp meshapi.ModelsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("%q: %v", rec.Body.String(), err)
+	}
+	by := map[string]meshapi.ModelEntry{}
+	for _, e := range resp.Data {
+		by[e.ID] = e
+	}
+
+	if e := by["m"]; e.MaxModelLen != 32768 || e.ContextLength != 32768 {
+		t.Errorf("served model = %+v, want both spellings at 32768", e)
+	}
+	// An alias is a name for another model's capacity, so it has to carry it
+	// too: aliases are the mesh-wide stable names operators are told to use.
+	if e := by["stable"]; e.MaxModelLen != 32768 || e.ContextLength != 32768 {
+		t.Errorf("alias = %+v, want its target's window", e)
+	}
+	// A pipeline is node-local and appears in no capacity report, so nothing
+	// can size it. Absent is not zero, and omitempty is how that is said.
+	if e := by["tr-fi"]; e.MaxModelLen != 0 || e.ContextLength != 0 {
+		t.Errorf("pipeline = %+v, want no window claimed", e)
+	}
+	if !strings.Contains(rec.Body.String(), `"max_model_len":32768`) {
+		t.Errorf("max_model_len missing from the wire: %s", rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), `"max_model_len":0`) {
+		t.Errorf("a zero window was serialised; absent is not zero: %s", rec.Body.String())
+	}
+}

@@ -296,9 +296,12 @@ saying where each name comes from:
 
 ```json
 {"object": "list", "data": [
-  {"id": "some-model-27B", "object": "model", "owned_by": "local"},
-  {"id": "another-model-8b", "object": "model", "owned_by": "peer"},
-  {"id": "stable-coder", "object": "model", "owned_by": "alias"}
+  {"id": "some-model-27B", "object": "model", "owned_by": "local",
+   "max_model_len": 32768, "context_length": 32768},
+  {"id": "another-model-8b", "object": "model", "owned_by": "peer",
+   "max_model_len": 98304, "context_length": 98304},
+  {"id": "stable-coder", "object": "model", "owned_by": "alias",
+   "max_model_len": 98304, "context_length": 98304}
 ]}
 ```
 
@@ -307,6 +310,17 @@ name from the alias table, and `pipeline` a configured multi-step chain. A
 client can send any of them as `model` — the distinction is for display, not
 for routing. Aliases are listed whatever their state, so a name here is not a
 promise it can serve right now; `/v1/aliases` carries that.
+
+`max_model_len` and `context_length` carry the same number in two spellings —
+vLLM's and OpenRouter's — because OpenAI never extended this endpoint with a
+window and the ecosystem converged on those two names instead. The number is
+the **served context**: the total prompt+completion budget per slot that the
+fleet guarantees, which is the minimum across fresh hosts that have slots, not
+a checkpoint's architectural maximum. Both are omitted when no host can say —
+absent is not zero — and a node older than v2.3.0 omits them always. There is
+deliberately no output ceiling here: viiwork has none distinct from the shared
+window. See [autodiscovery.md](autodiscovery.md), which also covers the two
+other shapes the same figure is published in.
 
 ### `GET /health`
 

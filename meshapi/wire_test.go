@@ -76,7 +76,7 @@ func TestV2WireFields(t *testing.T) {
 	assertFields(t, ClusterResponse{}, []string{"view", "mesh", "members", "models", "power_control", "cluster_cost_eur_per_hour", "cluster_cost_today_eur"})
 	assertFields(t, Member{}, []string{"node", "addr", "role", "state", "status"})
 	assertFields(t, PowerControlInfo{}, []string{"hosts", "out_of_band"})
-	assertFields(t, ModelEntry{}, []string{"id", "object", "owned_by", "target"})
+	assertFields(t, ModelEntry{}, []string{"id", "object", "owned_by", "target", "max_model_len", "context_length"})
 	assertFields(t, ModelsResponse{}, []string{"object", "data"})
 	assertFields(t, ErrorResponse{}, []string{"error"})
 	assertFields(t, ErrorBody{}, []string{"message", "type"})
@@ -99,7 +99,7 @@ func TestV2UnmeasurableFieldsAreOmitempty(t *testing.T) {
 		{PowerInfo{}, []string{"source"}},
 		{CostInfo{}, []string{"eur_per_hour", "today_eur", "breakdown"}},
 		{ClusterResponse{}, []string{"power_control", "cluster_cost_eur_per_hour", "cluster_cost_today_eur"}},
-		{ModelEntry{}, []string{"target"}},
+		{ModelEntry{}, []string{"target", "max_model_len", "context_length"}},
 	}
 	for _, c := range cases {
 		_, omit := jsonTags(t, c.val)
