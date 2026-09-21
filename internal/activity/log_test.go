@@ -2,8 +2,12 @@ package activity
 
 import (
 	"encoding/json"
+	"slices"
 	"sync"
 	"testing"
+	"time"
+
+	"github.com/janit/viiwork/v2/meshapi"
 )
 
 // Subscribe closes the oldest subscriber's channel once it is at capacity, and
@@ -107,6 +111,37 @@ func TestBacklogMarksReplay(t *testing.T) {
 	b[0].Message = "mutated"
 	if l.Recent()[0].Message == "mutated" {
 		t.Error("Backlog handed out the log's own backing array")
+	}
+}
+
+func TestBacklogReplaysWindowAndOpenRequests(t *testing.T) {
+	now := time.Unix(10_000, 0)
+	old := now.Add(-ReplayWindow - time.Minute).Unix()
+	recent := now.Add(-ReplayWindow / 2).Unix()
+
+	l := NewLog()
+	l.emit(Event{Time: old, Type: "system", Message: "old system"})
+	l.emit(Event{Time: old, Type: "request", RequestID: 1, Message: meshapi.RequestStarted("m", "gpu-0")})
+	l.emit(Event{Time: old, Type: "request", RequestID: 1, Message: meshapi.RequestDone("m", "gpu-0", time.Second)})
+	l.emit(Event{Time: old, Type: "request", RequestID: 2, Message: meshapi.RequestStarted("m", "gpu-1")})
+	l.emit(Event{Time: old, Type: "request", RequestID: 3, Message: meshapi.RequestStarted("m", "gpu-2")})
+	l.emit(Event{Time: recent, Type: "request", RequestID: 3, Message: meshapi.RequestDone("m", "gpu-2", time.Minute)})
+	l.emit(Event{Time: recent, Type: "system", Message: "recent system"})
+
+	var got []string
+	for _, ev := range l.backlogAt(now) {
+		if !ev.Replay {
+			t.Errorf("%q not marked replay", ev.Message)
+		}
+		got = append(got, ev.Message)
+	}
+	want := []string{
+		meshapi.RequestStarted("m", "gpu-1"), // still running: its start must survive the window
+		meshapi.RequestDone("m", "gpu-2", time.Minute),
+		"recent system",
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("backlog = %q\nwant %q", got, want)
 	}
 }
 

@@ -82,9 +82,9 @@ Other members' *jobs* appear in real time. Their *backend counts and GPU load*
 refresh every 5 seconds, from each member's `/v1/status`.
 
 In-flight requests are reconstructed by your browser from the event stream,
-because no endpoint returns "what is running now". The stream replays its recent
-history when it connects, so opening the page mid-flight shows the jobs already
-running, and a laptop coming back from sleep gets the completions it missed
+because no endpoint returns "what is running now". The stream replays the last 30
+seconds when it connects, plus every request still running however old, so
+opening the page mid-flight shows the jobs already running, and a laptop coming back from sleep gets the completions it missed
 instead of leaving rows counting up in red forever. A gap longer than the node's
 event ring is not recoverable: the view then shows fewer requests than are really
 running rather than phantom ones, and the Backends table's in-flight counts stay

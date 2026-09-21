@@ -514,10 +514,14 @@ by the consumer from the event stream: a `request` event adds an entry, a
 matching event whose message contains *done* or *aborted* removes it, keyed as
 above.
 
-Both streams replay their event ring when the connection opens, which repairs
-most of what that costs. Replayed events carry `"replay": true` and arrive
-before live ones, so a consumer that connects mid-flight sees the jobs already
-running, and one that reconnects gets the *done* events it missed while away.
+Both streams replay recent history when the connection opens, which repairs
+most of what that costs: every event from the last 30 seconds, plus the events
+of any request in the ring that has not finished yet, however long ago it
+started. Replayed events carry `"replay": true` and arrive before live ones, so
+a consumer that connects mid-flight sees the jobs already running, and one that
+reconnects and rebuilds (below) ends up with exactly the requests still
+running, however long it was away. Older history is not replayed; a consumer that needs it
+reads `/v1/activity`.
 
 Two obligations come with it:
 

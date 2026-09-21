@@ -135,22 +135,52 @@ func (l *Log) emit(ev Event) {
 	}
 }
 
-// Backlog returns the ring marked as replay, for a stream that has just
-// opened.
+// ReplayWindow bounds how much history Backlog hands a stream that has just
+// opened. A dashboard loading fresh has no use for the whole ring — replaying
+// every member's ring made a page load wade through thousands of events —
+// only for what happened just now, plus whatever is still running.
+const ReplayWindow = 30 * time.Second
+
+// Backlog returns the recent part of the ring marked as replay, for a stream
+// that has just opened: every event from the last ReplayWindow, and, from
+// before it, the events of requests still in flight.
 //
 // This is what makes a dropped connection recoverable. A consumer
 // reconstructing in-flight requests from start/done pairs loses the pairing for
 // anything that completes while it is away — a laptop sleeping, a tab throttled
 // in the background, a node restarting — and a start with no matching done
-// strands a row that never leaves. Replaying the ring hands back both halves.
+// strands a row that never leaves. Replaying hands back both halves. The
+// in-flight exception is why the window cannot simply cut: an inference running
+// for minutes started long before it, and dropping its start would make it
+// vanish from a reloaded dashboard while it is still running.
 //
 // The ring bounds how far back that works. A gap longer than the ring on a
 // given node cannot be repaired from here, which is why a consumer should also
 // treat a reconnect as a reason to rebuild rather than to carry state across.
-func (l *Log) Backlog() []Event {
-	out := l.Recent()
-	for i := range out {
-		out[i].Replay = true
+func (l *Log) Backlog() []Event { return l.backlogAt(time.Now()) }
+
+func (l *Log) backlogAt(now time.Time) []Event {
+	cutoff := now.Add(-ReplayWindow).Unix()
+	all := l.Recent()
+
+	// A request whose terminal event is in the ring is over, whenever it began.
+	var ended map[int64]bool
+	for _, ev := range all {
+		if ev.RequestID != 0 && meshapi.IsRequestTerminal(ev.Message) {
+			if ended == nil {
+				ended = make(map[int64]bool)
+			}
+			ended[ev.RequestID] = true
+		}
+	}
+
+	out := all[:0]
+	for _, ev := range all {
+		if ev.Time < cutoff && (ev.RequestID == 0 || ended[ev.RequestID]) {
+			continue
+		}
+		ev.Replay = true
+		out = append(out, ev)
 	}
 	return out
 }

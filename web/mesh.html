@@ -334,9 +334,8 @@ const promptOrder = [];           // keys in first-seen order, oldest first
 let maxPrompts = 1000;
 
 // Repaints are coalesced. Every event folds into the state above, but painting
-// is bound to time rather than to arrival: a stream replays each member's whole
-// event ring when it opens, so a soak delivers tens of thousands of events back
-// to back, and painting per event rebuilt the thousand-row prompt list once for
+// is bound to time rather than to arrival: a stream replays each member's recent
+// events when it opens, so a busy fleet delivers a burst of them back to back, and painting per event rebuilt the thousand-row prompt list once for
 // each of them — which stopped the page painting at all. Nothing is dropped.
 // These flags merge only repaints that would have drawn the same rows, and the
 // drain tick reads the very maps the events just wrote.

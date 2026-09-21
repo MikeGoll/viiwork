@@ -1,5 +1,25 @@
 # Changelog
 
+## v2.3.1
+
+### A dashboard loads the present, not the backlog
+
+**Opening `/mesh` now replays the last 30 seconds of activity, not every
+member's whole event ring.** Each activity stream replayed its node's ring when
+it opened, and `/mesh` follows one per member, so a page load on a 12-member
+fleet waded through thousands of events before it showed the present.
+
+- **Replay is bounded by time** (`activity.ReplayWindow`, 30 s): every event
+  from the window, plus — from before it — the events of any request still in
+  flight. The dashboards rebuild their in-flight rows from replayed starts, so
+  an inference running for minutes stays on a reloaded page instead of
+  vanishing while it is still running.
+- **Prompt history on `/mesh` starts short after a load.** It is filled from
+  the stream, so it now opens with the last 30 seconds and grows from there.
+  Older history is still on each node, via `/v1/activity`.
+- The effect is per node: a member one version behind still replays its whole
+  ring to whoever follows it.
+
 ## v2.3.0
 
 ### The fleet describes itself
