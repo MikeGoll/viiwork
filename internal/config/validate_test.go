@@ -122,6 +122,21 @@ func TestValidate(t *testing.T) {
 		{name: "engine rejects an unknown key in its block", mutate: func(c *Config) {
 			c.Models = []Model{engineBlockModel(testEnginePick, "p", "knobb: 1\n", 0)}
 		}, wantErr: "unknown key knobb"},
+
+		// parrot source
+		{name: "source instead of path", mutate: func(c *Config) { c.Models[0].Path = ""; c.Models[0].Source = "viiwork-parrot:granite4.2-8b-q8_0" }},
+		{name: "path and source", mutate: func(c *Config) { c.Models[0].Source = "viiwork-parrot:granite4.2-8b-q8_0" }, wantErr: "models[0]: set path or source, not both"},
+		{name: "neither path nor source", mutate: func(c *Config) { c.Models[0].Path = "" }, wantErr: "models[0].path is required (or source: viiwork-parrot:<id>)"},
+		{name: "source wrong scheme", mutate: func(c *Config) { c.Models[0].Path = ""; c.Models[0].Source = "hf:granite" }, wantErr: "models[0].source \"hf:granite\" must be viiwork-parrot:<catalog id>"},
+		{name: "source empty id", mutate: func(c *Config) { c.Models[0].Path = ""; c.Models[0].Source = "viiwork-parrot:" }, wantErr: "models[0].source"},
+		{name: "source id with whitespace", mutate: func(c *Config) { c.Models[0].Path = ""; c.Models[0].Source = "viiwork-parrot:gran ite" }, wantErr: "models[0].source"},
+		{name: "parrot api default", mutate: func(c *Config) {}},
+		{name: "parrot api localhost", mutate: func(c *Config) { c.ViiworkParrot.API = "localhost:7950" }},
+		{name: "parrot api ipv6 loopback", mutate: func(c *Config) { c.ViiworkParrot.API = "[::1]:7950" }},
+		{name: "parrot api not loopback", mutate: func(c *Config) { c.ViiworkParrot.API = "100.64.0.105:7950" }, wantErr: "viiwork_parrot.api \"100.64.0.105:7950\" must be a loopback address or localhost"},
+		{name: "parrot api hostname", mutate: func(c *Config) { c.ViiworkParrot.API = "gb1:7950" }, wantErr: "must be a loopback address or localhost"},
+		{name: "parrot api no port", mutate: func(c *Config) { c.ViiworkParrot.API = "127.0.0.1" }, wantErr: "viiwork_parrot.api \"127.0.0.1\" must be host:port"},
+		{name: "parrot api bad port", mutate: func(c *Config) { c.ViiworkParrot.API = "127.0.0.1:0" }, wantErr: "port must be 1-65535"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

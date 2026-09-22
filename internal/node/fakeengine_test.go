@@ -29,6 +29,7 @@ import (
 //	FAKE_STREAM_HOLD=<duration>  a streaming completion waits this long
 //	                             between its first chunk and the rest
 //	FAKE_HOLD=<duration>         a non-streaming completion waits this long
+//	FAKE_REQUIRE_MODEL=<path>    exit 1 unless --model is exactly this path
 
 func TestMain(m *testing.M) {
 	switch os.Getenv("NODE_HELPER") {
@@ -57,6 +58,10 @@ func argValue(args []string, flag string) string {
 
 func serveFakeLlamaServer() {
 	args := os.Args[1:]
+	if want := os.Getenv("FAKE_REQUIRE_MODEL"); want != "" && argValue(args, "--model") != want {
+		fmt.Printf("fake llama-server: --model %q, want %q\n", argValue(args, "--model"), want)
+		os.Exit(1)
+	}
 	ln, err := net.Listen("tcp", "127.0.0.1:"+argValue(args, "--port"))
 	if err != nil {
 		fmt.Println("listen:", err)

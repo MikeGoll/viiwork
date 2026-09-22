@@ -1,17 +1,25 @@
 package supervisor
 
 import (
+	"context"
 	"io"
 	"os"
 	"time"
 
 	"github.com/janit/viiwork/v2/internal/config"
 	"github.com/janit/viiwork/v2/internal/gpu"
+	"github.com/janit/viiwork/v2/internal/parrot"
 )
 
 // Events receives activity events. *activity.Log satisfies it.
 type Events interface {
 	Emit(typ string, gpuID int, format string, args ...any)
+}
+
+// Resolver gets a model's weights through the host's viiwork-parrot node.
+// *parrot.Client satisfies it.
+type Resolver interface {
+	Ensure(ctx context.Context, id string) parrot.Result
 }
 
 type discardEvents struct{}
@@ -27,6 +35,9 @@ type Timing struct {
 	GPUCheckWindow     time.Duration // on-GPU check deadline after turning healthy
 	RespawnStopGrace   time.Duration // SIGTERM window when stopping for a respawn
 	QuickExitWindow    time.Duration // an exit this soon after launch gets a free retry
+	FetchPoll          time.Duration // /ensure cadence while viiwork-parrot fetches
+	FetchRetryMax      time.Duration // backoff ceiling while viiwork-parrot is unreachable
+	FetchLogEvery      time.Duration // progress line interval between 10% steps
 }
 
 func DefaultTiming() Timing {
@@ -37,6 +48,9 @@ func DefaultTiming() Timing {
 		GPUCheckWindow:     60 * time.Second,
 		RespawnStopGrace:   5 * time.Second,
 		QuickExitWindow:    10 * time.Second,
+		FetchPoll:          5 * time.Second,
+		FetchRetryMax:      60 * time.Second,
+		FetchLogEvery:      60 * time.Second,
 	}
 }
 
@@ -48,6 +62,7 @@ type Deps struct {
 	PowerLimitWatts int
 	Log             io.Writer        // nil = os.Stdout
 	Events          Events           // nil = discard
+	Resolver        Resolver         // nil: a model with a source is dead at start
 	Timing          Timing           // zero fields take DefaultTiming values
 	Environ         func() []string  // nil = os.Environ
 	Now             func() time.Time // nil = time.Now
@@ -78,6 +93,9 @@ func (d Deps) withDefaults() Deps {
 	fill(&d.Timing.GPUCheckWindow, def.GPUCheckWindow)
 	fill(&d.Timing.RespawnStopGrace, def.RespawnStopGrace)
 	fill(&d.Timing.QuickExitWindow, def.QuickExitWindow)
+	fill(&d.Timing.FetchPoll, def.FetchPoll)
+	fill(&d.Timing.FetchRetryMax, def.FetchRetryMax)
+	fill(&d.Timing.FetchLogEvery, def.FetchLogEvery)
 	if d.Environ == nil {
 		d.Environ = os.Environ
 	}

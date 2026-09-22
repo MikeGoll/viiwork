@@ -269,3 +269,25 @@ func TestModelTotalSize(t *testing.T) {
 		t.Error("a missing file must be an error")
 	}
 }
+
+// A viiwork-parrot folder model resolves to a directory. llama.cpp loads a
+// GGUF file, so a directory is a configuration mistake no respawn fixes: an
+// error from Command marks the model dead at once instead of respawning a
+// llama-server that cannot load.
+func TestCommandRejectsADirectory(t *testing.T) {
+	dir := t.TempDir()
+	_, err := testEngine(8, 64*gib, 0, nil).Command(engine.Spec{Name: "folder", Path: dir, Port: 41000, Context: 512, Parallel: 1, Backends: 1})
+	if err == nil || !strings.Contains(err.Error(), "is a directory") {
+		t.Fatalf("err = %v, want a directory refusal", err)
+	}
+}
+
+func TestCommandAcceptsAFile(t *testing.T) {
+	f := filepath.Join(t.TempDir(), "m.gguf")
+	if err := os.WriteFile(f, []byte("gguf"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := testEngine(8, 64*gib, 0, nil).Command(engine.Spec{Name: "file", Path: f, Port: 41000, Context: 512, Parallel: 1, Backends: 1}); err != nil {
+		t.Fatalf("a file must be accepted: %v", err)
+	}
+}

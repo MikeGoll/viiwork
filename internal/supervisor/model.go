@@ -18,6 +18,7 @@ type Model struct {
 	cfg       config.Model
 	deps      Deps
 	backends  []*Backend
+	fetch     *fetch // nil unless the model has a source
 	admitting atomic.Bool
 	loops     sync.WaitGroup
 
@@ -33,9 +34,11 @@ func newModel(cfg config.Model, deps Deps) (*Model, error) {
 		return nil, fmt.Errorf("model %s: engine %q is not registered", cfg.Name, cfg.Engine)
 	}
 	deps = deps.withDefaults()
-	m := &Model{cfg: cfg, deps: deps, ctx: context.Background()}
+	m := &Model{cfg: cfg, deps: deps, ctx: context.Background(), fetch: newFetch(cfg, deps)}
 	for i := 0; i < cfg.Backends(); i++ {
-		m.backends = append(m.backends, newBackend(cfg, i, eng, deps))
+		b := newBackend(cfg, i, eng, deps)
+		b.fetch = m.fetch
+		m.backends = append(m.backends, b)
 	}
 	m.admitting.Store(true)
 	return m, nil

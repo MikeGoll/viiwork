@@ -251,3 +251,42 @@ func TestParseKeepsOwnEngineBlock(t *testing.T) {
 		t.Fatalf("llamacpp block = %+v (%v)", o, err)
 	}
 }
+
+func TestParseSourceAndParrot(t *testing.T) {
+	cfg, err := Parse([]byte("viiwork_parrot:\n  api: localhost:7951\nmodels:\n  - name: q\n    engine: llamacpp\n    source: viiwork-parrot:qwen3.8-27b-q4kxl\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.ViiworkParrot.API; got != "localhost:7951" {
+		t.Errorf("api = %q", got)
+	}
+	id, ok := cfg.Models[0].ParrotID()
+	if !ok || id != "qwen3.8-27b-q4kxl" {
+		t.Errorf("ParrotID = %q, %v", id, ok)
+	}
+	if cfg.Models[0].Path != "" {
+		t.Errorf("path = %q, want empty", cfg.Models[0].Path)
+	}
+}
+
+func TestParrotDefaults(t *testing.T) {
+	cfg, err := Parse([]byte("models: []\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ViiworkParrot.API != "127.0.0.1:7950" {
+		t.Errorf("default api = %q", cfg.ViiworkParrot.API)
+	}
+	if _, ok := (Model{Path: "/models/x.gguf"}).ParrotID(); ok {
+		t.Error("a model with a path has no parrot id")
+	}
+}
+
+func TestEqualSeesSource(t *testing.T) {
+	a := Model{Name: "q", Engine: "llamacpp", Source: "viiwork-parrot:a"}
+	b := a
+	b.Source = "viiwork-parrot:b"
+	if a.Equal(b) {
+		t.Error("models differing only in source must not be Equal")
+	}
+}

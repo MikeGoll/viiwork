@@ -11,7 +11,8 @@ import (
 )
 
 // Phase is the engine-reported load phase ("loading"), "queued" while waiting
-// for the load gate, or "".
+// for the load gate, "fetching" while viiwork-parrot resolves the model's
+// source, or "".
 func (b *Backend) Phase() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -81,8 +82,11 @@ func (b *Backend) run(ctx context.Context, first *loadTicket, gate *loadGate, no
 	l := &loop{b: b, ctx: ctx, gate: gate, nodePIDs: nodePIDs, ticket: first}
 	defer l.releaseTicket()
 
+	if b.fetch != nil && !l.resolveSource() {
+		return
+	}
 	b.setPhase("queued")
-	if first.wait(ctx) != nil {
+	if l.ticket.wait(ctx) != nil {
 		return
 	}
 	n := toLaunch
@@ -103,6 +107,35 @@ func (l *loop) releaseTicket() {
 		l.ticket.release()
 		l.ticket = nil
 	}
+}
+
+// resolveSource waits for the model's source to resolve, then joins the load
+// gate's queue — at its tail, since the queue was ordered when the model
+// started and a fetch may take hours. It returns false when the loop should
+// exit: the context ended, or the source cannot be resolved and the backend is
+// dead, like one whose engine cannot build a command.
+func (l *loop) resolveSource() bool {
+	b := l.b
+	b.setPhase("fetching")
+	path, err := b.fetch.wait(l.ctx)
+	if err != nil {
+		if l.ctx.Err() != nil {
+			return false
+		}
+		b.mu.Lock()
+		if b.ladder == nil {
+			b.ladder = l.newLadder()
+		}
+		b.ladder.MarkDead(err.Error())
+		b.mu.Unlock()
+		b.setPhase("")
+		b.emit("%v", err)
+		<-l.ctx.Done()
+		return false
+	}
+	b.path = path
+	l.ticket = l.gate.enqueue()
+	return true
 }
 
 // sleep waits d, returning false if ctx ended first.

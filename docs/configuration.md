@@ -14,6 +14,7 @@ Copy [`viiwork.yaml.example`](../viiwork.yaml.example) and edit it.
 - [GPU power limits](#gpu-power-limits)
 - [Pipelines](#pipelines)
 - [Client discovery](#client-discovery)
+- [viiwork-parrot](#viiwork-parrot)
 - [Environment variables](#environment-variables)
 - [Host requirements](#host-requirements)
 
@@ -41,6 +42,11 @@ models:
 
 A GPU belongs to at most one model. Every model on every machine is visible from
 any node.
+
+A model names its weights with `path` (a local file or directory) or `source`
+(a viiwork-parrot catalog id, `viiwork-parrot:<id>`) — exactly one of the two.
+A sourced model is resolved to a path by the host's viiwork-parrot before its
+engine starts; see [Models from viiwork-parrot](models.md#models-from-viiwork-parrot).
 
 **`models[].context` is the context of one slot**, for every engine: llama.cpp is
 started with `--ctx-size context × parallel`. viiwork 1.x's `model.context_size`
@@ -164,6 +170,23 @@ off by default, so a node makes no outbound request unless asked; set, it chains
 a hosted catalogue back in so a client keeps its other providers. What each
 field means to a client, and why the defaults are what they are:
 [autodiscovery.md](autodiscovery.md).
+
+## viiwork-parrot
+
+A model with `source: viiwork-parrot:<id>` gets its weights from the host's
+viiwork-parrot node instead of a local file — see
+[Models from viiwork-parrot](models.md#models-from-viiwork-parrot). It has one
+key:
+
+```yaml
+viiwork_parrot:
+  api: 127.0.0.1:7950   # viiwork-parrot's API address; loopback only
+```
+
+`api` defaults to `127.0.0.1:7950`. It must be a loopback address or
+`localhost` — viiwork-parrot's API is unauthenticated, so it is never reachable
+from another machine. A change needs a restart: `viiwork_parrot` is captured at
+start, and `SIGHUP` names it among the sections it did not apply.
 
 ## Environment variables
 

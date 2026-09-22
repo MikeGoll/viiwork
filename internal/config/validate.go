@@ -4,8 +4,10 @@ import (
 	"encoding/base64"
 	"fmt"
 	"github.com/janit/viiwork/v2/internal/engine"
+	"net"
 	"net/netip"
 	"os"
+	"strconv"
 	"strings"
 	"unicode"
 
@@ -143,6 +145,9 @@ func (c *Config) Validate(lookupEnv func(string) (string, bool)) error {
 			return fmt.Errorf("energy.sample_interval must be positive")
 		}
 	}
+	if err := c.validateParrot(); err != nil {
+		return err
+	}
 	return c.validateModels()
 }
 
@@ -221,6 +226,27 @@ func (c *Config) validateHealth() error {
 	return nil
 }
 
+// validateParrot keeps viiwork_parrot.api on this machine. viiwork-parrot's API
+// is loopback only and has no authentication, and pointing viiwork at another
+// host's would make that host's disk and swarm this node's to command.
+func (c *Config) validateParrot() error {
+	api := c.ViiworkParrot.API
+	host, port, err := net.SplitHostPort(api)
+	if err != nil {
+		return fmt.Errorf("viiwork_parrot.api %q must be host:port: %w", api, err)
+	}
+	if p, err := strconv.Atoi(port); err != nil || p < 1 || p > 65535 {
+		return fmt.Errorf("viiwork_parrot.api %q: port must be 1-65535", api)
+	}
+	if host == "localhost" {
+		return nil
+	}
+	if a, err := netip.ParseAddr(host); err == nil && a.IsLoopback() {
+		return nil
+	}
+	return fmt.Errorf("viiwork_parrot.api %q must be a loopback address or localhost: viiwork-parrot's API is loopback only", api)
+}
+
 func (c *Config) validateModels() error {
 	names := map[string]int{}
 	owner := map[int]int{} // GPU index -> index of the model that owns it
@@ -246,8 +272,16 @@ func (c *Config) validateModels() error {
 			}
 			return fmt.Errorf("%s.engine %q: this binary registers no engines (an engine package must be blank-imported)", p, m.Engine)
 		}
-		if strings.TrimSpace(m.Path) == "" {
-			return fmt.Errorf("%s.path is required", p)
+		hasPath, hasSource := strings.TrimSpace(m.Path) != "", m.Source != ""
+		switch {
+		case hasPath && hasSource:
+			return fmt.Errorf("%s: set path or source, not both", p)
+		case !hasPath && !hasSource:
+			return fmt.Errorf("%s.path is required (or source: %s<id>)", p, SourceParrot)
+		case hasSource:
+			if id, ok := m.ParrotID(); !ok || id == "" || strings.IndexFunc(id, unicode.IsSpace) >= 0 {
+				return fmt.Errorf("%s.source %q must be %s<catalog id>", p, m.Source, SourceParrot)
+			}
 		}
 
 		if m.GPUsPerBackend < 1 {
@@ -303,7 +337,8 @@ func runsOnCPU(e engine.Engine) bool {
 // so a rule about how many cards a backend has (llama.cpp's split weights, an
 // engine that binds exactly one) reads the same here as at launch. Port and
 // Vendor are zero — nothing has been assigned yet, and no options rule may
-// depend on them.
+// depend on them. Path is empty for a model with a source: it is resolved at
+// start, so no options rule may depend on it either.
 func ModelSpec(m Model) engine.Spec {
 	return engine.Spec{
 		Name:     m.Name,

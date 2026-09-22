@@ -20,6 +20,7 @@ streaming the rest from host memory. See
 
 - [What the reference fleet runs today](#what-the-reference-fleet-runs-today)
 - [Large models on one card: FreeToken and MoE offload](#large-models-on-one-card-freetoken-and-moe-offload)
+- [Models from viiwork-parrot](#models-from-viiwork-parrot)
 - [Tuning rules measured on gfx906](#tuning-rules-measured-on-gfx906)
 - [Validated production deployments](#validated-production-deployments)
 - [Bring-ups in progress](#bring-ups-in-progress)
@@ -123,6 +124,42 @@ Everything else — dtype, attention backend, MoE cache size, KV capacity, page
 size, CUDA-graph sizes — FreeToken resolves from the checkpoint and the card, and
 does it better than a config file can. That is why the `freetoken:` block is four
 keys; anything else belongs in `models[].args`.
+
+## Models from viiwork-parrot
+
+A model can name a viiwork-parrot catalog id instead of a file:
+
+```yaml
+models:
+  - name: Qwen3.8-27B
+    engine: llamacpp
+    source: viiwork-parrot:qwen3.8-27b-q4kxl
+    gpus: [0, 1]
+    context: 16384
+```
+
+At start the node asks the host's viiwork-parrot (`POST /ensure` on
+`viiwork_parrot.api`, default `127.0.0.1:7950`) for the model and runs the
+engine on the path it returns. viiwork-parrot downloads it if needed, checks
+every sha256 and seeds it; viiwork keeps no copy of its own.
+
+- Set `path` or `source`, never both.
+- While viiwork-parrot fetches, the model's backends are `starting` with phase
+  `fetching`, and the node logs progress every 10%. A download does not count
+  against `startup_timeout`, and it does not hold up any other model's load.
+- If viiwork-parrot is not running yet, the node waits for it (retrying up to
+  once a minute) — start order does not matter.
+- If viiwork-parrot refuses (unknown id, not available on this host, a failed
+  verification, no disk space), the model's backends are dead with its message.
+  Fix the cause and restart the node or change the model and send SIGHUP.
+- **Paths must match.** viiwork-parrot answers with host paths. In a container,
+  mount its data directory at the same path (for example
+  `/srv/viiwork-parrot:/srv/viiwork-parrot:ro`); the node checks the path
+  exists and says so if it does not.
+- A folder model (a safetensors directory) needs an engine that takes a
+  directory — vllm or freetoken. llamacpp refuses a directory.
+- `viiwork-accept config` checks a sourced model read-only through
+  viiwork-parrot's `GET /status`.
 
 ## Tuning rules measured on gfx906
 

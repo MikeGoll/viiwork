@@ -7,6 +7,7 @@ package llamacpp
 import (
 	"fmt"
 	"net/http"
+	"os"
 	"runtime"
 	"slices"
 	"strconv"
@@ -66,6 +67,14 @@ func (e *Engine) Command(s engine.Spec) (engine.Command, error) {
 	if err != nil {
 		return engine.Command{}, fmt.Errorf("llamacpp: model %s: %w", s.Name, err)
 	}
+
+	// A viiwork-parrot folder model resolves to a directory. A missing path
+	// is left to llama-server, as before; only an existing directory is
+	// refused here, because it can never load.
+	if fi, err := os.Stat(s.Path); err == nil && fi.IsDir() {
+		return engine.Command{}, fmt.Errorf("llamacpp: model %s: %s is a directory; llama.cpp loads a GGUF file, so a folder model needs an engine that takes a directory (vllm, freetoken)", s.Name, s.Path)
+	}
+
 	parallel := max(s.Parallel, 1)
 
 	args := []string{

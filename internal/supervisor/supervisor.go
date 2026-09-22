@@ -106,7 +106,8 @@ func (s *Supervisor) Apply(models []config.Model) error {
 }
 
 // start waits for the drains, then enqueues load tickets round-robin by
-// backend index across the started models and starts their loops.
+// backend index across the started models (a sourced model's backends
+// enqueue their own after fetching) and starts their loops.
 func (s *Supervisor) start(models []*Model, drains []chan struct{}) {
 	for _, done := range drains {
 		<-done
@@ -121,7 +122,14 @@ func (s *Supervisor) start(models []*Model, drains []chan struct{}) {
 		added := false
 		for _, m := range models {
 			if bs := m.Backends(); i < len(bs) {
-				queue = append(queue, pending{m, bs[i], s.gate.enqueue()})
+				// A sourced model joins the gate only once its fetch is
+				// done (resolveSource): a place held here during a
+				// download would stall every model behind it.
+				var tk *loadTicket
+				if m.fetch == nil {
+					tk = s.gate.enqueue()
+				}
+				queue = append(queue, pending{m, bs[i], tk})
 				added = true
 			}
 		}

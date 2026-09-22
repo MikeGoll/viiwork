@@ -28,6 +28,7 @@ import (
 	_ "github.com/janit/viiwork/v2/internal/engine/vllm"      // registers the vLLM engine
 	"github.com/janit/viiwork/v2/internal/gpu"
 	"github.com/janit/viiwork/v2/internal/modelinfo"
+	"github.com/janit/viiwork/v2/internal/parrot"
 	"github.com/janit/viiwork/v2/internal/pipeline"
 	"github.com/janit/viiwork/v2/internal/power"
 	"github.com/janit/viiwork/v2/internal/proxy"
@@ -49,14 +50,15 @@ const (
 )
 
 type Options struct {
-	ConfigPath string
-	Version    string
-	Log        io.Writer                                        // nil = os.Stdout
-	LookupEnv  func(string) (string, bool)                      // nil = os.LookupEnv
-	Hostname   func() (string, error)                           // nil = os.Hostname
-	Listen     func(network, addr string) (net.Listener, error) // nil = net.Listen
-	GPURunner  gpu.Runner                                       // nil = gpu.ExecRunner
-	MeshTune   func(*mesh.Options)                              // test seam, applied last
+	ConfigPath       string
+	Version          string
+	Log              io.Writer                                        // nil = os.Stdout
+	LookupEnv        func(string) (string, bool)                      // nil = os.LookupEnv
+	Hostname         func() (string, error)                           // nil = os.Hostname
+	Listen           func(network, addr string) (net.Listener, error) // nil = net.Listen
+	GPURunner        gpu.Runner                                       // nil = gpu.ExecRunner
+	MeshTune         func(*mesh.Options)                              // test seam, applied last
+	SupervisorTiming supervisor.Timing                                // test seam; zero fields take the defaults
 }
 
 // Node is one viiwork 2 node: its models, its mesh membership, its router and
@@ -223,6 +225,10 @@ func New(cfg *config.Config, o Options) (*Node, error) {
 	n.sup = supervisor.New(supervisor.Deps{
 		Vendor: n.vendor, Run: o.GPURunner, Health: cfg.Health,
 		PowerLimitWatts: cfg.GPU.PowerLimitWatts, Log: o.Log, Events: n.activity,
+		// A client makes no connection until a sourced model asks, so a
+		// node with only path models never talks to viiwork-parrot.
+		Resolver: parrot.New(cfg.ViiworkParrot.API),
+		Timing:   o.SupervisorTiming,
 	})
 
 	// 7. Routing, aliases and the inference handler.

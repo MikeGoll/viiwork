@@ -143,5 +143,16 @@ models:
   #     # node advertises. Match your context here.
   #     kv_reserve_tokens: 32768
 
+  # A model fetched and seeded by the host's viiwork-parrot instead of a local
+  # file (docs/models.md). Set path or source, not both.
+  # - name: granite-4.2-8b
+  #   engine: llamacpp
+  #   source: viiwork-parrot:granite4.2-8b-q8_0
+  #   gpus: [3]
+  #   context: 16384
+
+# viiwork_parrot:
+#   api: 127.0.0.1:7950   # loopback only
+
 power:
   source: none               # auto | dcmi | sdr | sensor:<NAME> | none

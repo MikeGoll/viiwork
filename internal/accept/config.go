@@ -1,6 +1,7 @@
 package accept
 
 import (
+	"context"
 	"fmt"
 	"io/fs"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/janit/viiwork/v2/internal/config"
+	"github.com/janit/viiwork/v2/internal/parrot"
 )
 
 const (
@@ -84,6 +86,11 @@ func SummarizeConfig(path string, lookupEnv func(string) (string, bool), modelsR
 		APIPort:    cfg.API.Port,
 		GossipPort: cfg.Mesh.BindPort,
 	}
+	// viiwork-parrot's status is read once, and only if a model is sourced.
+	var parrotList []parrot.ModelStatus
+	var parrotErr error
+	parrotRead := false
+
 	for _, m := range cfg.Models {
 		ms := ModelSummary{
 			Name:           m.Name,
@@ -95,30 +102,91 @@ func SummarizeConfig(path string, lookupEnv func(string) (string, bool), modelsR
 		}
 		ms.Slots = ms.Backends * m.Parallel
 
-		weightsPath := hostPath(m.Path, modelsRoot)
-		size, err := weightsSize(weightsPath)
-		weights := Check{Name: "weights " + m.Name}
-		switch {
-		case isHubID(m.Path):
-			// Not a filesystem path at all: vLLM and FreeToken both load a
-			// HuggingFace repo id, and the engine resolves it from its own
-			// cache or the hub at load time. There is nothing to stat, and
-			// failing here would tell an operator mid-conversion that working
-			// weights are missing.
-			weights.Pass = true
-			weights.Detail = m.Path + " (hub id — not checked locally)"
-			size, err = 0, nil
-		case err != nil:
-			weights.Detail = err.Error()
-		default:
-			weights.Pass = true
-			weights.Detail = fmt.Sprintf("%s %s", weightsPath, formatBytes(size))
+		var weights Check
+		var size int64
+		var sized bool
+		if id, ok := m.ParrotID(); ok {
+			if !parrotRead {
+				parrotRead = true
+				ctx, cancel := context.WithTimeout(context.Background(), parrot.DefaultTimeout)
+				parrotList, parrotErr = parrot.New(cfg.ViiworkParrot.API).Status(ctx)
+				cancel()
+			}
+			weights, size, sized = sourceCheck(m, id, cfg.ViiworkParrot.API, parrotList, parrotErr)
+		} else {
+			weights, size, sized = pathCheck(m, modelsRoot)
+		}
+		if sized {
 			ms.WeightsBytes = size
 		}
-		r.Checks = append(r.Checks, weights, startupCheck(m, size, err == nil))
+		r.Checks = append(r.Checks, weights, startupCheck(m, size, sized))
 		sum.Models = append(sum.Models, ms)
 	}
 	return sum, r
+}
+
+// pathCheck is the weights check for a model with a path. sized reports that
+// size is known (a hub id is not sized, and is not a failure).
+func pathCheck(m config.Model, modelsRoot string) (Check, int64, bool) {
+	weights := Check{Name: "weights " + m.Name}
+	if isHubID(m.Path) {
+		// Not a filesystem path at all: vLLM and FreeToken both load a
+		// HuggingFace repo id, and the engine resolves it from its own
+		// cache or the hub at load time. There is nothing to stat, and
+		// failing here would tell an operator mid-conversion that working
+		// weights are missing.
+		weights.Pass = true
+		weights.Detail = m.Path + " (hub id — not checked locally)"
+		return weights, 0, true
+	}
+	weightsPath := hostPath(m.Path, modelsRoot)
+	size, err := weightsSize(weightsPath)
+	if err != nil {
+		weights.Detail = err.Error()
+		return weights, 0, false
+	}
+	weights.Pass = true
+	weights.Detail = fmt.Sprintf("%s %s", weightsPath, formatBytes(size))
+	return weights, size, true
+}
+
+// sourceCheck is the weights check for a model sourced from viiwork-parrot.
+// Accept never changes anything, and /ensure does (it makes a model wanted),
+// so this reads /status — which lists only wanted models. An id that is not
+// listed is either unknown or not wanted yet; nothing read-only can tell
+// which, so it passes with a note rather than inventing a failure.
+func sourceCheck(m config.Model, id, api string, list []parrot.ModelStatus, err error) (Check, int64, bool) {
+	c := Check{Name: "weights " + m.Name}
+	if err != nil {
+		c.Detail = fmt.Sprintf("viiwork-parrot at %s: %v", api, err)
+		return c, 0, false
+	}
+	for _, st := range list {
+		if st.ID != id {
+			continue
+		}
+		switch st.State {
+		case "seeding":
+			size, serr := weightsSize(st.Path)
+			if serr != nil {
+				c.Detail = fmt.Sprintf("viiwork-parrot seeds %s at %s, but: %v", id, st.Path, serr)
+				return c, 0, false
+			}
+			c.Pass = true
+			c.Detail = fmt.Sprintf("%s %s (viiwork-parrot %s)", st.Path, formatBytes(size), id)
+			return c, size, true
+		case "failed", "paused", "absent":
+			c.Detail = fmt.Sprintf("viiwork-parrot %s is %s: %s", id, st.State, st.Error)
+			return c, 0, false
+		default:
+			c.Pass = true
+			c.Detail = fmt.Sprintf("viiwork-parrot %s: %s, %.1f%%", id, st.State, st.Percent)
+			return c, 0, false
+		}
+	}
+	c.Pass = true
+	c.Detail = fmt.Sprintf("viiwork-parrot %s: not wanted yet; viiwork will ensure it at startup (id not verified)", id)
+	return c, 0, false
 }
 
 func portCheck(name string, want int, key string, got int) Check {

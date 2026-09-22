@@ -85,6 +85,9 @@ services:
       # through tailscaled's local API. The directory, not the socket file: a
       # mounted file keeps its old inode when tailscaled restarts.
       - /var/run/tailscale:/var/run/tailscale:ro
+      # viiwork-parrot's data directory, at the SAME path as on the host, for
+      # models with `source: viiwork-parrot:<id>` (docs/models.md).
+      # - /srv/viiwork-parrot:/srv/viiwork-parrot:ro
 
     environment:
       # Only needed for gated or private models.

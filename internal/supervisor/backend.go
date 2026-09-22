@@ -35,6 +35,12 @@ type Backend struct {
 	out   io.Writer
 	kick  chan struct{}
 
+	// fetch is the model's shared source resolution, nil for a model with a
+	// path. path is what it resolved to: set once by the loop goroutine before
+	// the first launch and read only by it, so it needs no lock.
+	fetch *fetch
+	path  string
+
 	inFlight atomic.Int64
 
 	mu   sync.Mutex
@@ -177,6 +183,9 @@ func (b *Backend) launch() error {
 	// One builder for the config-to-Spec mapping, shared with validation, so an
 	// engine validates its options against the same shape it is launched with.
 	spec := config.ModelSpec(b.model)
+	if b.path != "" {
+		spec.Path = b.path
+	}
 	spec.GPUs = slices.Clone(b.gpus)
 	spec.Port = port
 	spec.Vendor = b.deps.Vendor

@@ -19,6 +19,7 @@ import (
 
 	"github.com/hashicorp/memberlist"
 	"github.com/janit/viiwork/v2/internal/config"
+	"github.com/janit/viiwork/v2/internal/supervisor"
 	"github.com/janit/viiwork/v2/mesh"
 	"github.com/janit/viiwork/v2/mesh/meshtest"
 	"github.com/janit/viiwork/v2/meshapi"
@@ -114,6 +115,8 @@ func startNodeYAML(t *testing.T, net *meshtest.Network, name string, models []st
 		t.Fatal(err)
 	}
 	o := Options{ConfigPath: tn.cfgPath, Version: "v2-test", Log: tn.log, LookupEnv: noEnv, Listen: loopbackListen}
+	// Fetch timing a test can wait for; production polls every 5 s.
+	o.SupervisorTiming = supervisor.Timing{FetchPoll: 50 * time.Millisecond, FetchRetryMax: 200 * time.Millisecond}
 	if tune != nil {
 		o.MeshTune = tune(tn)
 	} else {

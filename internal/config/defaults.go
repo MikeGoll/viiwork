@@ -13,6 +13,7 @@ const (
 	DefaultMeshSecretPrevEnv = "VIIWORK_MESH_SECRET_PREV"
 	DefaultTailscaleSocket   = "/var/run/tailscale/tailscaled.sock"
 	DefaultEventHistory      = 2000
+	DefaultParrotAPI         = "127.0.0.1:7950"
 )
 
 // Defaults returns the spec C1 defaults. Model-level defaults depend on each
@@ -74,6 +75,7 @@ func Defaults() Config {
 			HourSlots:      energy.DefaultHourSlots,
 			DaySlots:       energy.DefaultDaySlots,
 		},
-		Cost: CostConfig{Timezone: "Europe/Helsinki"},
+		Cost:          CostConfig{Timezone: "Europe/Helsinki"},
+		ViiworkParrot: ViiworkParrotConfig{API: DefaultParrotAPI},
 	}
 }

@@ -59,6 +59,9 @@ func (t *loadTicket) wait(ctx context.Context) error {
 // release frees the gate if the ticket holds it, or leaves the queue if it
 // does not. It is idempotent.
 func (t *loadTicket) release() {
+	if t == nil {
+		return
+	}
 	g := t.gate
 	g.mu.Lock()
 	defer g.mu.Unlock()

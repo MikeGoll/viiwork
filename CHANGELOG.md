@@ -1,5 +1,36 @@
 # Changelog
 
+## v2.4.0
+
+### Models from viiwork-parrot
+
+**A model can name a viiwork-parrot catalog id instead of a file, and the host
+keeps one copy of it.** `models[].source: viiwork-parrot:<id>` asks the host's
+viiwork-parrot node (`viiwork_parrot.api`, default `127.0.0.1:7950`) for the
+model's path at start; viiwork-parrot downloads it if needed, verifies every
+sha256, seeds it and hands back the path. viiwork never downloads and keeps no
+copy of its own. `docs/models.md` is the guide.
+
+- **The fetch runs before the model's backends join the load gate.** A
+  download of any length holds up no other model's load and never counts
+  against `startup_timeout`; the backends show `starting` with phase
+  `fetching`, and the node logs progress every 10%.
+- **Start order doesn't matter.** If viiwork-parrot isn't running yet, the node
+  waits for it, retrying up to once a minute.
+- **A refusal is terminal.** An unknown id, a model not available on this
+  host, a failed verification or no disk space marks the model's backends dead
+  with viiwork-parrot's own message.
+- **Paths must match.** viiwork-parrot answers with host paths, so a
+  containerised node mounts its data directory at the same path; the node
+  checks the path exists and says so if it does not.
+- **llamacpp refuses a directory.** A folder model (a safetensors directory)
+  needs an engine that takes one — vllm or freetoken.
+- **`viiwork-accept config` checks a sourced model read-only**, through
+  viiwork-parrot's `GET /status`.
+
+Additive config keys only (`models[].source`, `viiwork_parrot.api`); no change
+to the mesh contract.
+
 ## v2.3.1
 
 ### A dashboard loads the present, not the backlog

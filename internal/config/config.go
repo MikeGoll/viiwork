@@ -89,18 +89,19 @@ func (t Toggle) Resolve(auto bool) bool {
 func (t Toggle) valid() bool { return t == ToggleAuto || t == ToggleOn || t == ToggleOff }
 
 type Config struct {
-	Node      NodeConfig                         `yaml:"node"`
-	API       APIConfig                          `yaml:"api"`
-	Mesh      MeshConfig                         `yaml:"mesh"`
-	Routing   RoutingConfig                      `yaml:"routing"`
-	GPU       GPUConfig                          `yaml:"gpu"`
-	Models    []Model                            `yaml:"models"`
-	Health    HealthConfig                       `yaml:"health"`
-	Activity  ActivityConfig                     `yaml:"activity"`
-	Power     PowerConfig                        `yaml:"power"`
-	Energy    EnergyConfig                       `yaml:"energy"`
-	Cost      CostConfig                         `yaml:"cost"`
-	Pipelines map[string]pipeline.PipelineConfig `yaml:"pipelines"`
+	Node          NodeConfig                         `yaml:"node"`
+	API           APIConfig                          `yaml:"api"`
+	Mesh          MeshConfig                         `yaml:"mesh"`
+	Routing       RoutingConfig                      `yaml:"routing"`
+	GPU           GPUConfig                          `yaml:"gpu"`
+	Models        []Model                            `yaml:"models"`
+	Health        HealthConfig                       `yaml:"health"`
+	Activity      ActivityConfig                     `yaml:"activity"`
+	Power         PowerConfig                        `yaml:"power"`
+	Energy        EnergyConfig                       `yaml:"energy"`
+	Cost          CostConfig                         `yaml:"cost"`
+	ViiworkParrot ViiworkParrotConfig                `yaml:"viiwork_parrot"`
+	Pipelines     map[string]pipeline.PipelineConfig `yaml:"pipelines"`
 }
 
 type NodeConfig struct {
@@ -187,12 +188,28 @@ type GPUConfig struct {
 	PowerLimitWatts int    `yaml:"power_limit_watts"`
 }
 
+// ViiworkParrotConfig is the host's viiwork-parrot node. A model with a source
+// gets its weights through it: viiwork-parrot downloads, verifies and seeds
+// them, and viiwork only asks for the path. See docs/models.md.
+type ViiworkParrotConfig struct {
+	// API is viiwork-parrot's API address, host:port. That API is loopback
+	// only and unauthenticated, so Validate refuses any other host.
+	API string `yaml:"api"`
+}
+
+// SourceParrot is the scheme of a models[].source served by viiwork-parrot.
+const SourceParrot = "viiwork-parrot:"
+
 // Model is one models[] entry. Context is tokens PER SLOT for every engine;
 // engines translate it (llama.cpp --ctx-size = context * parallel).
 type Model struct {
 	Name           string            `yaml:"name"`
 	Engine         string            `yaml:"engine"`
 	Path           string            `yaml:"path"`
+	// Source names a model by catalog id instead of by file: the node asks
+	// viiwork-parrot for it at start and runs the engine on the path it
+	// returns. Exactly one of Path and Source is set.
+	Source         string            `yaml:"source"`
 	GPUs           []int             `yaml:"gpus"`
 	GPUsPerBackend int               `yaml:"gpus_per_backend"`
 	Context        int               `yaml:"context"`
@@ -218,6 +235,12 @@ func (m Model) EngineBlock() yaml.Node {
 		return n
 	}
 	return yaml.Node{}
+}
+
+// ParrotID is the viiwork-parrot catalog id this model is sourced from, and
+// false when it has no viiwork-parrot source.
+func (m Model) ParrotID() (string, bool) {
+	return strings.CutPrefix(m.Source, SourceParrot)
 }
 
 // Equal reports whether two models are the same configuration.

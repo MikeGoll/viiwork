@@ -33,6 +33,7 @@ func (n *Node) Reload() error {
 		{"Power", current.Power, next.Power},
 		{"Energy", current.Energy, next.Energy},
 		{"Cost", current.Cost, next.Cost},
+		{"ViiworkParrot", current.ViiworkParrot, next.ViiworkParrot},
 		{"Pipelines", current.Pipelines, next.Pipelines},
 	}
 	var restart []string
