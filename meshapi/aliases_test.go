@@ -19,6 +19,16 @@ func TestValidAliasName(t *testing.T) {
 	}
 }
 
+// AliasInfo.UpdatedAt is wire format: RFC 3339, UTC, milliseconds.
+func TestFormatAliasTime(t *testing.T) {
+	if got, want := FormatAliasTime(1757700000123), "2025-09-12T18:00:00.123Z"; got != want {
+		t.Errorf("FormatAliasTime = %q, want %q", got, want)
+	}
+	if AliasTimeLayout != "2006-01-02T15:04:05.000Z07:00" {
+		t.Errorf("AliasTimeLayout changed: %q", AliasTimeLayout)
+	}
+}
+
 func TestCompareAliasEntries(t *testing.T) {
 	cases := []struct {
 		name string

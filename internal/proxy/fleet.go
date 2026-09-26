@@ -5,6 +5,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/janit/viiwork/v2/internal/httpjson"
 	"github.com/janit/viiwork/v2/mesh/capacity"
 	"github.com/janit/viiwork/v2/meshapi"
 )
@@ -30,7 +31,7 @@ func (h *Handler) handleFleetCapacity(w http.ResponseWriter, r *http.Request) {
 	if out.Models == nil {
 		out.Models = []meshapi.FleetModel{}
 	}
-	writeJSON(w, http.StatusOK, out)
+	httpjson.Write(w, http.StatusOK, out)
 }
 
 // filterModel narrows the fleet view to one model, resolving an alias to the
@@ -118,6 +119,10 @@ func aggregateFleet(self string, local []meshapi.ModelCapacity, reports []capaci
 
 		a.model.Slots += m.Slots
 		a.model.Busy += m.Busy
+		// Free is the sum of each host's clamped free, which is what the router
+		// can place: an oversubscribed host (busy > slots, e.g. mid-drain) has
+		// no spare slot to lend, and must not cancel spare slots elsewhere.
+		a.model.Free += free
 		a.model.Queued += m.Queued
 		// The floor a consumer can rely on, not a mean no backend will honour.
 		//
@@ -160,9 +165,6 @@ func aggregateFleet(self string, local []meshapi.ModelCapacity, reports []capaci
 	}
 	for _, a := range byModel {
 		m := a.model
-		if m.Free = m.Slots - m.Busy; m.Free < 0 {
-			m.Free = 0
-		}
 		sort.Slice(m.Hosts, func(i, j int) bool { return m.Hosts[i].Node < m.Hosts[j].Node })
 		out.Models = append(out.Models, m)
 	}

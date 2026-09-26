@@ -157,12 +157,31 @@ func (r *Router) Run(ctx context.Context) {
 // nothing. Scanning past a waiter with no candidate is what keeps a request
 // pinned to a full host from stalling unpinned requests behind it (Decision 7).
 // A waiter whose model or pinned host is gone completes with that error.
+//
+// Within one model's scan, once an unpinned waiter finds no free slot, every
+// later unpinned waiter would ask exactly the same question (queued requests
+// carry no Exclude) and get the same answer, so they are skipped; FIFO order is
+// unchanged because the one that was refused is still ahead of them. Pinned
+// waiters are still asked: their host may have gone, which completes them with
+// ErrHostNotServing. The members' reports are fetched once per call: nothing
+// that changes them can run while the router mutex is held.
 func (r *Router) dispatchLocked() {
+	if len(r.queues) == 0 {
+		return
+	}
+	reports := r.c.Remote.Reports()
+	var scan []*waiter
 	for progressed := true; progressed; {
 		progressed = false
 		for _, ws := range r.queues {
-			for _, w := range append([]*waiter(nil), ws...) {
-				l, err := r.pickLocked(w.req)
+			// A copy: completing a waiter edits the queue being scanned.
+			scan = append(scan[:0], ws...)
+			unpinnedFull := false
+			for _, w := range scan {
+				if unpinnedFull && w.req.Host == "" {
+					continue
+				}
+				l, err := r.pickWithReportsLocked(w.req, reports)
 				switch {
 				case err == nil:
 					r.completeLocked(w, waitResult{lease: l})
@@ -170,6 +189,8 @@ func (r *Router) dispatchLocked() {
 				case errors.Is(err, ErrModelNotFound), errors.Is(err, ErrHostNotServing):
 					r.completeLocked(w, waitResult{err: err})
 					progressed = true
+				case w.req.Host == "":
+					unpinnedFull = true
 				}
 			}
 		}

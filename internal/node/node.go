@@ -23,9 +23,8 @@ import (
 	"github.com/janit/viiwork/v2/internal/catalog"
 	"github.com/janit/viiwork/v2/internal/config"
 	"github.com/janit/viiwork/v2/internal/cost"
-	_ "github.com/janit/viiwork/v2/internal/engine/freetoken" // registers the FreeToken engine
-	_ "github.com/janit/viiwork/v2/internal/engine/llamacpp"  // registers the llama.cpp engine
-	_ "github.com/janit/viiwork/v2/internal/engine/vllm"      // registers the vLLM engine
+	"github.com/janit/viiwork/v2/internal/discovery"
+	_ "github.com/janit/viiwork/v2/internal/engine/all" // registers every engine (contract C7)
 	"github.com/janit/viiwork/v2/internal/gpu"
 	"github.com/janit/viiwork/v2/internal/modelinfo"
 	"github.com/janit/viiwork/v2/internal/parrot"
@@ -50,15 +49,18 @@ const (
 )
 
 type Options struct {
-	ConfigPath       string
-	Version          string
-	Log              io.Writer                                        // nil = os.Stdout
-	LookupEnv        func(string) (string, bool)                      // nil = os.LookupEnv
-	Hostname         func() (string, error)                           // nil = os.Hostname
-	Listen           func(network, addr string) (net.Listener, error) // nil = net.Listen
-	GPURunner        gpu.Runner                                       // nil = gpu.ExecRunner
-	MeshTune         func(*mesh.Options)                              // test seam, applied last
-	SupervisorTiming supervisor.Timing                                // test seam; zero fields take the defaults
+	ConfigPath string
+	Version    string
+	Log        io.Writer                                        // nil = os.Stdout
+	LookupEnv  func(string) (string, bool)                      // nil = os.LookupEnv
+	Hostname   func() (string, error)                           // nil = os.Hostname
+	Listen     func(network, addr string) (net.Listener, error) // nil = net.Listen
+	GPURunner  gpu.Runner                                       // nil = gpu.ExecRunner
+	MeshTune   func(*mesh.Options)                              // test seam, applied last
+	// MagicDNS reads this tailnet's MagicDNS suffix for the derived CORS
+	// allowlist. nil = mesh.ReadMagicDNSSuffix.
+	MagicDNS         func(ctx context.Context, socket string) (string, error)
+	SupervisorTiming supervisor.Timing // test seam; zero fields take the defaults
 }
 
 // Node is one viiwork 2 node: its models, its mesh membership, its router and
@@ -97,6 +99,7 @@ type Node struct {
 	mesh         atomic.Pointer[mesh.Mesh]
 	apiPort      atomic.Int32
 	apiAddr      atomic.Value // string
+	selfAddr     atomic.Value // string: where this node dials its own API
 	ready        chan struct{}
 	streamCtx    context.Context
 	streamCancel context.CancelFunc
@@ -137,10 +140,14 @@ func New(cfg *config.Config, o Options) (*Node, error) {
 	if o.GPURunner == nil {
 		o.GPURunner = gpu.ExecRunner
 	}
+	if o.MagicDNS == nil {
+		o.MagicDNS = mesh.ReadMagicDNSSuffix
+	}
 	running := *cfg
 	n := &Node{o: o, logger: log.New(o.Log, "", log.LstdFlags), cfg: &running, started: time.Now(), ready: make(chan struct{})}
 	n.streamCtx, n.streamCancel = context.WithCancel(context.Background())
 	n.apiAddr.Store("")
+	n.selfAddr.Store("")
 
 	// 1. Identity.
 	n.name = cfg.Node.Name
@@ -265,7 +272,10 @@ func New(cfg *config.Config, o Options) (*Node, error) {
 	}
 	var executor *pipeline.Executor
 	if len(pipelines) > 0 {
-		executor = pipeline.NewExecutor("http://127.0.0.1:"+strconv.Itoa(cfg.API.Port), nil)
+		// Steps call back into this node's own API. The host in the base URL
+		// is a placeholder: selfTransport dials the address the listener
+		// actually bound, which is only known once Run has listened.
+		executor = pipeline.NewExecutor("http://"+selfHost, n.selfClient())
 	}
 	inference := proxy.NewHandler(proxy.Deps{
 		Self: n.name, Version: o.Version, Router: n.router, Reports: n.capPoller, Local: n.sup,
@@ -280,11 +290,7 @@ func New(cfg *config.Config, o Options) (*Node, error) {
 	n.powerCtl = newPowerController(cfg, n.name, o.LookupEnv, n.logf)
 
 	// 9. The server and the mesh options.
-	var cors *CORS
-	if len(cfg.API.CORS.AllowOrigins) > 0 {
-		tailnetIPs := cfg.API.CORS.AllowTailnetIPs == nil || *cfg.API.CORS.AllowTailnetIPs
-		cors = &CORS{Origins: cfg.API.CORS.AllowOrigins, TailnetIPs: tailnetIPs}
-	}
+	cors := n.buildCORS(cfg)
 	n.handler = NewServer(ServerDeps{
 		Self: n.name, Version: o.Version, Started: n.started, StreamCtx: n.streamCtx,
 		Catalog: buildCatalog(cfg, inference),
@@ -303,6 +309,43 @@ func New(cfg *config.Config, o Options) (*Node, error) {
 	})
 	n.meshOpts = n.buildMeshOptions(cfg, keys)
 	return n, nil
+}
+
+// magicDNSTimeout bounds the startup question to tailscaled. A daemon that
+// does not answer in that time is treated as absent.
+const magicDNSTimeout = 3 * time.Second
+
+// buildCORS returns the origin allowlist, or nil for none. An explicit
+// api.cors.allow_origins is used exactly as written ([] meaning no CORS). Left
+// unset, the list is derived: this tailnet's own MagicDNS domain as reported
+// by tailscaled, plus localhost and 127.0.0.1. Never "*.ts.net", which is
+// every Tailscale customer's domain, Funnel pages included; when tailscaled
+// cannot say, the node falls back to the local origins (and tailnet IP
+// literals) and says so.
+func (n *Node) buildCORS(cfg *config.Config) *CORS {
+	c := cfg.API.CORS
+	tailnetIPs := c.AllowTailnetIPs == nil || *c.AllowTailnetIPs
+	if !c.Derive() {
+		if len(c.AllowOrigins) == 0 {
+			return nil
+		}
+		return &CORS{Origins: c.AllowOrigins, TailnetIPs: tailnetIPs}
+	}
+	origins := config.LocalCORSOrigins()
+	ctx, cancel := context.WithTimeout(context.Background(), magicDNSTimeout)
+	suffix, err := n.o.MagicDNS(ctx, cfg.Mesh.Tailnet.Socket)
+	cancel()
+	literals := ""
+	if tailnetIPs {
+		literals = " and tailnet IP literals"
+	}
+	if err == nil && suffix != "" {
+		origins = append(origins, "*."+suffix)
+		n.logf("api.cors: allowing browser origins %v%s (this tailnet's MagicDNS domain, from tailscaled); set api.cors.allow_origins to choose", origins, literals)
+	} else {
+		n.logf("api.cors: this tailnet's MagicDNS domain is unknown (%v); allowing only browser origins %v%s. Set api.cors.allow_origins to add your tailnet's domain, e.g. \"*.tailXXXX.ts.net\"", err, origins, literals)
+	}
+	return &CORS{Origins: origins, TailnetIPs: tailnetIPs}
 }
 
 func (n *Node) buildMeshOptions(cfg *config.Config, keys config.MeshKeys) mesh.Options {
@@ -431,6 +474,12 @@ func (n *Node) Run(ctx context.Context) error {
 		n.apiPort.Store(int32(tcp.Port))
 	}
 	n.apiAddr.Store(ln.Addr().String())
+	n.selfAddr.Store(selfDialAddr(ln.Addr()))
+	if wildcardHost(cfg.API.Host) {
+		n.logf("api: listening on every network interface (api.host %q). The API authenticates nothing — "+
+			"inference, prompt history, aliases and power control are open to every network this machine is on. "+
+			"Set api.host to this machine's tailnet or LAN address to narrow it", cfg.API.Host)
+	}
 	// No write timeout: streams would break. v1's header and idle timeouts.
 	srv := &http.Server{Handler: n.handler, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 120 * time.Second}
 	serveDone := make(chan struct{})
@@ -594,7 +643,7 @@ func newPowerController(cfg *config.Config, hostname string, lookupEnv func(stri
 // buildCatalog returns the OpenCode catalogue handler, or nil when the node
 // serves none. The source is the inference handler, which already holds both
 // views the catalogue renders.
-func buildCatalog(cfg *config.Config, src catalog.Source) http.Handler {
+func buildCatalog(cfg *config.Config, src discovery.Source) http.Handler {
 	c := cfg.API.Catalog
 	if !c.Enabled.Resolve(true) {
 		return nil

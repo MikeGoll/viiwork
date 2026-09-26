@@ -31,22 +31,20 @@ const DefaultEventHistory = 200
 const maxSubscribers = 16
 
 type Log struct {
-	mu          sync.Mutex
-	maxEvents   int
+	mu        sync.Mutex
+	maxEvents int
+	// events is a circular buffer. It grows by append until it holds
+	// maxEvents; from then on head is the oldest event's index and each emit
+	// overwrites it, so a full ring costs no allocation or copy per event.
 	events      []Event
+	head        int
 	subscribers map[chan []byte]struct{}
 	prompts     *PromptStore
 }
 
-// NewLog returns a log with the default prompt-history capacity.
-func NewLog() *Log { return NewLogWithPromptHistory(DefaultPromptHistory) }
-
-// NewLogWithPromptHistory returns a log whose prompt store holds promptHistory
-// requests. Kept separate from NewLog so the many call sites that do not care
-// stay unchanged.
-func NewLogWithPromptHistory(promptHistory int) *Log {
-	return NewLogWithHistory(promptHistory, DefaultEventHistory)
-}
+// NewLog returns a log with the default prompt-history and event-ring
+// capacities.
+func NewLog() *Log { return NewLogWithHistory(DefaultPromptHistory, DefaultEventHistory) }
 
 // NewLogWithHistory also sizes the event ring (C1 activity.event_history);
 // eventHistory <= 0 means DefaultEventHistory. The ring is also how far back a
@@ -115,11 +113,11 @@ func (l *Log) emit(ev Event) {
 
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.events = append(l.events, ev)
-	if len(l.events) > l.maxEvents {
-		kept := make([]Event, l.maxEvents)
-		copy(kept, l.events[len(l.events)-l.maxEvents:])
-		l.events = kept
+	if len(l.events) < l.maxEvents {
+		l.events = append(l.events, ev)
+	} else {
+		l.events[l.head] = ev
+		l.head = (l.head + 1) % l.maxEvents
 	}
 	// Sent while holding the lock, not to a snapshot taken under it and
 	// released first. Subscribe closes the oldest subscriber's channel when it
@@ -188,8 +186,10 @@ func (l *Log) backlogAt(now time.Time) []Event {
 func (l *Log) Recent() []Event {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	// Oldest first: the part from head to the end, then the wrapped part.
 	out := make([]Event, len(l.events))
-	copy(out, l.events)
+	n := copy(out, l.events[l.head:])
+	copy(out[n:], l.events[:l.head])
 	return out
 }
 

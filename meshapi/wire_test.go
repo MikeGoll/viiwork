@@ -83,6 +83,9 @@ func TestV2WireFields(t *testing.T) {
 	assertFields(t, Event{}, []string{"t", "type", "message", "gpu_id", "rid", "task_id", "replay"})
 	assertFields(t, MeshEvent{}, []string{"t", "type", "message", "gpu_id", "rid", "task_id", "replay", "node_id", "hostname", "addr"})
 	assertFields(t, PromptEntry{}, []string{"rid", "t", "model", "prompt", "output", "elapsed_ms"})
+	assertFields(t, FleetCapacityResponse{}, []string{"view", "ver", "stale_after_s", "models", "resolved_from"})
+	assertFields(t, FleetModel{}, []string{"name", "engine", "slots", "busy", "free", "queued", "ctx", "hosts"})
+	assertFields(t, FleetHost{}, []string{"node", "api", "slots", "busy", "free", "ctx", "age_ms", "stale"})
 }
 
 // Fields a node may be unable to measure must be omitempty, so "absent" never
@@ -100,6 +103,8 @@ func TestV2UnmeasurableFieldsAreOmitempty(t *testing.T) {
 		{CostInfo{}, []string{"eur_per_hour", "today_eur", "breakdown"}},
 		{ClusterResponse{}, []string{"power_control", "cluster_cost_eur_per_hour", "cluster_cost_today_eur"}},
 		{ModelEntry{}, []string{"target", "max_model_len", "context_length"}},
+		{FleetModel{}, []string{"ctx"}},
+		{FleetHost{}, []string{"slots", "busy", "free", "ctx"}},
 	}
 	for _, c := range cases {
 		_, omit := jsonTags(t, c.val)
@@ -186,6 +191,7 @@ func TestPathsAreFrozen(t *testing.T) {
 		{PathStatus, "/v1/status"},
 		{PathCluster, "/v1/cluster"},
 		{PathCapacity, "/v1/capacity"},
+		{PathFleetCapacity, "/v1/fleet/capacity"},
 		{PathModels, "/v1/models"},
 		{PathChatCompletions, "/v1/chat/completions"},
 		{PathCompletions, "/v1/completions"},

@@ -24,6 +24,11 @@ const maxCaptureBytes = 2 << 20
 // (P4 Decision 13).
 const captureTailBytes = 16 << 10
 
+// maxOutputChars is how much output text the prompt history keeps: activity's
+// maxPromptChars, which truncates everything past it. Output stops decoding
+// there (TestOutputCapMatchesThePromptStore pins the two together).
+const maxOutputChars = 50000
+
 // captureWriter tees a proxied response into a bounded buffer on its way to
 // the client, so the finished text can be recorded for the prompt history.
 //
@@ -165,11 +170,25 @@ var sseDataPrefix = []byte("data:")
 // reasoning_content and leaves content empty, so dropping reasoning would show
 // a blank output for exactly the requests most worth inspecting; merging the
 // two silently would misrepresent what the client received.
+//
+// Decoding stops once the text gathered exceeds maxOutputChars: the prompt
+// history keeps no more than that, and the text past it would be decoded only
+// to be thrown away — up to maxCaptureBytes of JSON, while the handler waits.
+// What is kept is unchanged: the first maxOutputChars bytes of the result are
+// the same with or without the early stop, save for a response ending in more
+// whitespace than that.
 func extractOutputText(raw []byte) string {
 	var content, reasoning strings.Builder
 
 	if bytes.HasPrefix(bytes.TrimLeft(raw, " \r\n"), sseDataPrefix) {
-		for _, line := range bytes.Split(raw, []byte("\n")) {
+		rest := raw
+		for len(rest) > 0 && content.Len()+reasoning.Len() <= maxOutputChars {
+			line := rest
+			if i := bytes.IndexByte(rest, '\n'); i >= 0 {
+				line, rest = rest[:i], rest[i+1:]
+			} else {
+				rest = nil
+			}
 			line = bytes.TrimSpace(line)
 			if !bytes.HasPrefix(line, sseDataPrefix) {
 				continue

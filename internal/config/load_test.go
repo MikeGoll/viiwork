@@ -133,6 +133,47 @@ func TestParseAppliesDefaults(t *testing.T) {
 	}
 }
 
+// The CORS allowlist has three states, and the YAML must keep them apart:
+// unset is derived by the node from tailscaled, an explicit list is used as
+// written, and an explicit empty list means no CORS at all. A default of
+// "*.ts.net" used to fill the unset case, which trusted every Tailscale
+// customer's Funnel pages.
+func TestParseCORSUnsetExplicitEmpty(t *testing.T) {
+	cases := []struct {
+		doc    string
+		derive bool
+		want   []string
+	}{
+		{"", true, nil},
+		{"api:\n  port: 8086\n", true, nil},
+		{"api:\n  cors:\n    allow_tailnet_ips: false\n", true, nil},
+		{"api:\n  cors:\n    allow_origins:\n", true, nil}, // null is unset
+		{"api:\n  cors:\n    allow_origins: []\n", false, []string{}},
+		{"api:\n  cors:\n    allow_origins: [\"*.tail1234.ts.net\"]\n", false, []string{"*.tail1234.ts.net"}},
+	}
+	for _, tc := range cases {
+		cfg, err := Parse([]byte(tc.doc))
+		if err != nil {
+			t.Fatalf("%q: %v", tc.doc, err)
+		}
+		c := cfg.API.CORS
+		if c.Derive() != tc.derive || len(c.AllowOrigins) != len(tc.want) {
+			t.Errorf("%q: derive=%v origins=%q; want derive=%v origins=%q", tc.doc, c.Derive(), c.AllowOrigins, tc.derive, tc.want)
+			continue
+		}
+		for i := range tc.want {
+			if c.AllowOrigins[i] != tc.want[i] {
+				t.Errorf("%q: origins=%q, want %q", tc.doc, c.AllowOrigins, tc.want)
+			}
+		}
+	}
+	for _, o := range Defaults().API.CORS.AllowOrigins {
+		if o == "*.ts.net" {
+			t.Error("the default allowlist trusts *.ts.net again")
+		}
+	}
+}
+
 func TestParseEmptyDocumentGivesDefaults(t *testing.T) {
 	cfg, err := Parse(nil)
 	if err != nil {

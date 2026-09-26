@@ -176,6 +176,7 @@ func TestFleetCapacityResolvesAnAlias(t *testing.T) {
 	tn := startNode(t, net, "A", []fakeModel{{name: "m"}, {name: "n"}}, "", seeded(net, "A"))
 
 	req, _ := http.NewRequest(http.MethodPut, tn.url(meshapi.AliasPath("stable")), strings.NewReader(`{"target":"m"}`))
+	req.Header.Set("Content-Type", "application/json") // control writes are JSON or 415
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -203,6 +204,7 @@ func TestFleetCapacityResolvesAnAlias(t *testing.T) {
 
 	// An alias nobody serves is zero capacity, not an outage: empty list, 200.
 	req2, _ := http.NewRequest(http.MethodPut, tn.url(meshapi.AliasPath("dangling")), strings.NewReader(`{"target":"gone","force":true}`))
+	req2.Header.Set("Content-Type", "application/json")
 	resp3, err := http.DefaultClient.Do(req2)
 	if err != nil {
 		t.Fatal(err)

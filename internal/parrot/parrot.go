@@ -75,9 +75,9 @@ type ModelStatus struct {
 }
 
 type ensureResponse struct {
-	Path   string      `json:"path"`
-	Error  string      `json:"error"`
-	Status ModelStatus `json:"status"`
+	Path   string          `json:"path"`
+	Error  string          `json:"error"`
+	Status json.RawMessage `json:"status"`
 }
 
 // Client talks to one viiwork-parrot node.
@@ -109,11 +109,16 @@ func (c *Client) Ensure(ctx context.Context, id string) Result {
 
 	var er ensureResponse
 	decoded := json.Unmarshal(raw, &er) == nil
+	// The status shape is decoded separately and its error ignored: a change
+	// to it (or a status that is not an object, e.g. a bare state string)
+	// must not stop path and error from being read.
+	var status ModelStatus
+	_ = json.Unmarshal(er.Status, &status)
 	r := Result{
 		Code:     resp.StatusCode,
-		State:    er.Status.State,
-		Percent:  er.Status.Percent,
-		DownRate: er.Status.DownRate,
+		State:    status.State,
+		Percent:  status.Percent,
+		DownRate: status.DownRate,
 		Message:  er.Error,
 	}
 	if !decoded {
@@ -122,6 +127,13 @@ func (c *Client) Ensure(ctx context.Context, id string) Result {
 	}
 	switch resp.StatusCode {
 	case http.StatusOK:
+		if !decoded {
+			// The body isn't the shape we expect at all — retry costs
+			// nothing, and treating an unparseable 200 as permanently
+			// refused would kill a model whose weights are actually ready.
+			r.Kind = Unavailable
+			return r
+		}
 		if er.Path == "" {
 			r.Kind, r.Message = Refused, "viiwork-parrot answered 200 without a path"
 			return r
@@ -131,6 +143,9 @@ func (c *Client) Ensure(ctx context.Context, id string) Result {
 		r.Kind = Pending
 	case http.StatusServiceUnavailable:
 		r.Kind = Unavailable
+		if r.Message == "" {
+			r.Message = http.StatusText(resp.StatusCode)
+		}
 	default:
 		r.Kind = Refused
 		if r.Message == "" {

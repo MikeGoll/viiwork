@@ -24,7 +24,9 @@ func Defaults() Config {
 		API: APIConfig{
 			Host: "0.0.0.0",
 			Port: 8086,
-			CORS: CORSConfig{AllowOrigins: []string{"*.ts.net", "localhost", "127.0.0.1"}},
+			// No AllowOrigins: unset means "derive" (CORSConfig.Derive), which
+			// the node does at startup from tailscaled. A fixed "*.ts.net" here
+			// would trust every Tailscale customer's Funnel pages.
 			Catalog: CatalogConfig{
 				Enabled:    ToggleOn,
 				ProviderID: "viiwork",

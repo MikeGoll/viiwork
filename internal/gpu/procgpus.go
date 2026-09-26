@@ -29,17 +29,6 @@ const (
 	VerdictWrong
 )
 
-func (v Verdict) String() string {
-	switch v {
-	case VerdictOK:
-		return "ok"
-	case VerdictWrong:
-		return "wrong"
-	default:
-		return "unknown"
-	}
-}
-
 var (
 	nvidiaQueryGPUArgs    = []string{"--query-gpu=index,uuid", "--format=csv,noheader"}
 	nvidiaComputeAppsArgs = []string{"--query-compute-apps=pid,gpu_uuid", "--format=csv,noheader"}

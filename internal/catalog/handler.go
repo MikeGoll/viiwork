@@ -26,7 +26,7 @@ const upstreamTimeout = 10 * time.Second
 // Handler serves the OpenCode model catalogue on Path.
 type Handler struct {
 	cfg Config
-	src Source
+	src discovery.Source
 
 	client *http.Client
 
@@ -36,7 +36,7 @@ type Handler struct {
 }
 
 // NewHandler returns a handler serving src's models as cfg's provider.
-func NewHandler(cfg Config, src Source) *Handler {
+func NewHandler(cfg Config, src discovery.Source) *Handler {
 	client := cfg.Client
 	if client == nil {
 		client = &http.Client{Timeout: upstreamTimeout}

@@ -10,7 +10,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/janit/viiwork/v2/internal/httpjson"
 	"github.com/janit/viiwork/v2/internal/power"
+	"github.com/janit/viiwork/v2/mesh/meshclient"
 	"github.com/janit/viiwork/v2/meshapi"
 )
 
@@ -51,9 +53,7 @@ type powerResponse struct {
 }
 
 func writePowerErr(w http.ResponseWriter, code int, host, action string, err error) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(code)
-	json.NewEncoder(w).Encode(powerResponse{Host: host, Action: action, Error: err.Error()})
+	httpjson.Write(w, code, powerResponse{Host: host, Action: action, Error: err.Error()})
 }
 
 func decodePowerRequest(w http.ResponseWriter, r *http.Request) (powerRequest, bool) {
@@ -99,8 +99,7 @@ func (h *server) handlePower(w http.ResponseWriter, r *http.Request) {
 		writePowerErr(w, http.StatusInternalServerError, self, req.Action, err)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(powerResponse{Host: self, Action: req.Action, Result: out, Via: "in-band"})
+	httpjson.Write(w, http.StatusOK, powerResponse{Host: self, Action: req.Action, Result: out, Via: "in-band"})
 }
 
 // handleMeshPower routes a chassis action to whichever path can reach the host.
@@ -143,8 +142,7 @@ func (h *server) handleMeshPower(w http.ResponseWriter, r *http.Request) {
 			writePowerErr(w, http.StatusInternalServerError, req.Host, req.Action, err)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(powerResponse{Host: req.Host, Action: req.Action, Result: out, Via: "in-band"})
+		httpjson.Write(w, http.StatusOK, powerResponse{Host: req.Host, Action: req.Action, Result: out, Via: "in-band"})
 		return
 	}
 
@@ -156,8 +154,7 @@ func (h *server) handleMeshPower(w http.ResponseWriter, r *http.Request) {
 	if addr, ok := h.peerAddrForHost(req.Host); ok {
 		out, err := forwardPower(r.Context(), addr, req.Action)
 		if err == nil {
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(powerResponse{Host: req.Host, Action: req.Action, Result: out, Via: "peer"})
+			httpjson.Write(w, http.StatusOK, powerResponse{Host: req.Host, Action: req.Action, Result: out, Via: "peer"})
 			return
 		}
 		// Fall through to out-of-band. A node that cannot be reached is
@@ -170,8 +167,7 @@ func (h *server) handleMeshPower(w http.ResponseWriter, r *http.Request) {
 		writePowerErr(w, http.StatusBadGateway, req.Host, req.Action, err)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(powerResponse{Host: req.Host, Action: req.Action, Result: out, Via: "out-of-band"})
+	httpjson.Write(w, http.StatusOK, powerResponse{Host: req.Host, Action: req.Action, Result: out, Via: "out-of-band"})
 }
 
 // localHostname is this node's host name: with one node per machine, the node
@@ -204,7 +200,7 @@ func forwardPower(ctx context.Context, addr, action string) (string, error) {
 		return "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := meshclient.Default.Do(req)
 	if err != nil {
 		return "", err
 	}

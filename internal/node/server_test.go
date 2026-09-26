@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/janit/viiwork/v2/internal/activity"
+	"github.com/janit/viiwork/v2/internal/api"
 	"github.com/janit/viiwork/v2/mesh"
 	"github.com/janit/viiwork/v2/meshapi"
 	"github.com/janit/viiwork/v2/web"
@@ -45,7 +46,14 @@ func fakeServer(t *testing.T) (ServerDeps, *serverFakes) {
 		StreamCtx: ctx,
 		Inference: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			f.inference.Add(1)
-			if r.Header.Get("X-Test-Panic") != "" {
+			switch r.Header.Get("X-Test-Panic") {
+			case "":
+			case "abort":
+				panic(http.ErrAbortHandler)
+			case "late":
+				_, _ = io.WriteString(w, `{"partial":`)
+				panic("boom after the first byte")
+			default:
 				panic("boom")
 			}
 			if r.URL.Path == meshapi.PathModels && r.Method != http.MethodGet {
@@ -108,7 +116,9 @@ func TestServerRoutes(t *testing.T) {
 		t.Errorf("R4: %d %q", f.inference.Load(), rec.Body.String())
 	}
 	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPut, "/v1/aliases/x", strings.NewReader("{}")))
+	aliasReq := httptest.NewRequest(http.MethodPut, "/v1/aliases/x", strings.NewReader("{}"))
+	aliasReq.Header.Set("Content-Type", "application/json")
+	h.ServeHTTP(rec, aliasReq)
 	if f.aliases.Load() != 1 {
 		t.Errorf("R5: alias handler not reached: %q", rec.Body.String())
 	}
@@ -156,6 +166,101 @@ func TestServerRecovers(t *testing.T) {
 	}
 	if rec := get(h, "/health"); rec.Code != 200 {
 		t.Errorf("R9: not serving after a panic: %d", rec.Code)
+	}
+}
+
+// serveRecovering runs one request and returns what ServeHTTP panicked with.
+func serveRecovering(h http.Handler, rec *httptest.ResponseRecorder, req *http.Request) (rv any) {
+	defer func() { rv = recover() }()
+	h.ServeHTTP(rec, req)
+	return nil
+}
+
+// http.ErrAbortHandler is net/http's own "drop this response" signal, raised by
+// the proxy on a truncated stream. Swallowing it would turn a deliberate abort
+// into a well-formed (and wrong) response.
+func TestServerRecoverRepanicsAbort(t *testing.T) {
+	d, _ := fakeServer(t)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader("{}"))
+	req.Header.Set("X-Test-Panic", "abort")
+	rec := httptest.NewRecorder()
+	if rv := serveRecovering(NewServer(d), rec, req); rv != http.ErrAbortHandler {
+		t.Fatalf("recovered %v, want http.ErrAbortHandler re-raised", rv)
+	}
+	if strings.Contains(rec.Body.String(), "internal server error") {
+		t.Errorf("an abort was answered with a 500 body: %q", rec.Body.String())
+	}
+}
+
+// Once the first byte is out, a 500 can no longer be sent: the status line is
+// gone and http.Error would append its text to a half-written 200 body. The
+// connection is aborted instead.
+func TestServerRecoverAfterFirstByteAborts(t *testing.T) {
+	d, _ := fakeServer(t)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader("{}"))
+	req.Header.Set("X-Test-Panic", "late")
+	rec := httptest.NewRecorder()
+	if rv := serveRecovering(NewServer(d), rec, req); rv != http.ErrAbortHandler {
+		t.Fatalf("recovered %v, want http.ErrAbortHandler", rv)
+	}
+	if got := rec.Body.String(); got != `{"partial":` {
+		t.Errorf("body %q: something was appended after the panic", got)
+	}
+}
+
+// The wrapper the recovery needs must not hide Flusher, which every stream
+// asserts before it writes a byte.
+func TestServerWrapperKeepsFlusher(t *testing.T) {
+	d, _ := fakeServer(t)
+	var flusher bool
+	d.Inference = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, flusher = w.(http.Flusher)
+		if http.NewResponseController(w).Flush() != nil {
+			flusher = false
+		}
+	})
+	rec := httptest.NewRecorder()
+	NewServer(d).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, meshapi.PathModels, nil))
+	if !flusher || !rec.Flushed {
+		t.Errorf("Flusher lost behind the recovery wrapper (asserted %v, flushed %v)", flusher, rec.Flushed)
+	}
+}
+
+// testDialect is a client API dialect on a path no real one uses. The registry
+// has no Unregister, so it stays registered for the rest of the test binary;
+// the path is test-only, so it cannot collide.
+type testDialect struct{}
+
+const testDialectPath = "/v1/test-only-dialect/generate"
+
+func (testDialect) Name() string    { return "node-test-dialect" }
+func (testDialect) Paths() []string { return []string{testDialectPath} }
+func (testDialect) Decode(*http.Request, []byte) (api.Request, bool, error) {
+	return api.Request{}, true, nil
+}
+
+// C8: a dialect is a package plus a registration. The route table must send
+// its paths to the inference handler without learning them — before this it
+// hard-coded the three OpenAI paths, and a new dialect 404'd.
+func TestServerRoutesRegisteredDialect(t *testing.T) {
+	d, f := fakeServer(t)
+	h := NewServer(d)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, testDialectPath, strings.NewReader("{}")))
+	if rec.Code != 404 || f.inference.Load() != 0 {
+		t.Fatalf("before registration: %d, inference %d", rec.Code, f.inference.Load())
+	}
+	api.Register(testDialect{})
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, testDialectPath, strings.NewReader("{}")))
+	if f.inference.Load() != 1 || rec.Body.String() != `{"inference":true}` {
+		t.Errorf("registered dialect path: %d, inference %d", rec.Code, f.inference.Load())
+	}
+	// The OpenAI paths reach it through the same lookup.
+	for _, p := range []string{meshapi.PathChatCompletions, meshapi.PathCompletions, meshapi.PathEmbeddings} {
+		if _, ok := api.Lookup(p); !ok {
+			t.Errorf("%s is not registered by any dialect", p)
+		}
 	}
 }
 

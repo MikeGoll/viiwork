@@ -18,7 +18,7 @@
 
 set -euo pipefail
 
-URL="${1:-http://gb1:8080}"
+URL="${1:-http://gb1:8086}"
 MAX_CONC="${2:-10}"
 MODEL="${MODEL:-qwen2.5-coder-14b-instruct-q6_k}"
 MAX_TOKENS="${MAX_TOKENS:-256}"

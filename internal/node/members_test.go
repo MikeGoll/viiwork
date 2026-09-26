@@ -219,6 +219,24 @@ func TestStatusPollerForget(t *testing.T) {
 	}
 }
 
+func TestStatusPollerOversize(t *testing.T) {
+	a := newStatusServer(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"node":"A","pad":"` + strings.Repeat("x", maxStatusBytes+1) + `"}`))
+	})
+	members := &fakeMemberList{}
+	members.set(memberAt(t, "A", a.Server, meshapi.MemberAlive, meshapi.RoleNode, false))
+	logs := &lines{}
+	p := NewStatusPoller("L", members, 30*time.Millisecond, nil, logs.logf)
+	runPoller(t, p)
+	eventually(t, 2*time.Second, "polls", func() bool { return a.hits.Load() >= 2 })
+	if _, _, ok := p.Status("A"); ok {
+		t.Error("an oversized status must be rejected")
+	}
+	if n := logs.count("larger than"); n != 1 {
+		t.Errorf("oversize logged %d times, want once", n)
+	}
+}
+
 func TestStatusPollerJoinPollsAtOnce(t *testing.T) {
 	a := newStatusServer(t, statusAnswer("A"))
 	members := &fakeMemberList{}

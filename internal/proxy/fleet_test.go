@@ -179,6 +179,20 @@ func TestFleetFreeNeverNegative(t *testing.T) {
 	}
 }
 
+// Free sums each host's clamped free: one oversubscribed host must not cancel
+// spare capacity on another, since the router can still place work there.
+func TestFleetFreeSumsPerHostClampedFree(t *testing.T) {
+	got := aggregateFleet("gb1",
+		[]meshapi.ModelCapacity{mc("tg", 2, 6, 0, 4096)}, // oversubscribed by 4
+		[]capacity.Report{rep("gb2", "10.0.0.2:8086", time.Second, mc("tg", 4, 1, 0, 4096))},
+		fleetNow, 3*time.Second)
+
+	m := model(t, got, "tg")
+	if m.Free != 3 {
+		t.Errorf("free = %d, want 3 (0 on gb1 + 3 on gb2)", m.Free)
+	}
+}
+
 // The view is the answering node, and stale_after is published so a consumer
 // can interpret age_ms without guessing.
 func TestFleetReportsItsOwnViewAndStaleAfter(t *testing.T) {

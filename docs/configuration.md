@@ -14,6 +14,7 @@ Copy [`viiwork.yaml.example`](../viiwork.yaml.example) and edit it.
 - [GPU power limits](#gpu-power-limits)
 - [Pipelines](#pipelines)
 - [Client discovery](#client-discovery)
+- [API listener and browser origins](#api-listener-and-browser-origins)
 - [viiwork-parrot](#viiwork-parrot)
 - [Environment variables](#environment-variables)
 - [Host requirements](#host-requirements)
@@ -170,6 +171,36 @@ off by default, so a node makes no outbound request unless asked; set, it chains
 a hosted catalogue back in so a client keeps its other providers. What each
 field means to a client, and why the defaults are what they are:
 [autodiscovery.md](autodiscovery.md).
+
+## API listener and browser origins
+
+```yaml
+api:
+  host: 0.0.0.0              # default: every interface
+  port: 8086
+  cors:
+    # allow_origins: ["*.tail1234.ts.net", "localhost", "127.0.0.1"]
+    allow_tailnet_ips: true  # also origins that are literal Tailscale IPs
+```
+
+**`api.host`** is the address the API binds. The default `0.0.0.0` reaches every
+interface the machine has, and the node logs a warning saying so at startup,
+because the API authenticates nothing. Set it to the machine's tailnet or LAN
+address to narrow it; the node's own calls into its API (pipeline steps) follow
+whatever address the listener bound. Health checks must then use that address.
+
+**`api.cors.allow_origins`** is the browser-origin allowlist. Leave it out and
+the node derives one at startup: this tailnet's own MagicDNS domain, read from
+tailscaled over `mesh.tailnet.socket` (`*.tail1234.ts.net`), plus `localhost` and
+`127.0.0.1`; without tailscaled, only the local origins. The resulting list is
+logged. A list you write is used as written, and `allow_origins: []` turns CORS
+off. Never use `*.ts.net`: it is every Tailscale customer's domain, Funnel pages
+included.
+
+Whatever the list, state-changing requests (`POST`, `PUT`, `PATCH`, `DELETE`)
+from a browser origin it refuses are answered 403, and power and alias writes
+must be `Content-Type: application/json`. The reasoning, and what it does and
+does not stop: [security.md](security.md#browser-origins-cors).
 
 ## viiwork-parrot
 

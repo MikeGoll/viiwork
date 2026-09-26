@@ -145,12 +145,25 @@ type CatalogConfig struct {
 	UpstreamTTL Duration `yaml:"upstream_ttl"`
 }
 
-// CORSConfig is unchanged from v1: the browser-origin allowlist of an API
-// that authenticates nothing.
+// CORSConfig is the browser-origin allowlist of an API that authenticates
+// nothing. The YAML keys are v1's.
 type CORSConfig struct {
+	// AllowOrigins are host patterns. Left out (or null), the node derives
+	// the list at startup: this tailnet's own MagicDNS domain from tailscaled
+	// plus LocalCORSOrigins, or LocalCORSOrigins alone when tailscaled cannot
+	// say. An explicit list, the empty one included, is used as written;
+	// "allow_origins: []" sends no CORS header at all.
 	AllowOrigins    []string `yaml:"allow_origins"`
 	AllowTailnetIPs *bool    `yaml:"allow_tailnet_ips"`
 }
+
+// Derive reports whether the operator left allow_origins unset, so the node
+// is to derive the allowlist rather than use one.
+func (c CORSConfig) Derive() bool { return c.AllowOrigins == nil }
+
+// LocalCORSOrigins are the origins a derived allowlist always holds: pages
+// served on this machine itself.
+func LocalCORSOrigins() []string { return []string{"localhost", "127.0.0.1"} }
 
 type MeshConfig struct {
 	Network        string        `yaml:"network"`
@@ -203,9 +216,9 @@ const SourceParrot = "viiwork-parrot:"
 // Model is one models[] entry. Context is tokens PER SLOT for every engine;
 // engines translate it (llama.cpp --ctx-size = context * parallel).
 type Model struct {
-	Name           string            `yaml:"name"`
-	Engine         string            `yaml:"engine"`
-	Path           string            `yaml:"path"`
+	Name   string `yaml:"name"`
+	Engine string `yaml:"engine"`
+	Path   string `yaml:"path"`
 	// Source names a model by catalog id instead of by file: the node asks
 	// viiwork-parrot for it at start and runs the engine on the path it
 	// returns. Exactly one of Path and Source is set.

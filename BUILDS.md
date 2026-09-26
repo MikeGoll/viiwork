@@ -193,12 +193,29 @@ two volumes every container start recompiles kernels and re-downloads weights.
 
 ## Test images
 
-`docker/test/` holds one-off images that pin an unmerged llama.cpp PR for a
-model bring-up — `Dockerfile.qwen-test`, `Dockerfile.granite-test`,
-`Dockerfile.k2-test`. Same-week architectures sometimes need an *unmerged*
-llama.cpp rather than a current one; pin the PR head in a dedicated test
-Dockerfile rather than tracking `master`, and re-pin to a release tag once it
-merges. They are not part of any release.
+A bring-up that only needs a **newer upstream llama.cpp** needs no Dockerfile of
+its own: `docker/Dockerfile.rocm` takes the ref as a build argument, and any tag
+or branch `git clone --branch` accepts will do.
+
+```bash
+docker build --build-arg LLAMA_CPP_VERSION=master \
+  --build-arg VERSION=$(scripts/version.sh) \
+  -t viiwork:llama-master -f docker/Dockerfile.rocm .
+```
+
+That image ships `llama-server` and `llama-perplexity`; it does not build
+`llama-cli`, which viiwork never runs. For an interactive smoke test, use
+`llama-server` directly.
+
+`docker/test/` holds one-off images for what the build argument cannot reach —
+today `Dockerfile.k2-test`, which builds a fork at a pinned commit. Same-week
+architectures sometimes need an *unmerged* llama.cpp rather than a current one;
+pin the PR head in a dedicated test Dockerfile rather than tracking `master`,
+and re-pin to a release tag once it merges. They are not part of any release.
+
+The earlier `Dockerfile.qwen-test` and `Dockerfile.granite-test` were
+`Dockerfile.rocm` with the ref set to `master` and were removed in favour of the
+command above.
 
 ## The gfx906 fork track is retired
 
@@ -220,9 +237,10 @@ The full record — measurements, the phase-2 kernel hard-stop, what was salvage
 — is kept with the project's internal notes rather than here.
 
 Two things still reference the retired image and are left as historical
-benchmarking apparatus rather than swept up: `configs/docker-compose.gfx906.yaml`
-and the A/B arms in `bench-harness/run_feature_soak.sh` and
-`run_overnight_soak.sh`. They need an image this repo no longer builds.
+benchmarking apparatus rather than swept up: the v1 compose files in the
+unpublished `configs/private/v1-archive/` and the A/B arms in
+`bench-harness/run_feature_soak.sh` and `run_overnight_soak.sh`. They need an
+image this repo no longer builds.
 
 ## Repo conventions
 
@@ -234,8 +252,12 @@ and the A/B arms in `bench-harness/run_feature_soak.sh` and
 - `configs/docker-compose.v2.example.yaml` is the example the README's Quick
   Start copies. It is a whole v2 node: host networking, `pid: host` for the
   on-GPU check, the state directory, and the stop grace a clean drain needs.
-- All benchmark and experiment compose files and viiwork configs live under
-  `configs/`; see `scripts/deploy.sh` for an interactive picker.
+- The v1 benchmark and experiment layouts (one `viiwork.*.yaml` and one
+  compose file per model) are refused by a v2 node. They are kept, unconverted,
+  as benchmark provenance in `configs/private/v1-archive/` together with the
+  v1 helpers that drove them (`deploy.sh`, `run-qwen*-test.sh`); that directory
+  is never published. A v2 layout is a `models:` entry in the machine's one
+  `viiwork.yaml` — see `docs/migrating-to-v2.md`.
 
 ## See also
 

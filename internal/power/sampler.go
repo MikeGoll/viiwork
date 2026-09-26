@@ -66,15 +66,36 @@ type source struct {
 // cheaper, more standard readings have already failed.
 type sourceFn func(ctx context.Context) (source, bool)
 
+// Staleness. A read that fails keeps the last value for logging, but a value
+// is only reported as a reading while it is fresh: within staleIntervals sample
+// periods of the last successful read. Past that the sampler reports itself
+// unavailable until a read succeeds again, so a BMC that stopped answering
+// shows as "cannot say" in status, cost and the energy store rather than as the
+// last wattage it happened to report, recorded as measured for as long as the
+// outage lasts.
+//
+// The period is the observed gap between Sample calls — the caller's tick, not
+// a configured value this package would have to be told — floored at
+// minSamplePeriod. Until two calls have been seen it is defaultSamplePeriod.
+const (
+	staleIntervals      = 3
+	minSamplePeriod     = 5 * time.Second
+	defaultSamplePeriod = 10 * time.Second
+)
+
 type Sampler struct {
-	mu         sync.RWMutex
-	lastWatts  float64
-	available  atomic.Bool
-	logger     *log.Logger
-	run        runner
-	cmdFactory cmdFunc
-	parseFn    func(string) (float64, bool)
-	sourceName string
+	mu          sync.RWMutex
+	lastWatts   float64
+	lastOK      time.Time     // last successful read, probe included
+	lastAttempt time.Time     // last Sample call
+	period      time.Duration // observed gap between Sample calls
+	now         func() time.Time
+	available   atomic.Bool
+	logger      *log.Logger
+	run         runner
+	cmdFactory  cmdFunc
+	parseFn     func(string) (float64, bool)
+	sourceName  string
 }
 
 func dcmiSource() source {
@@ -201,6 +222,7 @@ func (s *Sampler) adopt(src source, watts float64) {
 
 	s.mu.Lock()
 	s.lastWatts = watts
+	s.lastOK = s.clock()
 	s.mu.Unlock()
 
 	s.available.Store(true)
@@ -267,13 +289,31 @@ func (s *Sampler) discoverSensor(ctx context.Context) (source, bool) {
 	return sensorSource(picked.Name), true
 }
 
+func (s *Sampler) clock() time.Time {
+	if s.now != nil {
+		return s.now()
+	}
+	return time.Now()
+}
+
 func (s *Sampler) Sample(ctx context.Context) {
 	if !s.available.Load() {
 		return
 	}
+
+	start := s.clock()
+	s.mu.Lock()
+	if !s.lastAttempt.IsZero() {
+		if gap := start.Sub(s.lastAttempt); gap > 0 {
+			s.period = gap
+		}
+	}
+	s.lastAttempt = start
+	s.mu.Unlock()
+
 	out, err := s.cmdFactory(ctx)
 	if err != nil {
-		s.logf("%s read failed: %v (keeping last value: %.0fW)", s.SourceName(), err, s.Watts())
+		s.logf("%s read failed: %v (last good value %.0fW%s)", s.SourceName(), err, s.lastValue(), s.staleNote())
 		return
 	}
 
@@ -286,23 +326,73 @@ func (s *Sampler) Sample(ctx context.Context) {
 
 	watts, ok := parse(string(out))
 	if !ok {
-		s.logf("%s returned no wattage (keeping last value: %.0fW)", s.SourceName(), s.Watts())
+		s.logf("%s returned no wattage (last good value %.0fW%s)", s.SourceName(), s.lastValue(), s.staleNote())
 		return
 	}
 
 	s.mu.Lock()
 	s.lastWatts = watts
+	s.lastOK = s.clock()
 	s.mu.Unlock()
 }
 
-func (s *Sampler) Watts() float64 {
+func (s *Sampler) lastValue() float64 {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.lastWatts
 }
 
+func (s *Sampler) staleNote() string {
+	if s.fresh() {
+		return ", still reported"
+	}
+	return ", stale: reported unavailable"
+}
+
+// staleAfter is how long a successful read stays a reading.
+func (s *Sampler) staleAfter() time.Duration {
+	s.mu.RLock()
+	period := s.period
+	s.mu.RUnlock()
+	if period <= 0 {
+		period = defaultSamplePeriod
+	}
+	if period < minSamplePeriod {
+		period = minSamplePeriod
+	}
+	return staleIntervals * period
+}
+
+// fresh reports whether the last successful read is recent enough to report.
+// A sampler with no recorded read time (hand-built in tests) is fresh while
+// available, which is how it behaved before staleness existed.
+func (s *Sampler) fresh() bool {
+	if !s.available.Load() {
+		return false
+	}
+	s.mu.RLock()
+	lastOK := s.lastOK
+	s.mu.RUnlock()
+	if lastOK.IsZero() {
+		return true
+	}
+	return s.clock().Sub(lastOK) <= s.staleAfter()
+}
+
+// Watts is the last successful reading while it is fresh, and 0 otherwise.
+// Callers must consult Available: a 0 here is never a measured zero.
+func (s *Sampler) Watts() float64 {
+	if !s.fresh() {
+		return 0
+	}
+	return s.lastValue()
+}
+
+// Available reports whether a source was adopted and its last successful read
+// is fresh. It turns false during a BMC outage that outlasts staleIntervals
+// sample periods, and true again on the first good read after it.
 func (s *Sampler) Available() bool {
-	return s.available.Load()
+	return s.fresh()
 }
 
 // SourceName reports which source won the probe, for status and logging.

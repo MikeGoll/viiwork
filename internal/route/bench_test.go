@@ -38,3 +38,36 @@ func BenchmarkPick(b *testing.B) {
 		l.Release()
 	}
 }
+
+// BenchmarkDispatchManyWaiters is one Wake over a queue that cannot be served:
+// 256 unpinned and 8 pinned waiters for a model whose every slot, local and on
+// 10 peers, is busy. Wake runs on every lease release and capacity report, so
+// its cost is paid under the router mutex many times a second.
+func BenchmarkDispatchManyWaiters(b *testing.B) {
+	local := newFakeLocal()
+	busy := newFakeBackend("m/0", 1)
+	busy.Acquire()
+	local.add("m", busy)
+	reports := &fakeReports{}
+	now := time.Now()
+	for n := 0; n < 10; n++ {
+		reports.reports = append(reports.reports, report(fmt.Sprintf("peer%d", n), now, time.Millisecond,
+			meshapi.ModelCapacity{Name: "m", Slots: 4, Busy: 4, HealthyBackends: 2}))
+	}
+	r := New(Config{Self: "self", Local: local, Remote: reports, StaleAfter: time.Hour, QueueMax: 1024, QueueTimeout: time.Second})
+	for i := 0; i < 264; i++ {
+		req := Request{Model: "m"}
+		if i%33 == 32 {
+			req.Host = fmt.Sprintf("peer%d", i%10)
+		}
+		r.queues["m"] = append(r.queues["m"], &waiter{req: req, enqueued: now, result: make(chan waitResult, 1)})
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		r.Wake()
+	}
+	if got := r.QueueLen("m"); got != 264 {
+		b.Fatalf("queue = %d, want every waiter still queued", got)
+	}
+}

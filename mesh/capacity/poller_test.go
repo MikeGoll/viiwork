@@ -283,6 +283,52 @@ func TestOversize(t *testing.T) {
 	}
 }
 
+func TestPollTimesOutAfterOneInterval(t *testing.T) {
+	interval := 50 * time.Millisecond
+	cancelled := make(chan time.Duration, 16)
+	a := newServer(t, func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		select {
+		case <-r.Context().Done():
+			cancelled <- time.Since(start)
+		case <-time.After(2 * time.Second):
+		}
+	})
+	members := &fakeMembers{}
+	members.set(member(t, "A", a, meshapi.MemberAlive, meshapi.RoleNode, false))
+	p := NewPoller(Config{Self: "L", Members: members, Interval: interval, Logf: (&logLines{}).logf})
+	run(t, p)
+	select {
+	case d := <-cancelled:
+		if d > 10*interval {
+			t.Errorf("poll abandoned after %v, want about one interval (%v)", d, interval)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("a poll outliving its interval was never abandoned")
+	}
+}
+
+func TestLateAnswerAfterDepartureDropped(t *testing.T) {
+	release := make(chan struct{})
+	a := newServer(t, func(w http.ResponseWriter, r *http.Request) {
+		<-release
+		answer("A", modelM)(w, r)
+	})
+	members := &fakeMembers{}
+	ma := member(t, "A", a, meshapi.MemberAlive, meshapi.RoleNode, false)
+	members.set(ma)
+	p := NewPoller(Config{Self: "L", Members: members, Interval: time.Hour, Logf: (&logLines{}).logf})
+	run(t, p)
+	eventually(t, time.Second, "poll in flight", func() bool { return a.active.Load() == 1 })
+	p.HandleMemberEvent(mesh.MemberEvent{Kind: mesh.EventLeave, Member: ma})
+	close(release)
+	eventually(t, time.Second, "poll answered", func() bool { return a.active.Load() == 0 })
+	time.Sleep(50 * time.Millisecond)
+	if _, ok := p.Report("A"); ok {
+		t.Error("an answer landing after the member left must be dropped")
+	}
+}
+
 func TestFreshBoundary(t *testing.T) {
 	now := time.Now()
 	if !Fresh(Report{Received: now.Add(-2999 * time.Millisecond)}, now, 3*time.Second) {

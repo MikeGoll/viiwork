@@ -35,14 +35,6 @@ func (b *Backend) Respawns() int {
 	return b.ladder.Respawns()
 }
 
-// lastLoad is the last successful engine load since the current launch, with
-// its time (zero when there is none).
-func (b *Backend) lastLoad() (load engine.Load, decoded, remain int64, at time.Time) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.load, b.decoded, b.remain, b.loadAt
-}
-
 func (b *Backend) currentProcess() *Process {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -130,6 +122,7 @@ func (l *loop) resolveSource() bool {
 		b.mu.Unlock()
 		b.setPhase("")
 		b.emit("%v", err)
+		b.logf("%v", err)
 		<-l.ctx.Done()
 		return false
 	}

@@ -30,16 +30,17 @@ internal/engine/<name>/
     testdata/        real engine output, captured verbatim
 ```
 
-Plus one line in each of two files:
+Plus one line in one file, the list of shipped engines:
 
 ```go
-// internal/node/node.go and cmd/viiwork-accept/main.go
-_ "github.com/janit/viiwork/v2/internal/engine/<name>" // registers the <name> engine
+// internal/engine/all/all.go
+_ "github.com/janit/viiwork/v2/internal/engine/<name>" // <name>
 ```
 
-`viiwork-accept` needs it because it validates a config file before the node
-that will run it starts; an engine it cannot see is an engine it reports as
-unknown.
+Everything that needs to know the engines imports that package: the node
+(`internal/node`), `viiwork-accept` (which validates a config file before the
+node that will run it starts, so an engine it cannot see is an engine it
+reports as unknown) and the acceptance tests. None of them lists engines itself.
 
 **That is the entire footprint.** Nothing in `internal/config`,
 `internal/supervisor`, `internal/node`, `internal/route` or `internal/proxy`
@@ -489,8 +490,7 @@ cold start.
 - [ ] `engine.Register(New())` from `init`
 - [ ] `enginetest.Run` passes
 - [ ] Golden command-line tests, and `httptest` tests over captured `testdata/`
-- [ ] Blank import in `internal/node/node.go`, `cmd/viiwork-accept/main.go`
-      and `internal/accept/engines_test.go`
+- [ ] One blank import in `internal/engine/all/all.go`
 - [ ] `docker/Dockerfile.<name>` and a compose example, if the runtime needs one
 - [ ] A model block in `viiwork.yaml.example` and a row in README's engine table
 - [ ] `gofmt`, `go vet`, `go test ./...` clean
@@ -572,11 +572,11 @@ Tracing one hop — from the flag viiwork generates to the flag it interacts wit
 — was right. Stopping there, at "we do not generate it", was the mistake: the
 *engine* is also a party that can set its own flags.
 
-**Blank imports are three places, not two.** `internal/node/node.go` and
-`cmd/viiwork-accept/main.go` register the engine for the binaries;
-`internal/accept/engines_test.go` is the test-side mirror, and acceptance
-validates configs for engines it has not registered as though they did not
-exist.
+**Blank imports used to be three places.** `internal/node/node.go`,
+`cmd/viiwork-accept/main.go` and `internal/accept/engines_test.go` each kept
+their own copy of the engine list, and a copy that fell behind made acceptance
+validate configs for an engine it had not registered as though the engine did
+not exist. They now all import `internal/engine/all`, which is the only list.
 
 **An engine's run-time toolchain is your problem, not the node's.** FreeToken
 JIT-compiles CUDA kernels on first use and shells out to `ninja` and `nvcc` by

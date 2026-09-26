@@ -1,10 +1,14 @@
 package node
 
 import (
+	"fmt"
+	"mime"
 	"net"
 	"net/http"
 	"net/url"
 	"strings"
+
+	"github.com/janit/viiwork/v2/meshapi"
 )
 
 // CORS lets browser code on another origin read this node's API.
@@ -141,4 +145,107 @@ func (c *CORS) apply(w http.ResponseWriter, r *http.Request) (handled bool) {
 	w.Header().Set("Access-Control-Max-Age", "600")
 	w.WriteHeader(http.StatusNoContent)
 	return true
+}
+
+// Cross-site request forgery.
+//
+// CORS decides which origins may READ a response. It does not stop a browser
+// from SENDING a request: a "simple request" (GET, HEAD or POST with a
+// text/plain, form or multipart body, or no body at all) goes out with no
+// preflight, and the server acts on it whether or not the page may read the
+// answer. On an API that authenticates nothing, any web page a tailnet member
+// visits could otherwise POST {"host":"gb2","action":"off"} to /v1/mesh/power
+// through that member's browser. Two guards close that, both applied before
+// routing:
+//
+//   - A state-changing request (POST, PUT, PATCH, DELETE) carrying an Origin
+//     the allowlist refuses is answered 403 — on every endpoint, inference
+//     included, since a refused origin must not spend GPU time either. The
+//     node's own pages are same-origin and pass; so does every non-browser
+//     client, because only browsers send Origin (curl, SDKs, the alias CLI,
+//     member forwards and the pipeline executor send none).
+//   - The control endpoints (power, alias writes) accept only
+//     Content-Type: application/json, which a browser cannot send cross-origin
+//     without a preflight — and a refused preflight is 403. This holds even
+//     for a browser old enough to omit Origin.
+//
+// What remains is DNS rebinding: a page that rebinds its own name to a node's
+// address is same-origin by every check a server can make. The defence there
+// is the same as for everything else on this API: keep the node off networks
+// whose browsers you do not trust (api.host).
+
+// stateChanging reports whether a request method can change server state.
+func stateChanging(method string) bool {
+	switch method {
+	case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
+		return true
+	}
+	return false
+}
+
+// sameOrigin reports whether origin names the very host the request was sent
+// to, as the node's own dashboards do. Compared as host:port, as a browser
+// writes both.
+func sameOrigin(origin string, r *http.Request) bool {
+	u, err := url.Parse(origin)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return false
+	}
+	return strings.EqualFold(u.Host, r.Host)
+}
+
+// refusesCrossSite reports whether a request is a state change from a browser
+// origin that is neither this node's own nor on the allowlist. A nil CORS
+// allows no foreign origin, so only same-origin pages may write.
+func (c *CORS) refusesCrossSite(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" || !stateChanging(r.Method) {
+		return false
+	}
+	return !sameOrigin(origin, r) && !c.Allows(origin)
+}
+
+// controlPath reports whether path is a control endpoint: one whose writes
+// must be JSON so that no browser can send them as a simple request.
+func controlPath(path string) bool {
+	return path == meshapi.PathPower || path == meshapi.PathMeshPower ||
+		path == meshapi.PathAliases || strings.HasPrefix(path, meshapi.PathAliases+"/")
+}
+
+// isJSON reports whether a Content-Type header names application/json,
+// parameters (charset) allowed.
+func isJSON(contentType string) bool {
+	mt, _, err := mime.ParseMediaType(contentType)
+	return err == nil && mt == "application/json"
+}
+
+// guardWrite answers a state-changing request the CSRF rules refuse, and
+// reports whether it did. It runs after CORS.apply, so a refusal still
+// carries Vary: Origin.
+func (c *CORS) guardWrite(w http.ResponseWriter, r *http.Request) (handled bool) {
+	if !stateChanging(r.Method) {
+		return false
+	}
+	if c.refusesCrossSite(r) {
+		writeGuardError(w, http.StatusForbidden, "forbidden", "origin not allowed")
+		return true
+	}
+	// A bodiless write with no Content-Type is let through: an older alias CLI
+	// sends delete and revert that way, and a browser cannot use one to cross
+	// sites, since it always sends Origin on a cross-origin write.
+	ct := r.Header.Get("Content-Type")
+	if ct == "" && r.ContentLength == 0 {
+		return false
+	}
+	if controlPath(r.URL.Path) && !isJSON(ct) {
+		writeGuardError(w, http.StatusUnsupportedMediaType, "invalid_request", "Content-Type must be application/json")
+		return true
+	}
+	return false
+}
+
+func writeGuardError(w http.ResponseWriter, code int, typ, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	fmt.Fprintf(w, `{"error":{"message":%q,"type":%q}}`+"\n", msg, typ)
 }

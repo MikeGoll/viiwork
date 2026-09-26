@@ -194,7 +194,8 @@ one GPU per process, with a sparse MoE's cold experts streaming from host memory
 rather than spread across cards. See
 [models.md](docs/models.md#large-models-on-one-card-freetoken-and-moe-offload).
 
-**Adding one is one package and one blank import.**
+**Adding one is one package plus one line in `internal/engine/all`**, the
+package that registers every engine for the node and `viiwork-accept`.
 [docs/adding-an-engine.md](docs/adding-an-engine.md) is the implementer's guide —
 the five methods and what each must guarantee, the optional capabilities, and a
 table of what the node already does so you write none of it. New engines run
@@ -241,7 +242,8 @@ sit on a tailnet. If you expose it more widely, put a reverse proxy or firewall
 rules in front.
 
 Prompt and response text is readable over the API, and an origin allowlist
-(`api.cors`, defaulting to `*.ts.net` and loopback) is what stops a page in some
+(`api.cors`, defaulting to your own tailnet's `*.<tailnet>.ts.net`, learned
+from tailscaled, and loopback) is what stops a page in some
 browser on your network from quietly driving your fleet.
 **[docs/security.md](docs/security.md)**.
 

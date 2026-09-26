@@ -685,26 +685,63 @@ function promptHref(r) {
   return "/prompt?" + p.toString();
 }
 
+// The list is keyed: promptRows holds each history entry's <a> and the
+// signature of what it last rendered, so a tick touches only rows that are new,
+// changed (a request finishing) or evicted, instead of rebuilding up to a
+// thousand rows through innerHTML every 200 ms while events arrive.
+const promptRows = new Map(); // key -> {a, sig}
+
+function promptRowHTML(r) {
+  const t = new Date(r.t * 1000).toLocaleTimeString();
+  return `<span class="host">${esc(t)}</span>` +
+    (r.task ? `<span class="task">[${esc(r.task)}]</span>` : "") +
+    `<span>${esc(r.model)}</span>` +
+    `<span class="arrow">→</span><span>${esc(r.dest)}</span>` +
+    `<span class="host">@${esc(r.host)}</span>` +
+    `<span class="promptlink">open ↗</span>`;
+}
+
 function renderPrompts() {
   const el = $("prompts");
   $("promptCount").textContent = promptOrder.length ? String(promptOrder.length) : "";
-  if (!promptOrder.length) { el.innerHTML = '<div class="empty">no requests yet</div>'; return; }
+  if (!promptOrder.length) {
+    promptRows.clear();
+    el.innerHTML = '<div class="empty">no requests yet</div>';
+    return;
+  }
+  if (!promptRows.size) el.textContent = ""; // drop the empty placeholder
 
-  const keys = [...promptOrder].reverse(); // newest first
-  el.innerHTML = keys.map(key => {
+  // Evicted rows leave the DOM.
+  for (const [key, row] of promptRows) {
+    if (!promptHistory.has(key)) { row.a.remove(); promptRows.delete(key); }
+  }
+
+  // Newest first: walk the order backwards, creating or updating each row and
+  // moving it only when it is not already where it belongs.
+  let prev = null;
+  for (let i = promptOrder.length - 1; i >= 0; i--) {
+    const key = promptOrder[i];
     const r = promptHistory.get(key);
-    if (!r) return "";
-    const t = new Date(r.t * 1000).toLocaleTimeString();
-    const cls = "row prompt-row" + (r.done ? "" : " running");
-    return `<a class="${cls}" href="${esc(promptHref(r))}" target="_blank" rel="noopener">` +
-      `<span class="host">${t}</span>` +
-      (r.task ? `<span class="task">[${esc(r.task)}]</span>` : "") +
-      `<span>${esc(r.model)}</span>` +
-      `<span class="arrow">→</span><span>${esc(r.dest)}</span>` +
-      `<span class="host">@${esc(r.host)}</span>` +
-      `<span class="promptlink">open ↗</span>` +
-      `</a>`;
-  }).join("");
+    if (!r) continue;
+    const sig = [r.done, r.t, r.rid, r.addr, r.model, r.dest, r.host, r.task].join("\u0000");
+    let row = promptRows.get(key);
+    if (!row) {
+      const a = document.createElement("a");
+      a.target = "_blank";
+      a.rel = "noopener";
+      row = { a, sig: null };
+      promptRows.set(key, row);
+    }
+    if (row.sig !== sig) {
+      row.sig = sig;
+      row.a.className = "row prompt-row" + (r.done ? "" : " running");
+      row.a.setAttribute("href", promptHref(r));
+      row.a.innerHTML = promptRowHTML(r);
+    }
+    const want = prev ? prev.nextSibling : el.firstChild;
+    if (want !== row.a) el.insertBefore(row.a, want);
+    prev = row.a;
+  }
 }
 
 // recordPrompt tracks one (node, rid) across its start and done/aborted

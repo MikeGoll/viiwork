@@ -100,11 +100,3 @@ func TestCheckAssignment(t *testing.T) {
 		}
 	}
 }
-
-func TestVerdictString(t *testing.T) {
-	for v, want := range map[Verdict]string{VerdictUnknown: "unknown", VerdictOK: "ok", VerdictWrong: "wrong"} {
-		if got := v.String(); got != want {
-			t.Errorf("Verdict(%d).String() = %q, want %q", int(v), got, want)
-		}
-	}
-}

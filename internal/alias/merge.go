@@ -25,18 +25,9 @@ type undo struct {
 
 // Merge applies a remote entry to the table by the C6 rule
 // (meshapi.CompareAliasEntries) and persists a change before returning. An
-// invalid name is ignored, and so is a live entry with no target.
-//
-// The target check matters because this is the path entries arrive on from
-// other members, and it validated only the name. ValidateWrite refuses an
-// empty target locally ("target is required"), so without this a member could
-// place in every node's table an entry that no node would accept from its own
-// operator. A tombstone legitimately carries no target; a live entry must not.
+// invalid name is ignored, and so is an entry acceptRemote refuses.
 func (s *Store) Merge(name string, remote meshapi.AliasEntry) (changed bool, conflict *Conflict, err error) {
 	if !meshapi.ValidAliasName(name) {
-		return false, nil, nil
-	}
-	if remote.Target == "" && !remote.Deleted {
 		return false, nil, nil
 	}
 	s.mu.Lock()
@@ -92,10 +83,32 @@ func (s *Store) MergeTable(t meshapi.AliasTable) (changed []string, conflicts []
 	return changed, conflicts, nil
 }
 
-// mergeLocked changes the in-memory table only, and says how to undo it.
+// acceptRemote is the one rule for an entry arriving from another member,
+// whether by broadcast (Merge) or push/pull (MergeTable).
+//
+// A live entry must have a target. ValidateWrite refuses an empty target
+// locally ("target is required"), so without this a member could place in
+// every node's table an entry that no node would accept from its own
+// operator. A tombstone legitimately carries no target; a live entry must not.
+//
+// The version must not exceed MaxAliasVer. Past it the next local write would
+// be refused (nextVersion), which freezes the alias mesh-wide, and a dashboard
+// reading the number as a JavaScript double would lose precision.
+func acceptRemote(remote meshapi.AliasEntry) bool {
+	if remote.Target == "" && !remote.Deleted {
+		return false
+	}
+	return remote.Ver <= MaxAliasVer
+}
+
+// mergeLocked changes the in-memory table only, and says how to undo it. An
+// entry acceptRemote refuses changes nothing.
 func (s *Store) mergeLocked(name string, remote meshapi.AliasEntry) (bool, *Conflict, undo) {
 	local, had := s.table.Aliases[name]
 	u := undo{name: name, prev: local, had: had}
+	if !acceptRemote(remote) {
+		return false, nil, u
+	}
 	remote = copyEntry(remote)
 	if remote.Fallbacks == nil {
 		remote.Fallbacks = []string{}

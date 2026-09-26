@@ -32,8 +32,9 @@ type fakeLocalBackend struct {
 	releases int
 	// onRelease runs under the lock after the nth release has taken its slot
 	// back, so a test can occupy the slot again before anyone else sees it.
-	onRelease func(n int)
-	hard      atomic.Int64
+	onRelease   func(n int)
+	hard        atomic.Int64
+	panicOnHard bool // NoteHardFailure panics with "boom"
 }
 
 func (b *fakeLocalBackend) ID() string   { return b.id }
@@ -67,7 +68,12 @@ func (b *fakeLocalBackend) Release() {
 	}
 	b.mu.Unlock()
 }
-func (b *fakeLocalBackend) NoteHardFailure() { b.hard.Add(1) }
+func (b *fakeLocalBackend) NoteHardFailure() {
+	if b.panicOnHard {
+		panic("boom")
+	}
+	b.hard.Add(1)
+}
 
 var _ route.LocalBackend = (*fakeLocalBackend)(nil)
 

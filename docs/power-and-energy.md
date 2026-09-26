@@ -42,6 +42,12 @@ Three things are worth knowing before reading numbers off it:
 - **±15% on absolute watts.** Compare hosts and watch trends freely; do not bill
   anyone from it. The table names which source each host settled on (`dcmi`,
   `sdr`, `sensor:<name>`, or `rocm-smi`/`nvidia-smi` for a GPU sum).
+- **A reading that stops refreshing goes absent, not flat.** When `ipmitool` or
+  the GPU tool stops answering, the last good value counts for three sample
+  periods (the observed `health.interval` tick, at least 5 s each) and is then
+  reported unavailable until a read succeeds again. Status, cost and energy
+  history all see "cannot say" for the outage rather than the last wattage
+  repeated; a GPU whose samples stop drops out of `/v1/status` the same way.
 
 If a host has the BMC device but still reports nothing, the probe found no source
 that answers with a non-zero wattage — which is a real hardware answer, not a
@@ -149,6 +155,10 @@ Addresses are optional per host. A node discovers its own BMC address in-band an
 shares it, so a host seen online at least once needs no entry — which also means
 a learned address cannot go stale the way a written one does when BMCs are on
 DHCP.
+
+The password is handed to `ipmitool` in `IPMI_PASSWORD` with `-E`, set on that
+one command only, never as a `-P` argument: argv is readable by every process on
+the host through `/proc/<pid>/cmdline`, and the containers run with `pid: host`.
 
 Three things guard it, and **none of them is authentication** — viiwork has none,
 and this does not add any:

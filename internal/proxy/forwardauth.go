@@ -19,6 +19,13 @@ import (
 // claimed origin.
 const rejectLogEvery = time.Minute
 
+// maxRejectLogKeys bounds the rate limiter's memory. The key is the claimed
+// origin, which any client can set to anything, so an unbounded map would let
+// a stream of made-up names grow it forever. Past the cap, entries older than
+// rejectLogEvery go first, and if every entry is recent the map starts over:
+// the worst case is a few extra log lines, never unbounded memory.
+const maxRejectLogKeys = 256
+
 // Members is the member list; *mesh.Mesh satisfies it.
 type Members interface {
 	Members() []mesh.Member
@@ -141,6 +148,16 @@ func (a *ForwardAuth) noteRejection(origin string, reason error) {
 	if seen && now.Sub(last) < rejectLogEvery {
 		a.mu.Unlock()
 		return
+	}
+	if !seen && len(a.lastLog) >= maxRejectLogKeys {
+		for k, t := range a.lastLog {
+			if now.Sub(t) >= rejectLogEvery {
+				delete(a.lastLog, k)
+			}
+		}
+		if len(a.lastLog) >= maxRejectLogKeys {
+			clear(a.lastLog)
+		}
 	}
 	a.lastLog[origin] = now
 	a.mu.Unlock()

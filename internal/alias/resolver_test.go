@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/janit/viiwork/v2/internal/proxy"
+	"github.com/janit/viiwork/v2/internal/api"
 	"github.com/janit/viiwork/v2/mesh/capacity"
 	"github.com/janit/viiwork/v2/meshapi"
 )
@@ -160,7 +160,7 @@ func TestResolve(t *testing.T) {
 		fx := newResolverFx(t)
 		mustSet(t, fx.store, "dead", "nosuch", "old-model")
 		_, _, err := fx.resolver.Resolve("dead")
-		var re *proxy.ResolveError
+		var re *api.ResolveError
 		if !errors.As(err, &re) || re.Status != 503 || re.Type != meshapi.ErrTypeUnavailable || re.RetryAfter != 5 ||
 			re.Message != "alias dead: no node serves nosuch or its fallbacks" {
 			t.Errorf("err = %#v", err)

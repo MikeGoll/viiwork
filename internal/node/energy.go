@@ -95,10 +95,22 @@ func gpuReadings(samples gpuLatest, gpuIDs []int, owners func() map[int]string) 
 // newRecorder attributes with the marginal whole-chassis split when node power
 // is IPMI, and with energy.Direct when it is the GPUs' own sum, where a
 // residual is not chassis overhead but idle draw on the cards (P6 Decision 3).
+//
+// A reading that is not available — including an IPMI or GPU reading gone
+// stale because the tool stopped answering — is skipped, so the minute records
+// fewer covered seconds rather than a remembered wattage. In the chassis case a
+// stale BMC is also not replaced by the GPU sum NodePower falls back to: that
+// measures something else, and the store is labelled as holding chassis draw.
 func newRecorder(store *energy.Store, interval time.Duration, pw NodePower, readings func() []energy.GPUReading) *energy.Recorder {
 	nodeWatts := func() (float64, bool) { return pw.Watts(), pw.Available() }
 	if pw.Chassis() {
-		return energy.NewRecorder(store, interval, nodeWatts, readings, nil)
+		chassisWatts := func() (float64, bool) {
+			if !pw.Chassis() {
+				return 0, false
+			}
+			return nodeWatts()
+		}
+		return energy.NewRecorder(store, interval, chassisWatts, readings, nil)
 	}
 	return energy.NewRecorderWithAttribution(store, interval, nodeWatts, readings, energy.Direct, nil)
 }

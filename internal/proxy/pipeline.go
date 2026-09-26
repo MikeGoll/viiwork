@@ -9,12 +9,13 @@ import (
 	"time"
 
 	"github.com/janit/viiwork/v2/internal/activity"
+	"github.com/janit/viiwork/v2/internal/httpjson"
 	"github.com/janit/viiwork/v2/internal/pipeline"
 	"github.com/janit/viiwork/v2/meshapi"
 )
 
 // Ported from the v1 proxy's pipeline.go. Model entries are meshapi's, the
-// handler is v2's, and writeJSON lives in handler.go; the behaviour, headers and
+// handler is v2's, and JSON is written by internal/httpjson; the behaviour, headers and
 // response shape are unchanged.
 
 // PipelineResolver resolves model names to pipelines.
@@ -134,7 +135,7 @@ func (h *Handler) handlePipeline(w http.ResponseWriter, r *http.Request, p *pipe
 		}
 		if stepErr, ok := err.(*pipeline.StepError); ok && stepErr.Status == http.StatusServiceUnavailable {
 			w.Header().Set("Retry-After", "5")
-			writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+			httpjson.Write(w, http.StatusServiceUnavailable, map[string]any{
 				"error": map[string]string{
 					"message": fmt.Sprintf("pipeline step '%s' failed: model '%s' unavailable", stepErr.Step, stepErr.Step),
 					"type":    "server_error",
@@ -143,7 +144,7 @@ func (h *Handler) handlePipeline(w http.ResponseWriter, r *http.Request, p *pipe
 			return
 		}
 		log.Printf("[pipeline] %s error: %v", modelName, err)
-		writeJSON(w, http.StatusBadGateway, map[string]any{
+		httpjson.Write(w, http.StatusBadGateway, map[string]any{
 			"error": map[string]string{
 				"message": "pipeline processing failed",
 				"type":    "server_error",
@@ -188,5 +189,5 @@ func (h *Handler) handlePipeline(w http.ResponseWriter, r *http.Request, p *pipe
 			"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
 		},
 	}
-	writeJSON(w, http.StatusOK, resp)
+	httpjson.Write(w, http.StatusOK, resp)
 }

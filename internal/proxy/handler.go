@@ -14,6 +14,7 @@ import (
 	"github.com/janit/viiwork/v2/internal/activity"
 	"github.com/janit/viiwork/v2/internal/api"
 	"github.com/janit/viiwork/v2/internal/discovery"
+	"github.com/janit/viiwork/v2/internal/httpjson"
 	"github.com/janit/viiwork/v2/internal/logging"
 	"github.com/janit/viiwork/v2/internal/pipeline"
 	"github.com/janit/viiwork/v2/internal/route"
@@ -30,16 +31,8 @@ const (
 // queueRetryAfter is the Retry-After, in seconds, on a 429 from the queue.
 const queueRetryAfter = "2"
 
-// ResolveError is written as-is by the handler: status, error type, message, and
-// Retry-After seconds when non-zero. P5's alias resolver returns it.
-type ResolveError struct {
-	Status     int
-	Type       string
-	Message    string
-	RetryAfter int
-}
-
-func (e *ResolveError) Error() string { return e.Message }
+// ResolveError is written as-is by the handler; see api.ResolveError.
+type ResolveError = api.ResolveError
 
 // Resolver maps the requested model name to the real model and the alias it
 // was reached through ("" for a real name).
@@ -114,7 +107,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// allocation; see internal/api.
 	if d, ok := api.Lookup(r.URL.Path); ok {
 		if r.Method != http.MethodPost {
-			writeError(w, http.StatusMethodNotAllowed, errTypeInvalidRequest, "method not allowed")
+			httpjson.Error(w, http.StatusMethodNotAllowed, errTypeInvalidRequest, "method not allowed")
 			return
 		}
 		h.handleInference(w, r, d)
@@ -133,21 +126,21 @@ func (h *Handler) handleInference(w http.ResponseWriter, r *http.Request, dialec
 	if err != nil {
 		var tooLarge *http.MaxBytesError
 		if errors.As(err, &tooLarge) {
-			writeError(w, http.StatusRequestEntityTooLarge, errTypeInvalidRequest, "request body too large")
+			httpjson.Error(w, http.StatusRequestEntityTooLarge, errTypeInvalidRequest, "request body too large")
 			return
 		}
-		writeError(w, http.StatusBadRequest, errTypeInvalidRequest, "failed to read request")
+		httpjson.Error(w, http.StatusBadRequest, errTypeInvalidRequest, "failed to read request")
 		return
 	}
 
 	req, _, err := dialect.Decode(r, body)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, errTypeInvalidRequest, "failed to read request")
+		httpjson.Error(w, http.StatusBadRequest, errTypeInvalidRequest, "failed to read request")
 		return
 	}
 	body = req.Body
 	if req.Model == "" {
-		writeError(w, http.StatusBadRequest, errTypeInvalidRequest, "model is required")
+		httpjson.Error(w, http.StatusBadRequest, errTypeInvalidRequest, "model is required")
 		return
 	}
 	fields := struct {
@@ -167,7 +160,7 @@ func (h *Handler) handleInference(w http.ResponseWriter, r *http.Request, dialec
 		if p, locale, localeKey, ok := h.d.Pipelines.Resolve(fields.Model); ok {
 			sourceText := pipelineSourceText(body)
 			if sourceText == "" {
-				writeError(w, http.StatusBadRequest, errTypeInvalidRequest, "no user message found")
+				httpjson.Error(w, http.StatusBadRequest, errTypeInvalidRequest, "no user message found")
 				return
 			}
 			h.handlePipeline(w, r, p, locale, localeKey, sourceText, fields.Model, taskID)
@@ -175,7 +168,7 @@ func (h *Handler) handleInference(w http.ResponseWriter, r *http.Request, dialec
 		}
 		if name, matched := h.d.Pipelines.MatchesPipelinePrefix(fields.Model); matched {
 			msg := fmt.Sprintf("unknown locale in model '%s', available: %v", fields.Model, h.d.Pipelines.AvailableLocales(name))
-			writeError(w, http.StatusBadRequest, errTypeInvalidRequest, msg)
+			httpjson.Error(w, http.StatusBadRequest, errTypeInvalidRequest, msg)
 			return
 		}
 	}
@@ -190,11 +183,11 @@ func (h *Handler) handleInference(w http.ResponseWriter, r *http.Request, dialec
 				if re.RetryAfter > 0 {
 					w.Header().Set("Retry-After", strconv.Itoa(re.RetryAfter))
 				}
-				writeError(w, re.Status, re.Type, re.Message)
+				httpjson.Error(w, re.Status, re.Type, re.Message)
 				return
 			}
 			log.Printf("proxy: resolving model %q: %v", fields.Model, err)
-			writeError(w, http.StatusInternalServerError, errTypeServer, "model resolution failed")
+			httpjson.Error(w, http.StatusInternalServerError, errTypeServer, "model resolution failed")
 			return
 		}
 		model, alias = m, a
@@ -212,7 +205,7 @@ func (h *Handler) handleInference(w http.ResponseWriter, r *http.Request, dialec
 	if !forwarded && r.URL.RawQuery != "" {
 		pin, ok := sanitizeHost(r.URL.Query().Get(meshapi.QueryHost))
 		if !ok {
-			writeError(w, http.StatusBadRequest, errTypeInvalidRequest, "invalid host parameter")
+			httpjson.Error(w, http.StatusBadRequest, errTypeInvalidRequest, "invalid host parameter")
 			return
 		}
 		host = pin
@@ -220,89 +213,129 @@ func (h *Handler) handleInference(w http.ResponseWriter, r *http.Request, dialec
 
 	w, capture := newCaptureWriter(w)
 	// Forwards leave no prompt history: the origin already has it (Decision 12).
-	record := !forwarded && h.d.Activity != nil
-	var rid int64
-	if record {
+	d := &dispatch{
+		model: model, alias: alias, host: host, taskID: taskID, body: body,
+		forwarded: forwarded, thinkDisabled: thinkDisabled,
+		record: !forwarded && h.d.Activity != nil, start: start, capture: capture,
+	}
+	if d.record {
 		// The prompt history names both the model and the alias it was asked
 		// for (P5 Decision 17); events and counters keep the real model.
 		historyModel := model
 		if alias != "" {
 			historyModel = model + " (alias " + alias + ")"
 		}
-		rid = activity.NewRequestID()
-		h.d.Activity.StorePrompt(rid, historyModel, extractPromptText(body))
+		d.rid = activity.NewRequestID()
+		h.d.Activity.StorePrompt(d.rid, historyModel, extractPromptText(body))
+		// Deferred, so a response aborted by panic is recorded too.
 		defer func() {
-			h.d.Activity.StoreOutput(rid, historyModel, capture.Output(), time.Since(start).Milliseconds())
+			h.d.Activity.StoreOutput(d.rid, historyModel, capture.Output(), time.Since(start).Milliseconds())
 		}()
 	}
+	h.dispatch(w, r, d)
+}
 
-	lease, queued, err := h.d.Router.Acquire(r.Context(), route.Request{Model: model, Host: host, Forwarded: forwarded})
+// dispatch is one inference request past parsing and resolution: what the
+// dispatch loop needs to run it and to report on it.
+type dispatch struct {
+	model, alias, host, taskID string
+	body                       []byte
+	forwarded, thinkDisabled   bool
+	record                     bool // emit activity events (the origin only)
+	rid                        int64
+	start                      time.Time
+	capture                    *captureWriter
+}
+
+// dispatch runs the request over the router. The rules that make it safe all
+// live here:
+//
+//   - One queue budget per request. The first acquisition may queue for
+//     routing.queue_timeout; the final one, after the retries, only for what
+//     is left of it (Decision 17).
+//   - Retries happen only before the first byte. An attempt that wrote
+//     nothing is retryable; once headers went out the attempt is final, and a
+//     response cut short after that is aborted, never retried.
+//   - A forward is dispatched once: the origin picks again (Decision 16).
+//   - Every attempt releases its lease, whatever happens (see attempt).
+//   - An exhausted dispatch whose every attempt was a capacity refusal is a
+//     503 with Retry-After — the mesh is busy, not broken; any other failure
+//     among them makes it a 502.
+func (h *Handler) dispatch(w http.ResponseWriter, r *http.Request, d *dispatch) {
+	lease, queued, err := h.d.Router.Acquire(r.Context(), route.Request{Model: d.model, Host: d.host, Forwarded: d.forwarded})
 	if err != nil {
-		h.writeAcquireError(w, err, model, host)
+		h.writeAcquireError(w, err, d.model, d.host)
 		return
 	}
 	var (
-		tried   map[string]bool
-		retries int
-		final   bool // the last dispatch: the one after the final acquisition
+		tried      map[string]bool
+		retries    int
+		final      bool // the last dispatch: the one after the final acquisition
+		allRefusal = true
 	)
 	for {
 		t := lease.Target()
 		if queued > 0 {
 			w.Header().Set(meshapi.HeaderQueuedMs, strconv.FormatInt(queued.Milliseconds(), 10))
 		}
-		if alias != "" {
-			w.Header().Set(meshapi.HeaderAlias, alias)
+		if d.alias != "" {
+			w.Header().Set(meshapi.HeaderAlias, d.alias)
 		}
 		label := t.BackendID
 		if !t.Local {
 			label = meshapi.PeerLabel(t.Node)
 		}
-		if record {
-			h.d.Activity.EmitRequestTask(rid, -1, taskID, "%s", meshapi.RequestStarted(model, label))
+		if d.record {
+			h.d.Activity.EmitRequestTask(d.rid, -1, d.taskID, "%s", meshapi.RequestStarted(d.model, label))
 		}
 
-		var res execResult
-		if t.Local {
-			res = serveLocal(w, r, body, lease.Backend(), model, h.d.Self, thinkDisabled)
-		} else {
-			res = forwardToPeer(w, r, body, t, h.d.Auth, h.d.Self)
-			if res.Outcome == outcomeRetryable {
-				lease.Refused() // before Release: its wake must not hand the peer back (Decision 18)
-			}
-		}
-		lease.Release()
+		res := h.attempt(w, r, lease, d, label)
 
 		if res.Outcome == outcomeServed {
-			if record {
-				elapsed := time.Since(start).Round(time.Millisecond)
-				msg := meshapi.RequestDone(model, label, elapsed)
-				if res.Aborted {
-					msg = meshapi.RequestAborted(model, label, elapsed)
+			if d.record {
+				elapsed := time.Since(d.start).Round(time.Millisecond)
+				msg := meshapi.RequestDone(d.model, label, elapsed)
+				if res.Aborted || res.Truncated {
+					msg = meshapi.RequestAborted(d.model, label, elapsed)
 				}
-				h.d.Activity.EmitRequestTask(rid, -1, taskID, "%s", msg)
+				h.d.Activity.EmitRequestTask(d.rid, -1, d.taskID, "%s", msg)
 			}
 			// Counted where the request ran, so a forward is counted by its
 			// receiver and not twice (spec).
 			if t.Local {
-				tokens, _ := capture.CompletionTokens()
-				h.d.Counters.Add(model, tokens)
+				tokens, _ := d.capture.CompletionTokens()
+				h.d.Counters.Add(d.model, tokens)
+			}
+			if res.Truncated {
+				// The headers are out, so the status cannot say it failed; a
+				// clean end would make the partial body look complete. Abort
+				// the connection, as httputil.ReverseProxy does. The lease is
+				// already released and the deferred history still runs.
+				log.Printf("proxy: %s: %s", d.model, res.Reason)
+				panic(http.ErrAbortHandler)
 			}
 			return
 		}
 
 		if logging.DebugEnabled() {
-			log.Printf("[debug] %s: dispatch not served: %s", model, res.Reason)
+			log.Printf("[debug] %s: dispatch not served: %s", d.model, res.Reason)
 		}
-		if forwarded {
+		allRefusal = allRefusal && res.Refusal
+		if d.forwarded {
 			// One dispatch only: the origin picks again (Decision 16).
-			writeError(w, http.StatusServiceUnavailable, meshapi.ErrTypeUnavailable, "backend failed before responding")
+			httpjson.Error(w, http.StatusServiceUnavailable, meshapi.ErrTypeUnavailable, "backend failed before responding")
 			return
 		}
 		if final {
-			log.Printf("proxy: %s: no route could serve the request; last: %s", model, res.Reason)
-			h.endUnserved(rid, taskID, model, label, start, record)
-			writeError(w, http.StatusBadGateway, errTypeServer, "no route could serve the request")
+			h.endUnserved(d, label)
+			if allRefusal {
+				log.Printf("proxy: %s: every route refused the request; last: %s", d.model, res.Reason)
+				w.Header().Set("Retry-After", queueRetryAfter)
+				httpjson.Error(w, http.StatusServiceUnavailable, meshapi.ErrTypeUnavailable, fmt.Sprintf("no route has capacity for %q", d.model))
+				return
+			}
+			log.Printf("proxy: %s: no route could serve the request; last: %s", d.model, res.Reason)
+			httpjson.Error(w, http.StatusBadGateway, errTypeServer, "no route could serve the request")
 			return
 		}
 
@@ -312,7 +345,7 @@ func (h *Handler) handleInference(w http.ResponseWriter, r *http.Request, dialec
 		tried[t.Key()] = true
 		if retries < h.d.ForwardRetry {
 			retries++
-			if next, err := h.d.Router.Pick(route.Request{Model: model, Host: host, Exclude: tried}); err == nil {
+			if next, err := h.d.Router.Pick(route.Request{Model: d.model, Host: d.host, Exclude: tried}); err == nil {
 				lease = next
 				continue
 			}
@@ -325,20 +358,60 @@ func (h *Handler) handleInference(w http.ResponseWriter, r *http.Request, dialec
 			budget = -1
 		}
 		var waited time.Duration
-		lease, waited, err = h.d.Router.Acquire(r.Context(), route.Request{Model: model, Host: host, QueueBudget: budget})
+		lease, waited, err = h.d.Router.Acquire(r.Context(), route.Request{Model: d.model, Host: d.host, QueueBudget: budget})
 		queued += waited
 		if err != nil {
-			h.endUnserved(rid, taskID, model, label, start, record)
-			h.writeAcquireError(w, err, model, host)
+			h.endUnserved(d, label)
+			h.writeAcquireError(w, err, d.model, d.host)
 			return
 		}
 		final = true
 	}
 }
 
+// attempt runs one dispatch on the lease's target and releases the lease on
+// every path out, a panic included: a slot that is never released is lost
+// until the process restarts. A panic also closes the request's dashboard row
+// as aborted before it propagates.
+func (h *Handler) attempt(w http.ResponseWriter, r *http.Request, lease *route.Lease, d *dispatch, label string) (res execResult) {
+	defer func() {
+		lease.Release()
+		if rv := recover(); rv != nil {
+			if d.record {
+				h.d.Activity.EmitRequestTask(d.rid, -1, d.taskID, "%s", meshapi.RequestAborted(d.model, label, time.Since(d.start).Round(time.Millisecond)))
+			}
+			panic(rv)
+		}
+	}()
+	t := lease.Target()
+	if t.Local {
+		return serveLocal(w, r, d.body, lease.Backend(), d.model, h.d.Self, d.thinkDisabled)
+	}
+	res = forwardToPeer(w, r, d.body, t, h.d.Auth, h.d.Self)
+	if res.Outcome == outcomeRetryable {
+		lease.Refused() // before Release: its wake must not hand the peer back (Decision 18)
+	}
+	return res
+}
+
 // rewriteModel sets the body's model field, keeping every other field as it
 // was. A body that does not decode as an object is left alone.
+//
+// The common body is rewritten in place: the new name is spliced over the old
+// value's bytes (see modelValueSpan), and nothing else is touched. Anything
+// the span cannot prove falls back to a decode and re-encode of the object.
+// The input is never modified.
 func rewriteModel(body []byte, model string) []byte {
+	if start, end, ok := modelValueSpan(body); ok {
+		name, err := json.Marshal(model)
+		if err != nil {
+			return body
+		}
+		out := make([]byte, 0, len(body)-(end-start)+len(name))
+		out = append(out, body[:start]...)
+		out = append(out, name...)
+		return append(out, body[end:]...)
+	}
 	var generic map[string]json.RawMessage
 	if err := json.Unmarshal(body, &generic); err != nil {
 		return body
@@ -358,11 +431,11 @@ func rewriteModel(body []byte, model string) []byte {
 // endUnserved clears the dashboard row a started event opened for a request
 // that ends without being served. The grammar has no failed form, so it is
 // logged as done, which is what v1 logged for a failed peer forward.
-func (h *Handler) endUnserved(rid int64, taskID, model, label string, start time.Time, record bool) {
-	if !record {
+func (h *Handler) endUnserved(d *dispatch, label string) {
+	if !d.record {
 		return
 	}
-	h.d.Activity.EmitRequestTask(rid, -1, taskID, "%s", meshapi.RequestDone(model, label, time.Since(start).Round(time.Millisecond)))
+	h.d.Activity.EmitRequestTask(d.rid, -1, d.taskID, "%s", meshapi.RequestDone(d.model, label, time.Since(d.start).Round(time.Millisecond)))
 }
 
 func (h *Handler) writeAcquireError(w http.ResponseWriter, err error, model, host string) {
@@ -370,20 +443,20 @@ func (h *Handler) writeAcquireError(w http.ResponseWriter, err error, model, hos
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		// The client is gone; there is no one to answer.
 	case errors.Is(err, route.ErrModelNotFound):
-		writeError(w, http.StatusNotFound, errTypeNotFound, fmt.Sprintf("model %q not found", model))
+		httpjson.Error(w, http.StatusNotFound, errTypeNotFound, fmt.Sprintf("model %q not found", model))
 	case errors.Is(err, route.ErrHostNotServing):
-		writeError(w, http.StatusNotFound, errTypeNotFound, fmt.Sprintf("model %q is not served by host %q", model, host))
+		httpjson.Error(w, http.StatusNotFound, errTypeNotFound, fmt.Sprintf("model %q is not served by host %q", model, host))
 	case errors.Is(err, route.ErrNoFreeSlot):
-		writeError(w, http.StatusTooManyRequests, meshapi.ErrTypeRateLimit, "no free slot")
+		httpjson.Error(w, http.StatusTooManyRequests, meshapi.ErrTypeRateLimit, "no free slot")
 	case errors.Is(err, route.ErrQueueFull):
 		w.Header().Set("Retry-After", queueRetryAfter)
-		writeError(w, http.StatusTooManyRequests, meshapi.ErrTypeRateLimit, fmt.Sprintf("queue for %q is full", model))
+		httpjson.Error(w, http.StatusTooManyRequests, meshapi.ErrTypeRateLimit, fmt.Sprintf("queue for %q is full", model))
 	case errors.Is(err, route.ErrQueueTimeout):
 		w.Header().Set("Retry-After", queueRetryAfter)
-		writeError(w, http.StatusTooManyRequests, meshapi.ErrTypeRateLimit, fmt.Sprintf("no free slot for %q within %s", model, h.d.Router.QueueTimeout()))
+		httpjson.Error(w, http.StatusTooManyRequests, meshapi.ErrTypeRateLimit, fmt.Sprintf("no free slot for %q within %s", model, h.d.Router.QueueTimeout()))
 	default:
 		log.Printf("proxy: routing %q: %v", model, err)
-		writeError(w, http.StatusInternalServerError, errTypeServer, "routing failed")
+		httpjson.Error(w, http.StatusInternalServerError, errTypeServer, "routing failed")
 	}
 }
 
@@ -407,7 +480,7 @@ func (h *Handler) handleModels(w http.ResponseWriter) {
 			MaxModelLen: m.ServedContext, ContextLength: m.ServedContext,
 		})
 	}
-	writeJSON(w, http.StatusOK, meshapi.ModelsResponse{Object: "list", Data: data})
+	httpjson.Write(w, http.StatusOK, meshapi.ModelsResponse{Object: "list", Data: data})
 }
 
 // ModelEntries is everything this node lists on /v1/models, in the same order,
@@ -469,15 +542,5 @@ func (h *Handler) handleCapacity(w http.ResponseWriter) {
 		m.Queued = h.d.Router.QueueLen(m.Name)
 		models[i] = m
 	}
-	writeJSON(w, http.StatusOK, meshapi.CapacityResponse{Node: h.d.Self, Ver: h.d.Version, Models: models})
-}
-
-func writeError(w http.ResponseWriter, status int, typ, message string) {
-	writeJSON(w, status, meshapi.ErrorResponse{Error: meshapi.ErrorBody{Message: message, Type: typ}})
-}
-
-func writeJSON(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(v)
+	httpjson.Write(w, http.StatusOK, meshapi.CapacityResponse{Node: h.d.Self, Ver: h.d.Version, Models: models})
 }

@@ -61,7 +61,10 @@ func (f *fetch) resolve(ctx context.Context) (string, error) {
 	}
 	t := f.deps.Timing
 	backoff := t.FetchPoll
-	lastStep, lastLog, lastErr := -1, time.Time{}, ""
+	// lastErr is seeded to a sentinel no real message can equal, so the first
+	// Unavailable answer always logs — even one with an empty message (a 503
+	// with no error text is otherwise silent forever: see fetch_test.go).
+	lastStep, lastLog, lastErr := -1, time.Time{}, "\x00"
 	for {
 		r := f.deps.Resolver.Ensure(ctx, f.id)
 		if ctx.Err() != nil {
@@ -71,7 +74,7 @@ func (f *fetch) resolve(ctx context.Context) (string, error) {
 		switch r.Kind {
 		case parrot.Ready:
 			if _, err := os.Stat(r.Path); err != nil {
-				return "", fmt.Errorf("viiwork-parrot returned %s for %s, which does not exist here: mount viiwork-parrot's data directory at the same path inside the container", r.Path, f.source)
+				return "", fmt.Errorf("viiwork-parrot returned %s for %s, which does not exist here: mount viiwork-parrot's data directory at the same path inside the container: %v", r.Path, f.source, err)
 			}
 			f.logf("fetched %s: %s", f.source, r.Path)
 			return r.Path, nil

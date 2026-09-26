@@ -1,5 +1,78 @@
 # Changelog
 
+## v2.5.0
+
+### A six-lens review, and everything it found
+
+A review of the whole tree through six lenses — security, error handling, type
+safety, performance, architecture and simplicity — and the fixes for all of it.
+
+**Security: the browser boundary now holds.**
+
+- **The engine's CORS header no longer leaks through.** llama-server echoes any
+  `Origin` into `Access-Control-Allow-Origin`, and the proxy copied it back, so
+  a refused origin could read inference output. `Origin` is no longer sent to
+  engines or peers, and every `Access-Control-*` header from them is dropped:
+  the node's CORS layer is the only authority.
+- **Cross-site writes are refused before routing.** A state-changing request
+  whose `Origin` is neither the node's own page nor allowlisted gets 403 — on
+  every endpoint, inference included. Power and alias writes must be
+  `application/json` (415 otherwise), so no browser can send one as a simple
+  request; a bodiless untyped write is still accepted, so an older alias CLI
+  keeps working. Before this, any page could power a host off.
+- **The CORS default is this tailnet, not every tailnet.** `*.ts.net` admitted
+  anyone's Funnel pages; with `allow_origins` unset the node now derives
+  `*.<tailnet>.ts.net` from tailscaled, falling back to local origins.
+- **Secrets stay out of logs and argv.** The ENTSO-E key is redacted from fetch
+  errors, and the BMC password goes to `ipmitool` through `IPMI_PASSWORD`.
+- A node bound to every interface (`api.host: 0.0.0.0`, the default) says so
+  at startup.
+
+**Failures are no longer reported as success or as measurements.**
+
+- **A stream cut off mid-response is aborted**, not closed as a complete 200;
+  the request is recorded as aborted and its slot is always released, panics
+  included.
+- **A capacity refusal is a 503 with `Retry-After`**, not a 502.
+- **Stale power readings go absent.** A BMC or `rocm-smi` that stops answering
+  no longer freezes its last wattage into the energy rings, the cost tracker or
+  `/v1/status`; the cost tracker no longer bills an outage at the rate that
+  ends it.
+- **`energy_kwh_30d` is read from the hour tier.** The day tier caps covered
+  seconds at 65 535, so full days read about 24% low. Day roll-ups follow local
+  midnight across DST, and a torn or failed `models.txt` append no longer
+  shifts model indices.
+- Alias push/pull applies the same validation as broadcasts (a live entry
+  needs a target, versions are bounded), and the meshauth skew check no longer
+  overflows.
+
+**Performance.**
+
+- The activity ring is a real circular buffer: an emit no longer copies the
+  whole ring (386 KB per event at the default size, now 264 B).
+- `/mesh` fan-out is one hub per node — one follower per member and one
+  snapshot loop — instead of per viewer, so dashboards no longer evict each
+  other's followers at a member's subscriber cap. Follower backoff resets after
+  a healthy stream.
+- Untagged `reasoning_content` is renamed on the bytes (about 52 → 6 allocs
+  per token); aliased requests splice the model name instead of re-encoding the
+  body; captured output stops decoding past the history cap; the origin queue
+  no longer re-picks every waiter on each wake; energy reads touch only the
+  slots in range; `/mesh` updates prompt rows in place.
+
+**Architecture and simplicity.**
+
+- The route table sends every path in the C8 dialect registry to inference,
+  and engine blank imports live in one place, `internal/engine/all`.
+- Pipelines dial the address the API actually bound, not `127.0.0.1`.
+- The fleet capacity types are frozen in `meshapi/wire_test.go`.
+- The status and capacity pollers share one core, member traffic uses one
+  client constructor (`mesh/meshclient`), JSON responses go through
+  `internal/httpjson`, and `internal/alias` no longer imports the proxy.
+- The v1 configs, compose files and scripts moved to
+  `configs/private/v1-archive/` and are no longer published; `docs/models.md`
+  gives its recommended layouts as v2 `models:` entries.
+
 ## v2.4.0
 
 ### Models from viiwork-parrot

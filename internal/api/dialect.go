@@ -28,7 +28,6 @@ import (
 	"bytes"
 	"fmt"
 	"net/http"
-	"sort"
 	"sync"
 )
 
@@ -76,10 +75,9 @@ type ResponseTranslator interface {
 }
 
 var (
-	mu       sync.RWMutex
-	byPath   = map[string]Dialect{}
-	byName   = map[string]Dialect{}
-	registry []Dialect
+	mu     sync.RWMutex
+	byPath = map[string]Dialect{}
+	byName = map[string]Dialect{}
 )
 
 // Register makes a dialect serve its paths. An empty name, no paths, or a path
@@ -108,7 +106,6 @@ func Register(d Dialect) {
 	for _, p := range paths {
 		byPath[p] = d
 	}
-	registry = append(registry, d)
 }
 
 // Lookup returns the dialect that owns a request path.
@@ -117,16 +114,4 @@ func Lookup(path string) (Dialect, bool) {
 	defer mu.RUnlock()
 	d, ok := byPath[path]
 	return d, ok
-}
-
-// Names returns every registered dialect name, sorted.
-func Names() []string {
-	mu.RLock()
-	defer mu.RUnlock()
-	out := make([]string, 0, len(byName))
-	for n := range byName {
-		out = append(out, n)
-	}
-	sort.Strings(out)
-	return out
 }

@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/janit/viiwork/v2/internal/proxy"
+	"github.com/janit/viiwork/v2/internal/api"
 	"github.com/janit/viiwork/v2/mesh/capacity"
 	"github.com/janit/viiwork/v2/meshapi"
 )
@@ -112,11 +112,6 @@ type Resolver struct {
 	shadowed map[string]bool // shadowing already logged
 }
 
-var (
-	_ proxy.Resolver    = (*Resolver)(nil).Resolve
-	_ proxy.ModelLister = (*Resolver)(nil).ModelEntries
-)
-
 func NewResolver(store *Store, served ServedView, pipelineNames func() []string, logf func(string, ...any)) *Resolver {
 	if pipelineNames == nil {
 		pipelineNames = func() []string { return nil }
@@ -140,7 +135,7 @@ func (r *Resolver) isPipeline(name string) bool {
 	return false
 }
 
-// Resolve is proxy.Resolver. It runs on every request, so a name that is not
+// Resolve is proxy.Resolver (asserted in internal/node, which wires it). It runs on every request, so a name that is not
 // a live alias returns before anything else is consulted: real names and
 // unknown names both resolve to themselves.
 func (r *Resolver) Resolve(requested string) (model, alias string, err error) {
@@ -154,7 +149,7 @@ func (r *Resolver) Resolve(requested string) (model, alias string, err error) {
 	if m, ok := r.pick(e); ok {
 		return m, requested, nil
 	}
-	return "", "", &proxy.ResolveError{
+	return "", "", &api.ResolveError{
 		Status:     503,
 		Type:       meshapi.ErrTypeUnavailable,
 		Message:    fmt.Sprintf("alias %s: no node serves %s or its fallbacks", requested, e.Target),
@@ -298,7 +293,7 @@ func (r *Resolver) ValidateWrite(name string, req meshapi.AliasWriteRequest) err
 // formatUpdatedAt renders an entry's TS as RFC 3339 in UTC with milliseconds
 // (Decision 9): two writes in one second stay distinguishable.
 func formatUpdatedAt(ts int64) string {
-	return time.UnixMilli(ts).UTC().Format("2006-01-02T15:04:05.000Z07:00")
+	return meshapi.FormatAliasTime(ts)
 }
 
 func liveNames(t meshapi.AliasTable) []string {

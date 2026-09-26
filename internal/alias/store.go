@@ -22,6 +22,9 @@ var (
 	ErrNotFound  = errors.New("alias: not found")
 	ErrNoHistory = errors.New("alias: no previous version to revert to")
 	ErrTooMany   = errors.New("alias: table is full")
+	// ErrVersionExhausted is a write to an alias whose version is already
+	// MaxAliasVer.
+	ErrVersionExhausted = errors.New("alias: version counter exhausted")
 )
 
 const fileName = "aliases.json"
@@ -175,7 +178,10 @@ func (s *Store) Set(name, target string, fallbacks []string) (meshapi.AliasEntry
 	if (!had || prev.Deleted) && s.liveLocked() >= meshapi.MaxAliases {
 		return meshapi.AliasEntry{}, ErrTooMany
 	}
-	e := s.nextVersion(prev)
+	e, err := s.nextVersion(prev)
+	if err != nil {
+		return meshapi.AliasEntry{}, err
+	}
 	e.Target = target
 	e.Fallbacks = copyStrings(fallbacks)
 	e.History = historyAfter(prev, had, prev.History)
@@ -190,7 +196,10 @@ func (s *Store) Delete(name string) (meshapi.AliasEntry, error) {
 	if !had || prev.Deleted {
 		return meshapi.AliasEntry{}, ErrNotFound
 	}
-	e := s.nextVersion(prev)
+	e, err := s.nextVersion(prev)
+	if err != nil {
+		return meshapi.AliasEntry{}, err
+	}
 	e.Fallbacks = []string{}
 	e.Deleted = true
 	e.History = historyAfter(prev, had, prev.History)
@@ -211,7 +220,10 @@ func (s *Store) Revert(name string) (meshapi.AliasEntry, error) {
 		return meshapi.AliasEntry{}, ErrNoHistory
 	}
 	back := prev.History[0]
-	e := s.nextVersion(prev)
+	e, err := s.nextVersion(prev)
+	if err != nil {
+		return meshapi.AliasEntry{}, err
+	}
 	e.Target = back.Target
 	e.Fallbacks = copyStrings(back.Fallbacks)
 	e.History = historyAfter(prev, had, prev.History[1:])
@@ -243,9 +255,18 @@ func (s *Store) PurgeTombstones() (int, error) {
 	return len(removed), nil
 }
 
+// MaxAliasVer is the largest version an alias entry may carry: 2^53, the
+// largest integer a JavaScript number (the dashboards) holds exactly. Remote
+// entries above it are refused and a local write never produces one, so the
+// uint64 counter can never wrap and freeze an alias.
+const MaxAliasVer uint64 = 1 << 53
+
 // nextVersion is a new entry by this node, one version past prev.
-func (s *Store) nextVersion(prev meshapi.AliasEntry) meshapi.AliasEntry {
-	return meshapi.AliasEntry{Ver: prev.Ver + 1, TS: s.now().UnixMilli(), By: s.self, Fallbacks: []string{}}
+func (s *Store) nextVersion(prev meshapi.AliasEntry) (meshapi.AliasEntry, error) {
+	if prev.Ver >= MaxAliasVer {
+		return meshapi.AliasEntry{}, ErrVersionExhausted
+	}
+	return meshapi.AliasEntry{Ver: prev.Ver + 1, TS: s.now().UnixMilli(), By: s.self, Fallbacks: []string{}}, nil
 }
 
 // commitLocked stores e under name and persists the table, restoring the

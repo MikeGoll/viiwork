@@ -52,9 +52,6 @@ const sdkPackage = "@ai-sdk/openai-compatible"
 // sorts on it, and empty sorts last, which is where an unknown date belongs.
 const releaseDate = ""
 
-// Source is the node's published model views. *proxy.Handler satisfies it.
-type Source = discovery.Source
-
 // Config is the served catalogue's identity.
 type Config struct {
 	// ProviderID is the provider key, and so the "provider/model" prefix a

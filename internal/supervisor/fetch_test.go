@@ -161,6 +161,26 @@ func TestFetchF3UnavailableRetriesThenSucceeds(t *testing.T) {
 	}
 }
 
+// An Unavailable answer with an empty message (a 503 with no error text) must
+// still log exactly once on its first occurrence, not zero times: lastErr
+// starts at a sentinel no real message equals, precisely so this case is not
+// silent forever.
+func TestFetchF3aUnavailableEmptyMessageStillLogsOnce(t *testing.T) {
+	weights := weightsFile(t)
+	r := &fakeResolver{next: func(n int) parrot.Result {
+		if n <= 3 {
+			return parrot.Result{Kind: parrot.Unavailable, Message: ""}
+		}
+		return parrot.Result{Kind: parrot.Ready, Code: 200, Path: weights}
+	}}
+	s, _, log := newFetchSupervisor(t, r)
+	mustApply(t, s, sourcedModel("f3a", []int{0}))
+	modelHealthy(t, s, "f3a", 5*time.Second)
+	if n := strings.Count(log.String(), "waiting for viiwork-parrot: "); n != 1 {
+		t.Errorf("the empty-message Unavailable was logged %d times, want exactly once:\n%s", n, log.String())
+	}
+}
+
 // Decision: a fetch holds no load ticket. The sourced model is listed first
 // and never resolves; the plain model behind it must still load.
 func TestFetchF4AFetchingModelDoesNotBlockTheGate(t *testing.T) {

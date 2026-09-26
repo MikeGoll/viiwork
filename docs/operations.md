@@ -16,7 +16,6 @@ Deploying and updating:
 | `scripts/rebuild.sh` | Full clean rebuild: stop, remove images, rebuild, start, wait on `:8086/health`. Never prunes volumes — a node's state directory must survive a routine rebuild |
 | `scripts/version.sh` | The single source of the version stamped into a build. An exact git tag wins; otherwise it reads `CHANGELOG.md`'s top heading, because builds do not rely on tags |
 | `scripts/verify-environment.sh` | Check a host's drivers, devices and ports before a bring-up |
-| `scripts/deploy.sh` | **viiwork 1.x layouts only** — one instance per model per host. Not converted; see [migrating-to-v2.md](migrating-to-v2.md) |
 
 Benchmarking and tuning:
 
@@ -38,7 +37,9 @@ Clients and models:
 `setup-node.sh` was removed in v2.1.0: it wrote viiwork 1.x layouts, and its
 first prompt offered the retired gfx906 fork image. Set a v2 node up by copying
 `configs/docker-compose.v2.example.yaml` and `viiwork.yaml.example`, and convert
-a v1 host with [migrating-to-v2.md](migrating-to-v2.md).
+a v1 host with [migrating-to-v2.md](migrating-to-v2.md). `deploy.sh`, which
+drove the one-instance-per-model v1 layouts, left the published tree with those
+layouts.
 
 ## Acceptance checks
 

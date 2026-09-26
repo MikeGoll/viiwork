@@ -146,6 +146,54 @@ func extractPromptText(body []byte) string {
 	return p.Prompt
 }
 
+// modelValueSpan returns the byte offsets of the top-level "model" key's string
+// value, quotes included, without parsing the rest of the body. It reports
+// false whenever it cannot be sure, and the caller falls back to decoding.
+//
+// It shares extractModelFast's reasoning. "model" must appear exactly once
+// and no \u escape may appear anywhere, so the key cannot be spelled another
+// way and there is no second model key for a full decode to prefer. The scan
+// stops at the first nested value, so model has to come before messages —
+// which every client library writes.
+func modelValueSpan(body []byte) (start, end int, ok bool) {
+	if bytes.Contains(body, escapePrefix) || bytes.Count(body, keyModelJSON) != 1 {
+		return 0, 0, false
+	}
+	dec := json.NewDecoder(bytes.NewReader(body))
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
+		return 0, 0, false
+	}
+	for dec.More() {
+		keyTok, err := dec.Token()
+		if err != nil {
+			return 0, 0, false
+		}
+		keyEnd := int(dec.InputOffset()) // just past the key's closing quote
+		valTok, err := dec.Token()
+		if err != nil {
+			return 0, 0, false
+		}
+		if _, nested := valTok.(json.Delim); nested {
+			return 0, 0, false
+		}
+		if key, _ := keyTok.(string); key != "model" {
+			continue
+		}
+		if _, isString := valTok.(string); !isString {
+			return 0, 0, false
+		}
+		end = int(dec.InputOffset()) // just past the value's closing quote
+		// Between the key and the value there is only whitespace and a colon,
+		// so the first quote is the value's opening one.
+		i := bytes.IndexByte(body[keyEnd:end], '"')
+		if i < 0 {
+			return 0, 0, false
+		}
+		return keyEnd + i, end, true
+	}
+	return 0, 0, false
+}
+
 // extractModelFast returns the value of a top-level "model" key without parsing
 // the rest of the body, reporting false when it cannot do so safely.
 //

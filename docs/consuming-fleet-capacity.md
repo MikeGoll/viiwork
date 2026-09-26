@@ -55,6 +55,11 @@ GET /v1/fleet/capacity?model=translategemma-27b-it
 Two fields carry the integration: **`slots`** is the depth to size to, and
 **`hosts[].api`** is where to send.
 
+The model's `free` is the sum of each fresh host's `free`, and a host's `free`
+is `slots - busy` clamped at 0. It is not `slots - busy` over the totals: a host
+running more requests than it has slots (while draining, say) has nothing to
+lend, and must not cancel out spare slots on another host.
+
 ### `?model=` accepts an alias (from beta3)
 
 An alias is a name for capacity, so it names capacity here too: from

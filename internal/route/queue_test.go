@@ -234,6 +234,41 @@ func TestQueueQ10PinnedHostGone(t *testing.T) {
 	}
 }
 
+// Dispatch stops asking unpinned waiters once one of them finds no slot, but
+// must still ask the pinned waiters queued behind them: a pinned host that is
+// gone completes its waiter at once, and a free slot still goes to the head of
+// the unpinned line.
+func TestQueueQ10PinnedHostGoneBehindFullUnpinned(t *testing.T) {
+	f := realFixture(64, 5*time.Second)
+	f.local.add("m", newFakeBackend("m/0", 1))
+	f.reports.set(report("B", time.Now(), time.Millisecond, capM(1, 1, 1)))
+	held := f.pick(t, Request{Model: "m", Host: "self"})
+	first := acquireAsync(f, context.Background(), Request{Model: "m"})
+	waitQueue(t, f, "m", 1)
+	second := acquireAsync(f, context.Background(), Request{Model: "m"})
+	waitQueue(t, f, "m", 2)
+	pinned := acquireAsync(f, context.Background(), Request{Model: "m", Host: "B"})
+	waitQueue(t, f, "m", 3)
+
+	f.reports.set()
+	f.router.Wake()
+	if a := recv(t, pinned, time.Second); !errors.Is(a.err, ErrHostNotServing) {
+		t.Errorf("pinned waiter: err = %v", a.err)
+	}
+	if n := f.router.QueueLen("m"); n != 2 {
+		t.Fatalf("queue = %d, want both unpinned waiters still queued", n)
+	}
+	held.Release()
+	if a := recv(t, first, time.Second); a.err != nil || !a.lease.Target().Local {
+		t.Errorf("first unpinned waiter: %+v", a)
+	}
+	select {
+	case a := <-second:
+		t.Errorf("the second unpinned waiter must keep waiting, got %+v", a)
+	default:
+	}
+}
+
 func TestQueueQ11ForwardedNeverQueues(t *testing.T) {
 	f := realFixture(64, 5*time.Second)
 	f.local.add("m", newFakeBackend("m/0", 1))

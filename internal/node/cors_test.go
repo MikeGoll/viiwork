@@ -1,9 +1,15 @@
 package node
 
 import (
+	"context"
+	"errors"
+	stdlog "log"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+
+	"github.com/janit/viiwork/v2/internal/config"
 )
 
 func testCORS() *CORS {
@@ -172,5 +178,83 @@ func TestCORSHeaderOnSSEEndpoint(t *testing.T) {
 
 	if got := w.Header().Get("Access-Control-Allow-Origin"); got != "https://node0.tailnet-abc.ts.net" {
 		t.Errorf("allow-origin = %q on the SSE path", got)
+	}
+}
+
+// corsNode is just enough Node for buildCORS: a MagicDNS answer and a log.
+func corsNode(suffix string, err error, log *strings.Builder) *Node {
+	return &Node{
+		o:      Options{MagicDNS: func(context.Context, string) (string, error) { return suffix, err }},
+		logger: stdlog.New(log, "", 0),
+	}
+}
+
+func corsConfig(t *testing.T, doc string) *config.Config {
+	t.Helper()
+	cfg, err := config.Parse([]byte(doc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cfg
+}
+
+// Unset allow_origins used to default to "*.ts.net", which is every Tailscale
+// customer's domain — Funnel pages included. The node now trusts only its own
+// tailnet's MagicDNS domain, as tailscaled reports it.
+func TestBuildCORSDerivesOwnTailnet(t *testing.T) {
+	var log strings.Builder
+	c := corsNode("tail1234.ts.net", nil, &log).buildCORS(corsConfig(t, ""))
+	if c == nil {
+		t.Fatal("no CORS for an unset allowlist")
+	}
+	for origin, want := range map[string]bool{
+		"https://gb1.tail1234.ts.net":     true,
+		"http://localhost:5173":           true,
+		"http://127.0.0.1:8086":           true,
+		"http://100.100.42.7":             true, // tailnet IP literal
+		"https://someone-else.ts.net":     false,
+		"https://funnel.tail9999.ts.net":  false,
+		"https://tail1234.ts.net.evil.io": false,
+	} {
+		if c.Allows(origin) != want {
+			t.Errorf("Allows(%q) = %v, want %v", origin, !want, want)
+		}
+	}
+	if !strings.Contains(log.String(), "*.tail1234.ts.net") {
+		t.Errorf("the derived list is not logged: %q", log.String())
+	}
+}
+
+func TestBuildCORSFallsBackWithoutTailscaled(t *testing.T) {
+	var log strings.Builder
+	c := corsNode("", errors.New("no socket"), &log).buildCORS(corsConfig(t, ""))
+	if c == nil {
+		t.Fatal("no CORS at all; the local origins should remain")
+	}
+	if c.Allows("https://gb1.tail1234.ts.net") || c.Allows("https://anything.ts.net") {
+		t.Error("a MagicDNS name is allowed with no tailnet domain known")
+	}
+	if !c.Allows("http://localhost:5173") || !c.Allows("http://100.100.42.7") {
+		t.Error("the fallback lost localhost or tailnet IP literals")
+	}
+	if !strings.Contains(log.String(), "unknown") || !strings.Contains(log.String(), "api.cors.allow_origins") {
+		t.Errorf("the fallback is not explained in the log: %q", log.String())
+	}
+}
+
+// An operator's list is theirs: never asked about, never extended.
+func TestBuildCORSKeepsExplicitList(t *testing.T) {
+	var log strings.Builder
+	n := corsNode("tail1234.ts.net", nil, &log)
+	n.o.MagicDNS = func(context.Context, string) (string, error) {
+		t.Error("tailscaled consulted for an explicit list")
+		return "", nil
+	}
+	c := n.buildCORS(corsConfig(t, "api:\n  cors:\n    allow_origins: [\"*.example.com\"]\n    allow_tailnet_ips: false\n"))
+	if c == nil || len(c.Origins) != 1 || c.Origins[0] != "*.example.com" || c.TailnetIPs {
+		t.Fatalf("explicit list altered: %+v", c)
+	}
+	if c := n.buildCORS(corsConfig(t, "api:\n  cors:\n    allow_origins: []\n")); c != nil {
+		t.Errorf("allow_origins: [] must mean no CORS, got %+v", c)
 	}
 }

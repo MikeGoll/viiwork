@@ -4,17 +4,22 @@ import (
 	"context"
 	"errors"
 	"os/exec"
+	"slices"
 	"strings"
 	"testing"
 )
+
+// lastEnv is the extra environment of the most recent fake ipmitool call.
+var lastEnv []string
 
 // newTestController builds a controller whose ipmitool is a function, so the
 // authorization checks can be exercised without a BMC anywhere near them.
 func newTestController(cfg ControlConfig, self string, run func(context.Context, ...string) ([]byte, error)) (*Controller, *[][]string) {
 	c := NewController(cfg, self)
 	var calls [][]string
-	c.run = func(ctx context.Context, args ...string) ([]byte, error) {
+	c.run = func(ctx context.Context, env []string, args ...string) ([]byte, error) {
 		calls = append(calls, append([]string(nil), args...))
+		lastEnv = append([]string(nil), env...)
 		if run != nil {
 			return run(ctx, args...)
 		}
@@ -117,10 +122,71 @@ func TestRemoteNeedsAllowlistAndBMC(t *testing.T) {
 		t.Fatalf("Remote on a listed host with a BMC: %v", err)
 	}
 	got := strings.Join((*calls)[0], " ")
-	for _, want := range []string{"-I lanplus", "-H 198.51.100.9", "chassis power off"} {
+	for _, want := range []string{"-I lanplus", "-H 198.51.100.9", "-U u", "-E", "chassis power off"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("ipmitool args %q missing %q", got, want)
 		}
+	}
+}
+
+// The BMC password must never be an argument: argv is readable by every
+// process on the host through /proc/<pid>/cmdline, and containers run with
+// pid: host. It travels in IPMI_PASSWORD on that one command instead.
+func TestRemotePasswordIsNotInArgv(t *testing.T) {
+	cfg := ControlConfig{
+		Enabled: true,
+		Hosts:   []string{"node-a", "node-b"},
+		BMCs:    map[string]BMC{"node-b": {Addr: "198.51.100.9", Username: "admin", Password: "hunter2"}},
+	}
+	c, calls := newTestController(cfg, "node-a", func(_ context.Context, args ...string) ([]byte, error) {
+		if slices.Contains(args, "lanplus") {
+			return nil, &exec.ExitError{Stderr: []byte("Error: Unable to establish IPMI v2 / RMCP+ session\n")}
+		}
+		return []byte("Chassis Power is on"), nil
+	})
+	_, err := c.Remote(context.Background(), "node-b", ActionOn)
+	if err == nil {
+		t.Fatal("want the failing run surfaced as an error")
+	}
+	args := (*calls)[0]
+	for _, a := range args {
+		if strings.Contains(a, "hunter2") {
+			t.Errorf("password in argv: %q", args)
+		}
+		if a == "-P" {
+			t.Errorf("-P in argv: %q", args)
+		}
+	}
+	if !slices.Contains(args, "-E") {
+		t.Errorf("argv %q lacks -E", args)
+	}
+	if !slices.Equal(lastEnv, []string{"IPMI_PASSWORD=hunter2"}) {
+		t.Errorf("env = %q, want only IPMI_PASSWORD for this command", lastEnv)
+	}
+	if strings.Contains(err.Error(), "hunter2") {
+		t.Errorf("error echoes the password: %v", err)
+	}
+
+	// In-band carries no credentials at all.
+	if _, err := c.Local(context.Background(), ActionStatus); err != nil {
+		t.Fatal(err)
+	}
+	if len(lastEnv) != 0 || slices.Contains((*calls)[1], "-E") {
+		t.Errorf("in-band call got env %q args %q, want neither credentials nor -E", lastEnv, (*calls)[1])
+	}
+}
+
+func TestControlCommand(t *testing.T) {
+	args, env := controlCommand(&BMC{Addr: "198.51.100.9", Username: "u", Password: "p w"}, ActionCycle)
+	if want := []string{"-I", "lanplus", "-H", "198.51.100.9", "-U", "u", "-E", "chassis", "power", "cycle"}; !slices.Equal(args, want) {
+		t.Errorf("args = %q, want %q", args, want)
+	}
+	if !slices.Equal(env, []string{"IPMI_PASSWORD=p w"}) {
+		t.Errorf("env = %q", env)
+	}
+	args, env = controlCommand(nil, ActionStatus)
+	if !slices.Equal(args, []string{"chassis", "power", "status"}) || env != nil {
+		t.Errorf("in-band: args %q env %q", args, env)
 	}
 }
 

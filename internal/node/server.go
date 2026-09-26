@@ -3,10 +3,10 @@ package node
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
-	"net"
 	"net/http"
 	"runtime"
 	"strconv"
@@ -14,11 +14,14 @@ import (
 	"time"
 
 	"github.com/janit/viiwork/v2/internal/activity"
+	"github.com/janit/viiwork/v2/internal/api"
 	"github.com/janit/viiwork/v2/internal/catalog"
 	"github.com/janit/viiwork/v2/internal/gpu"
+	"github.com/janit/viiwork/v2/internal/httpjson"
 	"github.com/janit/viiwork/v2/internal/modelinfo"
 	"github.com/janit/viiwork/v2/internal/power"
 	"github.com/janit/viiwork/v2/mesh"
+	"github.com/janit/viiwork/v2/mesh/meshclient"
 	"github.com/janit/viiwork/v2/meshapi"
 	"github.com/janit/viiwork/v2/web"
 )
@@ -30,13 +33,7 @@ const maxPromptResponseBytes = 1 << 20
 // promptClient is /v1/mesh/prompt's outbound client: the dial and the whole
 // request are bounded, so a member that accepts the connection but never
 // answers cannot pin a handler goroutine (as v1).
-var promptClient = &http.Client{
-	Timeout: 30 * time.Second,
-	Transport: &http.Transport{
-		Proxy:       nil,
-		DialContext: (&net.Dialer{Timeout: 5 * time.Second}).DialContext,
-	},
-}
+var promptClient = meshclient.New(meshclient.Options{DialTimeout: 5 * time.Second, Timeout: 30 * time.Second})
 
 type ServerDeps struct {
 	Self           string
@@ -73,15 +70,74 @@ func NewServer(d ServerDeps) http.Handler {
 	return &server{d: d}
 }
 
-func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	defer func() {
-		if rv := recover(); rv != nil {
-			buf := make([]byte, 4096)
-			n := runtime.Stack(buf, false)
-			log.Printf("[PANIC] %s %s: %v\n%s", r.Method, r.URL.Path, rv, buf[:n])
-			http.Error(w, "internal server error", http.StatusInternalServerError)
-		}
-	}()
+// wroteWriter records whether a handler has started its response, so a
+// recovered panic knows whether a 500 can still be sent. It keeps Flusher —
+// every stream asserts it — and Unwrap for http.ResponseController.
+type wroteWriter struct {
+	http.ResponseWriter
+	wrote bool
+}
+
+func (w *wroteWriter) WriteHeader(code int) {
+	if code >= 200 { // a 1xx informational header does not commit the response
+		w.wrote = true
+	}
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *wroteWriter) Write(b []byte) (int, error) {
+	w.wrote = true
+	return w.ResponseWriter.Write(b)
+}
+
+func (w *wroteWriter) Flush() {
+	w.wrote = true // flushing commits the header
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+func (w *wroteWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+// recoverPanic turns a handler panic into the least wrong response. An
+// http.ErrAbortHandler is net/http's own "abort this response" signal — the
+// proxy raises it on a truncated stream — so it is re-raised untouched and
+// unlogged. Any other panic is logged; if nothing was written yet the client
+// gets a 500, and otherwise the response is already a 200 with part of a body,
+// so the only honest thing left is to abort the connection rather than append
+// an error message to it.
+func recoverPanic(w *wroteWriter, r *http.Request) {
+	rv := recover()
+	if rv == nil {
+		return
+	}
+	if err, ok := rv.(error); ok && errors.Is(err, http.ErrAbortHandler) {
+		panic(rv)
+	}
+	buf := make([]byte, 4096)
+	n := runtime.Stack(buf, false)
+	log.Printf("[PANIC] %s %s: %v\n%s", r.Method, r.URL.Path, rv, buf[:n])
+	if w.wrote {
+		panic(http.ErrAbortHandler)
+	}
+	http.Error(w, "internal server error", http.StatusInternalServerError)
+}
+
+// inferencePath reports whether path belongs to the inference handler: its
+// discovery endpoints, or any path a client API dialect registered (C8), so a
+// new dialect is served without an edit here.
+func inferencePath(path string) bool {
+	switch path {
+	case meshapi.PathModels, meshapi.PathCapacity, meshapi.PathFleetCapacity:
+		return true
+	}
+	_, ok := api.Lookup(path)
+	return ok
+}
+
+func (s *server) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
+	w := &wroteWriter{ResponseWriter: rw}
+	defer recoverPanic(w, r)
 
 	// CORS runs before routing for two reasons: the allow header has to land on
 	// every response including the SSE streams and the error paths, and a
@@ -90,13 +146,18 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if s.d.CORS != nil && s.d.CORS.apply(w, r) {
 		return
 	}
+	// So does the CSRF guard (cors.go): a refused write must never reach a
+	// handler. It runs with or without CORS configured — a nil CORS refuses
+	// every foreign origin.
+	if s.d.CORS.guardWrite(w, r) {
+		return
+	}
 
 	path, get := r.URL.Path, r.Method == http.MethodGet
 	switch {
 	case path == meshapi.PathHealth && get:
 		s.handleHealth(w)
-	case path == meshapi.PathModels, path == meshapi.PathCapacity, path == meshapi.PathFleetCapacity,
-		path == meshapi.PathChatCompletions, path == meshapi.PathCompletions, path == meshapi.PathEmbeddings:
+	case inferencePath(path):
 		s.d.Inference.ServeHTTP(w, r)
 	case path == catalog.Path && get && s.d.Catalog != nil:
 		// Not a /v1 endpoint: the path is OpenCode's to choose, since it
@@ -148,8 +209,7 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func writeJSON(w http.ResponseWriter, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(v)
+	httpjson.Write(w, http.StatusOK, v)
 }
 
 func writePage(w http.ResponseWriter, page []byte) {
@@ -173,20 +233,17 @@ func (s *server) handleHealth(w http.ResponseWriter) {
 		"backends_healthy": healthy,
 		"backends_total":   total,
 	}
-	w.Header().Set("Content-Type", "application/json")
+	code := http.StatusOK
 	if models > 0 && healthy == 0 {
 		resp["status"] = "unhealthy"
-		w.WriteHeader(http.StatusServiceUnavailable)
-	} else {
-		w.WriteHeader(http.StatusOK)
+		code = http.StatusServiceUnavailable
 	}
-	json.NewEncoder(w).Encode(resp)
+	httpjson.Write(w, code, resp)
 }
 
 func (s *server) handleMetrics(w http.ResponseWriter) {
-	w.Header().Set("Content-Type", "application/json")
 	if s.d.GPUHistory == nil || s.d.GPUAvailable == nil || !s.d.GPUAvailable() {
-		json.NewEncoder(w).Encode(map[string]any{"available": false})
+		writeJSON(w, map[string]any{"available": false})
 		return
 	}
 	all := s.d.GPUHistory.AllGPUSamples()
@@ -194,7 +251,7 @@ func (s *server) handleMetrics(w http.ResponseWriter) {
 	for id, samples := range all {
 		gpus[strconv.Itoa(id)] = samples
 	}
-	json.NewEncoder(w).Encode(map[string]any{
+	writeJSON(w, map[string]any{
 		"available":        true,
 		"interval_seconds": 5,
 		"max_samples":      720,
@@ -236,12 +293,11 @@ func (s *server) handleMetricsStream(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) handleActivity(w http.ResponseWriter) {
-	w.Header().Set("Content-Type", "application/json")
 	if s.d.Activity == nil {
-		json.NewEncoder(w).Encode(map[string]any{"events": []struct{}{}})
+		writeJSON(w, map[string]any{"events": []struct{}{}})
 		return
 	}
-	json.NewEncoder(w).Encode(map[string]any{"events": s.d.Activity.Recent()})
+	writeJSON(w, map[string]any{"events": s.d.Activity.Recent()})
 }
 
 func (s *server) handleActivityStream(w http.ResponseWriter, r *http.Request) {
@@ -295,7 +351,6 @@ func (s *server) handleActivityStream(w http.ResponseWriter, r *http.Request) {
 // a given rid — request ids are a per-process counter, not cluster-wide, so a
 // lookup only ever makes sense against the node that minted it.
 func (s *server) handlePromptLookup(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
 	rid, err := strconv.ParseInt(r.URL.Query().Get("rid"), 10, 64)
 	if err != nil || s.d.Activity == nil {
 		http.NotFound(w, r)
@@ -306,7 +361,7 @@ func (s *server) handlePromptLookup(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	json.NewEncoder(w).Encode(entry)
+	writeJSON(w, entry)
 }
 
 // handleMeshPrompt is the fan-out entry point the mesh dashboard's prompt page

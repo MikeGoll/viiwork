@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/janit/viiwork/v2/internal/httpjson"
 	"github.com/janit/viiwork/v2/internal/meshauth"
 	"github.com/janit/viiwork/v2/meshapi"
 )
@@ -90,14 +91,14 @@ func (h *apiHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.EscapedPath()
 	if path == meshapi.PathAliases {
 		if r.Method != http.MethodGet {
-			writeError(w, http.StatusMethodNotAllowed, "invalid_request", "method not allowed")
+			httpjson.Error(w, http.StatusMethodNotAllowed, "invalid_request", "method not allowed")
 			return
 		}
 		if r.URL.Query().Get("table") == "1" {
-			writeJSON(w, http.StatusOK, h.svc.Store().Table())
+			httpjson.Write(w, http.StatusOK, h.svc.Store().Table())
 			return
 		}
-		writeJSON(w, http.StatusOK, meshapi.AliasesResponse{Aliases: h.svc.Resolver().Info()})
+		httpjson.Write(w, http.StatusOK, meshapi.AliasesResponse{Aliases: h.svc.Resolver().Info()})
 		return
 	}
 
@@ -122,7 +123,7 @@ func (h *apiHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case len(segments) == 2 && "/"+segments[1] == meshapi.AliasRevertSuffix && r.Method == http.MethodPost:
 		write = func(name string, _ []byte) (meshapi.AliasBroadcast, error) { return h.svc.Revert(name) }
 	case len(segments) == 1, len(segments) == 2 && "/"+segments[1] == meshapi.AliasRevertSuffix:
-		writeError(w, http.StatusMethodNotAllowed, "invalid_request", "method not allowed")
+		httpjson.Error(w, http.StatusMethodNotAllowed, "invalid_request", "method not allowed")
 		return
 	default:
 		http.NotFound(w, r)
@@ -133,16 +134,16 @@ func (h *apiHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		var tooLarge *http.MaxBytesError
 		if errors.As(err, &tooLarge) {
-			writeError(w, http.StatusRequestEntityTooLarge, "invalid_request", "request body too large")
+			httpjson.Error(w, http.StatusRequestEntityTooLarge, "invalid_request", "request body too large")
 			return
 		}
-		writeError(w, http.StatusBadRequest, "invalid_request", "failed to read request")
+		httpjson.Error(w, http.StatusBadRequest, "invalid_request", "failed to read request")
 		return
 	}
 	// Authorisation comes first, so an unauthorised caller learns nothing
 	// about the table.
 	if status, msg, ok := h.auth.Authorize(r, body); !ok {
-		writeError(w, status, "invalid_request", msg)
+		httpjson.Error(w, status, "invalid_request", msg)
 		return
 	}
 	b, err := write(name, body)
@@ -151,17 +152,17 @@ func (h *apiHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		var bad *badRequest
 		switch {
 		case errors.As(err, &bad):
-			writeError(w, http.StatusBadRequest, "invalid_request", bad.msg)
+			httpjson.Error(w, http.StatusBadRequest, "invalid_request", bad.msg)
 		case errors.As(err, &we) && we.Status == http.StatusNotFound:
-			writeError(w, we.Status, "not_found", we.Message)
+			httpjson.Error(w, we.Status, "not_found", we.Message)
 		case errors.As(err, &we):
-			writeError(w, we.Status, "invalid_request", we.Message)
+			httpjson.Error(w, we.Status, "invalid_request", we.Message)
 		default:
-			writeError(w, http.StatusInternalServerError, "server_error", fmt.Sprintf("alias write failed: %v", err))
+			httpjson.Error(w, http.StatusInternalServerError, "server_error", fmt.Sprintf("alias write failed: %v", err))
 		}
 		return
 	}
-	writeJSON(w, http.StatusOK, b)
+	httpjson.Write(w, http.StatusOK, b)
 }
 
 type badRequest struct{ msg string }
@@ -174,14 +175,4 @@ func (h *apiHandler) set(name string, body []byte) (meshapi.AliasBroadcast, erro
 		return meshapi.AliasBroadcast{}, &badRequest{msg: fmt.Sprintf("invalid alias write: %v", err)}
 	}
 	return h.svc.Set(name, req)
-}
-
-func writeError(w http.ResponseWriter, status int, typ, message string) {
-	writeJSON(w, status, meshapi.ErrorResponse{Error: meshapi.ErrorBody{Message: message, Type: typ}})
-}
-
-func writeJSON(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(v)
 }

@@ -177,11 +177,12 @@ func (s *Signer) checkSkew(ts string) error {
 	if err != nil {
 		return ErrBadProof
 	}
-	d := s.now().Sub(time.Unix(secs, 0))
-	if d < 0 {
-		d = -d
-	}
-	if d > SkewWindow {
+	// Integer seconds on both sides and no negation: a Duration difference
+	// saturates at the minimum Duration for a timestamp far enough in the
+	// future, and negating the minimum is still negative, so the window
+	// check passed. now ± SkewWindow cannot overflow for any real clock.
+	now, window := s.now().Unix(), int64(SkewWindow/time.Second)
+	if secs < now-window || secs > now+window {
 		return ErrBadProof
 	}
 	return nil

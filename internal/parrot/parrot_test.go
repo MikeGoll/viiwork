@@ -140,6 +140,39 @@ func TestEnsureHonoursContext(t *testing.T) {
 	}
 }
 
+// A 503 with no error text must still produce a non-empty Message: fetch.go
+// logs Unavailable only when the message text is non-empty against its
+// sentinel, and an empty message here used to mean total silence forever.
+func TestEnsure503EmptyBodyHasAMessage(t *testing.T) {
+	c := serve(t, reply(503, `{}`))
+	got := c.Ensure(context.Background(), "g")
+	if got.Kind != Unavailable || got.Message == "" {
+		t.Errorf("got %+v, want Unavailable with a non-empty Message", got)
+	}
+}
+
+// A status shape viiwork does not expect (here a bare string instead of an
+// object) must not stop path from being read: only a genuine protocol
+// violation (200, no path at all) is Refused.
+func TestEnsure200BareStringStatusIsStillReady(t *testing.T) {
+	c := serve(t, reply(200, `{"path":"/srv/parrot/g.gguf","status":"seeding"}`))
+	got := c.Ensure(context.Background(), "g")
+	if got.Kind != Ready || got.Path != "/srv/parrot/g.gguf" {
+		t.Errorf("got %+v, want Ready with the path", got)
+	}
+}
+
+// A 200 whose body is not JSON at all is a shape mismatch, not a protocol
+// violation: Unavailable costs nothing to retry, while Refused would kill the
+// backends on an answer that may have actually meant the weights are ready.
+func TestEnsure200NonJSONBodyIsUnavailable(t *testing.T) {
+	c := serve(t, reply(200, `not json`))
+	got := c.Ensure(context.Background(), "g")
+	if got.Kind != Unavailable {
+		t.Errorf("got %+v, want Unavailable", got)
+	}
+}
+
 func TestStatus(t *testing.T) {
 	c := serve(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet || r.URL.Path != "/status" {

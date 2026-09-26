@@ -176,6 +176,11 @@ func sourceCheck(m config.Model, id, api string, list []parrot.ModelStatus, err 
 			c.Detail = fmt.Sprintf("%s %s (viiwork-parrot %s)", st.Path, formatBytes(size), id)
 			return c, size, true
 		case "failed", "paused", "absent":
+			// absent: viiwork-parrot has been told to want this model (it is
+			// listed) and still will not fetch it — typically
+			// seed_only_existing refusing an id it does not already have.
+			// That is a real failure, not "not checked yet", so it belongs
+			// here alongside failed and paused.
 			c.Detail = fmt.Sprintf("viiwork-parrot %s is %s: %s", id, st.State, st.Error)
 			return c, 0, false
 		default:

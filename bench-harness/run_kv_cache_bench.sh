@@ -34,9 +34,9 @@ GPUS=(5 6 7 8 9)
 BASE_URL="http://localhost:8091"
 CONCURRENCY=10
 INTERVAL="30s"
-COMPOSE_FILE="configs/docker-compose.kv-bench.yaml"
+COMPOSE_FILE="configs/private/v1-archive/docker-compose.kv-bench.yaml"
 
-# The 5 test configurations: label -> yaml config filename (relative to configs/,
+# The 5 test configurations: label -> yaml config filename (relative to configs/private/v1-archive/,
 # since the compose file's volume mount is resolved from its own directory)
 declare -a PHASES=(baseline fa-only kv-q8 kv-q4 fa-kv-q8)
 declare -A CONFIGS=(
@@ -225,8 +225,8 @@ log "Phases: ${PHASES[*]}"
 # Pre-flight: stop any overlapping containers
 teardown
 # Also stop legacy soak containers if they exist
-(cd "${REPO_DIR}" && docker compose -f configs/docker-compose.soak-prod.yaml down >/dev/null 2>&1 || true)
-(cd "${REPO_DIR}" && docker compose -f configs/docker-compose.soak-fork.yaml down >/dev/null 2>&1 || true)
+(cd "${REPO_DIR}" && docker compose -f configs/private/v1-archive/docker-compose.soak-prod.yaml down >/dev/null 2>&1 || true)
+(cd "${REPO_DIR}" && docker compose -f configs/private/v1-archive/docker-compose.soak-fork.yaml down >/dev/null 2>&1 || true)
 
 for phase in "${PHASES[@]}"; do
   run_phase "${phase}" "${CONFIGS[$phase]}"

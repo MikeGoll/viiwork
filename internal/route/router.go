@@ -136,11 +136,18 @@ func (r *Router) Pick(req Request) (*Lease, error) {
 // pickLocked is Pick with the router mutex held; the queue's dispatch shares
 // it, so nothing locks twice.
 func (r *Router) pickLocked(req Request) (*Lease, error) {
-	backends, admitting, localOK := r.c.Local.Backends(req.Model)
 	var reports []capacity.Report
 	if !req.Forwarded {
 		reports = r.c.Remote.Reports()
 	}
+	return r.pickWithReportsLocked(req, reports)
+}
+
+// pickWithReportsLocked is pickLocked against reports already fetched (nil
+// for a forwarded request), so the queue's dispatch fetches them once per
+// call rather than once per waiter.
+func (r *Router) pickWithReportsLocked(req Request, reports []capacity.Report) (*Lease, error) {
+	backends, admitting, localOK := r.c.Local.Backends(req.Model)
 
 	// Existence: a model nobody configures or reports is a 404, kept distinct
 	// from "that model, not on that host" (v1.8's rule).

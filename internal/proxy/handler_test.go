@@ -156,6 +156,7 @@ type handlerFx struct {
 	log      *activity.Log
 	router   *route.Router
 	h        *Handler
+	aborted  bool // the last do's handler aborted the response (http.ErrAbortHandler)
 }
 
 func newHandlerFx(t *testing.T) *handlerFx {
@@ -194,7 +195,20 @@ func (f *handlerFx) do(method, target, body string, edit ...func(*http.Request))
 		e(req)
 	}
 	rec := httptest.NewRecorder()
-	f.h.ServeHTTP(rec, req)
+	f.aborted = false
+	func() {
+		// net/http answers http.ErrAbortHandler by dropping the connection; a
+		// recorder has none, so the test records that the handler asked to.
+		defer func() {
+			if rv := recover(); rv != nil {
+				if rv != http.ErrAbortHandler {
+					panic(rv)
+				}
+				f.aborted = true
+			}
+		}()
+		f.h.ServeHTTP(rec, req)
+	}()
 	return rec
 }
 
@@ -491,6 +505,13 @@ func TestHandlerRetry(t *testing.T) {
 		f.reports.add("Q", q.addr(), time.Now(), peerModel("m", 1, 0))
 		f.build()
 		rec := f.do(http.MethodPost, "/v1/chat/completions", chatReq)
+		// The cut is passed on as an aborted connection, never a clean end.
+		if !f.aborted {
+			t.Error("a response the peer cut short ended cleanly")
+		}
+		if evs := f.requestEvents(); len(evs) != 2 || !strings.Contains(evs[1].Message, "aborted") {
+			t.Errorf("request events = %+v, want started then aborted", evs)
+		}
 		if rec.Code != 200 || !strings.Contains(rec.Body.String(), "chunk1") || q.hits.Load() != 0 {
 			t.Errorf("code=%d body=%q Q=%d", rec.Code, rec.Body.String(), q.hits.Load())
 		}
@@ -574,9 +595,17 @@ func TestHandlerRefusedPeerQueues(t *testing.T) {
 	}
 }
 
+// hangUpEngine accepts the request and closes the connection without a
+// response: a failure of the request, not a capacity refusal.
+func hangUpEngine(w http.ResponseWriter, _ *http.Request) {
+	if conn, _, err := w.(http.Hijacker).Hijack(); err == nil {
+		conn.Close()
+	}
+}
+
 func TestHandlerRetryExhausted(t *testing.T) {
 	f := newHandlerFx(t)
-	f.local.add("m", closedAddr(t))
+	f.local.add("m", newRecEngine(t, hangUpEngine).addr())
 	f.forwardRetry = 0
 	f.build()
 	rec := f.do(http.MethodPost, "/v1/chat/completions", chatReq)
@@ -595,6 +624,37 @@ func TestHandlerRetryExhausted(t *testing.T) {
 	rec = g.do(http.MethodPost, "/v1/chat/completions", chatReq, fromMember("gb1"))
 	if e := errorOf(t, rec); rec.Code != 503 || e.Message != "backend failed before responding" || e.Type != meshapi.ErrTypeUnavailable {
 		t.Errorf("forward: code=%d body=%q", rec.Code, rec.Body.String())
+	}
+}
+
+// When the only backend refuses — busy, not running, or not listening — the
+// final acquisition picks it again and it refuses again. That is a mesh at
+// capacity, not a broken one: 503 with Retry-After, never a 502.
+func TestHandlerEveryRouteRefused(t *testing.T) {
+	cases := map[string]func(t *testing.T) string{
+		"503": func(t *testing.T) string {
+			return newRecEngine(t, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(503) }).addr()
+		},
+		"429": func(t *testing.T) string {
+			return newRecEngine(t, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(429) }).addr()
+		},
+		"no process":    func(*testing.T) string { return "" },
+		"not listening": closedAddr,
+	}
+	for name, addr := range cases {
+		t.Run(name, func(t *testing.T) {
+			f := newHandlerFx(t)
+			bs := f.local.add("m", addr(t))
+			f.forwardRetry = 0
+			f.build()
+			rec := f.do(http.MethodPost, "/v1/chat/completions", chatReq)
+			if e := errorOf(t, rec); rec.Code != 503 || e.Type != meshapi.ErrTypeUnavailable || rec.Header().Get("Retry-After") == "" {
+				t.Errorf("code=%d retry-after=%q body=%q", rec.Code, rec.Header().Get("Retry-After"), rec.Body.String())
+			}
+			if n := bs[0].InFlight(); n != 0 {
+				t.Errorf("in flight after the request = %d, want 0", n)
+			}
+		})
 	}
 }
 

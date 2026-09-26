@@ -192,3 +192,21 @@ func TestForwardAuthRejectionLogRateLimited(t *testing.T) {
 		t.Errorf("log lines = %q, want one", lines)
 	}
 }
+
+// The rate limiter is keyed by a header any client sets, so a flood of made-up
+// origins must not grow it without bound.
+func TestForwardAuthRejectionLogBounded(t *testing.T) {
+	gb2 := mustAuth(t, "gb2", k1, nil, fakeMembers{})
+	gb2.logf = func(string, ...any) {}
+	for i := 0; i < 10*maxRejectLogKeys; i++ {
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader("{}"))
+		req.Header.Set(meshapi.HeaderForwarded, fmt.Sprintf("made-up-%d", i))
+		gb2.Verify(req, []byte("{}"))
+	}
+	gb2.mu.Lock()
+	n := len(gb2.lastLog)
+	gb2.mu.Unlock()
+	if n > maxRejectLogKeys {
+		t.Errorf("lastLog holds %d entries, want at most %d", n, maxRejectLogKeys)
+	}
+}

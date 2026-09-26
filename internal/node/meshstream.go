@@ -12,8 +12,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/janit/viiwork/v2/internal/activity"
 	"github.com/janit/viiwork/v2/internal/logging"
 	"github.com/janit/viiwork/v2/mesh"
+	"github.com/janit/viiwork/v2/mesh/meshclient"
 	"github.com/janit/viiwork/v2/meshapi"
 )
 
@@ -23,17 +25,41 @@ import (
 // nothing at all, because identical snapshots are suppressed.
 const clusterPushInterval = time.Second
 
-// frameBuffer absorbs a burst of producer events while the writer is busy. It
-// is backpressure, not a queue to be drained on shutdown: a producer that
-// cannot enqueue blocks until it can, or until ctx ends.
-const frameBuffer = 64
+// viewerBuffer is how many frames the hub may queue for one viewer whose
+// handler is still writing earlier ones. A viewer that falls this far behind
+// is dropped rather than waited for: the hub serves every viewer, and one
+// stalled browser must not hold up the rest. The dropped browser reconnects
+// and rebuilds from the replay, which is exactly what it would do after any
+// other disconnect.
+const viewerBuffer = 256
+
+// mirrorCap bounds the events the hub keeps per member to replay to a viewer
+// that connects later. Older events past the replay window are pruned first.
+const mirrorCap = 1024
+
+// Follower reconnect backoff. A member that is down is retried with a delay
+// that doubles up to followerMaxBackoff; a stream that was accepted and lived
+// at least followerStableAfter counts as healthy, so its next reconnect starts
+// from followerMinBackoff again instead of from wherever an outage long ago
+// left the delay.
+const (
+	followerMinBackoff  = time.Second
+	followerMaxBackoff  = 30 * time.Second
+	followerStableAfter = 10 * time.Second
+)
+
+// followerClient carries the long-lived member activity streams. It has no
+// overall timeout, which would cut every stream off; the dial and the wait for
+// headers are bounded, and ctx cancellation ends a stream. The member's
+// /v1/activity/stream answers headers as soon as its backlog is written.
+var followerClient = meshclient.New(meshclient.Options{DialTimeout: 2 * time.Second, ResponseHeaderTimeout: 10 * time.Second})
 
 // sseAliases is the third named event on the mesh stream (P6 Decision 2),
 // carrying a meshapi.AliasesResponse. The frozen meshapi names only the first
 // two, so the name lives here.
 const sseAliases = "aliases"
 
-// sseFrame is one encoded event on its way to the single writer.
+// sseFrame is one encoded event on its way to a viewer's single writer.
 type sseFrame struct {
 	event string
 	data  []byte
@@ -60,6 +86,12 @@ type sseFrame struct {
 // directly, and EventSource is subject to CORS, which the per-node activity
 // endpoint does not set. Fanning out here keeps the mesh view working from any
 // single reachable node.
+//
+// The fan-out itself is shared: every viewer of this node subscribes to one
+// meshHub, which holds one follower per member and one snapshot loop. Were it
+// per viewer, each open dashboard would hold a stream to every member, and a
+// member caps its activity subscribers — past a dozen viewers fleet-wide the
+// followers would evict one another and replay their backlogs in a loop.
 func (s *server) handleMeshStream(w http.ResponseWriter, r *http.Request) {
 	if s.d.Activity == nil {
 		http.Error(w, "activity log unavailable", http.StatusServiceUnavailable)
@@ -77,9 +109,8 @@ func (s *server) handleMeshStream(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
 
-	// Cancelling on the way out is what stops the producers below. They are
-	// deliberately not waited for -- see the note on frames. The stream also
-	// ends when the node shuts down (P6 Decision 7).
+	// The stream ends when the client leaves or the node shuts down (P6
+	// Decision 7).
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 	stopOnShutdown := context.AfterFunc(s.d.StreamCtx, cancel)
@@ -87,143 +118,368 @@ func (s *server) handleMeshStream(w http.ResponseWriter, r *http.Request) {
 
 	// Every byte of this response is written by this goroutine and no other.
 	//
-	// The handler runs N+1 producers: one follower per member, plus the
-	// snapshot loop. They used to write to w directly under a mutex, which made
-	// those writes mutually exclusive but said nothing about when they *stop*.
-	// The handler can return while a producer is still inside Fprintf, and
-	// writing to an http.ResponseWriter after ServeHTTP returns is a data race
-	// and a violation of net/http's contract. It reproduced under -race.
+	// The hub's producers -- the member followers, the local subscription and
+	// the snapshot loop -- used to write to w directly under a mutex, which
+	// made those writes mutually exclusive but said nothing about when they
+	// *stop*. The handler can return while a producer is still inside Fprintf,
+	// and writing to an http.ResponseWriter after ServeHTTP returns is a data
+	// race and a violation of net/http's contract. It reproduced under -race.
 	//
 	// Waiting for the producers instead would deadlock. An SSE response must not
 	// carry a WriteTimeout, so a connected-but-stalled client can block a write
-	// indefinitely -- and the handler would then be waiting on a producer that
-	// cannot finish. That case is real rather than theoretical: the activity log
-	// closes the oldest subscriber's channel when maxSubscribers is reached,
-	// which returns this handler with the client still perfectly healthy.
-	//
-	// Funnelling through a channel removes the question instead of answering it.
-	// A producer that has lost its reader is freed by ctx, and it never held a
-	// reference to w to begin with.
-	frames := make(chan sseFrame, frameBuffer)
+	// indefinitely. So producers hand already-encoded frames to this handler over
+	// a bounded channel and never hold a reference to w; the hub never blocks on
+	// a viewer either, and drops one whose channel is full.
+	v, initial := s.joinHub()
+	defer s.leaveHub(v)
 
-	write := func(event string, data []byte) bool {
-		if _, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, data); err != nil {
+	write := func(f sseFrame) bool {
+		if _, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", f.event, f.data); err != nil {
 			return false
 		}
 		flusher.Flush()
 		return true
 	}
 
-	// enqueue is the producers' half of that split. It never touches w.
-	enqueue := func(event string, payload any) bool {
-		b, err := json.Marshal(payload)
-		if err != nil {
-			return true
-		}
-		select {
-		case frames <- sseFrame{event: event, data: b}:
-			return true
-		case <-ctx.Done():
-			return false
-		}
-	}
-
-	localID, localHost := "", s.d.Self
-	if s.d.Status != nil {
-		localID = s.d.Status().NodeID
-	}
-
-	// Local events. Subscribe before replaying the backlog so nothing falls
-	// between the two; the overlap that creates is deduplicated downstream.
-	sub := s.d.Activity.Subscribe()
-	defer s.d.Activity.Unsubscribe(sub)
-
-	// Replaying on open is what makes a dropped connection recoverable. The
-	// mesh view reconstructs in-flight requests from start/done pairs, so an
-	// event lost while a browser is away strands a row that never leaves —
-	// which is what a slept laptop or a throttled background tab produces.
-	// Member backlogs arrive on their own: each member's /v1/activity/stream
-	// replays too, and this handler opens fresh member connections per client.
-	for _, ev := range s.d.Activity.Backlog() {
-		b, err := json.Marshal(meshapi.MeshEvent{Event: ev, NodeID: localID, Hostname: localHost})
-		if err != nil {
-			continue
-		}
-		if !write(meshapi.SSEActivity, b) {
+	// The replay and the current snapshots, captured atomically with the
+	// subscription: anything later is in v.frames.
+	for _, f := range initial {
+		if !write(f) {
 			return
 		}
 	}
-
-	// Snapshots and member followers. Snapshots are pushed on change rather
-	// than on a timer the client drives, so the browser never polls. The diff
-	// matters: in-flight counts and GPU load change constantly, but re-sending
-	// an identical snapshot every tick would be the same waste as polling, just
-	// moved server-side. The same tick picks up members that joined and stops
-	// following members that are gone (P6 Decision 8).
-	go func() {
-		followers := newMemberFollowers(ctx, enqueue)
-		var lastCluster, lastAliases []byte
-		deadband := newHostMemDeadband()
-		ticker := time.NewTicker(clusterPushInterval)
-		defer ticker.Stop()
-		for {
-			state := s.d.Cluster()
-			followers.update(s.members(), nodeIDs(state))
-			deadband.apply(&state)
-			if b, err := json.Marshal(state); err == nil && !bytes.Equal(b, lastCluster) {
-				lastCluster = b
-				if !enqueue(meshapi.SSECluster, state) {
-					return
-				}
-			}
-			if s.d.AliasInfo != nil {
-				aliases := s.d.AliasInfo()
-				if b, err := json.Marshal(aliases); err == nil && !bytes.Equal(b, lastAliases) {
-					lastAliases = b
-					if !enqueue(sseAliases, aliases) {
-						return
-					}
-				}
-			}
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-			}
-		}
-	}()
-
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case f := <-frames:
-			if !write(f.event, f.data) {
-				return
-			}
-		case raw, ok := <-sub:
-			if !ok {
-				// The log evicted this subscriber to make room for a newer one.
-				// The connection is still healthy; there is simply nothing more
-				// to send on it.
-				return
-			}
-			// Subscribe delivers already-encoded JSON, so it has to be decoded
-			// to re-tag it with the node. Activity events are low-rate (backend
-			// state changes and request start/finish), so this is not a hot path.
-			var ev meshapi.Event
-			if err := json.Unmarshal(raw, &ev); err != nil {
-				continue
-			}
-			b, err := json.Marshal(meshapi.MeshEvent{Event: ev, NodeID: localID, Hostname: localHost})
-			if err != nil {
-				continue
-			}
-			if !write(meshapi.SSEActivity, b) {
+		case <-v.dropped:
+			// The hub dropped this viewer for falling viewerBuffer frames
+			// behind. The connection may be healthy, but its view now has a
+			// gap; ending it makes the browser reconnect and rebuild from the
+			// replay, which repairs the gap.
+			return
+		case f := <-v.frames:
+			if !write(f) {
 				return
 			}
 		}
 	}
+}
+
+// hubs holds the running meshHub of each server. A hub is started by the first
+// viewer and stopped when the last one leaves, so an unwatched node follows
+// nobody.
+var hubs = struct {
+	mu sync.Mutex
+	m  map[*server]*meshHub
+}{m: map[*server]*meshHub{}}
+
+// viewer is one mesh stream's subscription to the hub.
+type viewer struct {
+	hub     *meshHub
+	frames  chan sseFrame
+	dropped chan struct{} // closed when the hub drops this viewer
+}
+
+func (s *server) joinHub() (*viewer, []sseFrame) {
+	hubs.mu.Lock()
+	defer hubs.mu.Unlock()
+	h := hubs.m[s]
+	if h == nil || h.ctx.Err() != nil {
+		h = startMeshHub(s)
+		hubs.m[s] = h
+	}
+	v := &viewer{hub: h, frames: make(chan sseFrame, viewerBuffer), dropped: make(chan struct{})}
+	return v, h.add(v)
+}
+
+func (s *server) leaveHub(v *viewer) {
+	hubs.mu.Lock()
+	defer hubs.mu.Unlock()
+	if v.hub.remove(v) == 0 {
+		v.hub.cancel()
+		if hubs.m[s] == v.hub {
+			delete(hubs.m, s)
+		}
+	}
+}
+
+// meshHub is the node's one fan-out behind /v1/mesh/stream: one subscription to
+// the local activity log, one follower per alive member, and one snapshot loop
+// that diffs the cluster and alias snapshots. Each produces encoded frames
+// once, which the hub hands to every viewer's channel without blocking.
+//
+// Its context derives from the server's StreamCtx, so the node's shutdown ends
+// the hub along with every stream, in the documented order.
+type meshHub struct {
+	s                  *server
+	ctx                context.Context
+	cancel             context.CancelFunc
+	localID, localHost string
+
+	mu      sync.Mutex
+	viewers map[*viewer]struct{}
+	cluster []byte // last pushed snapshot; nil until the first
+	aliases []byte
+	mirrors map[string]*memberMirror // member name -> its recent events
+}
+
+func startMeshHub(s *server) *meshHub {
+	ctx, cancel := context.WithCancel(s.d.StreamCtx)
+	h := &meshHub{
+		s: s, ctx: ctx, cancel: cancel, localHost: s.d.Self,
+		viewers: map[*viewer]struct{}{}, mirrors: map[string]*memberMirror{},
+	}
+	if s.d.Status != nil {
+		h.localID = s.d.Status().NodeID
+	}
+	// Subscribed before any viewer reads the backlog, so nothing falls between
+	// a viewer's replay and its live feed; the overlap this creates instead is
+	// deduplicated downstream.
+	sub := s.d.Activity.Subscribe()
+	go h.localLoop(sub)
+	go h.snapshotLoop()
+	return h
+}
+
+// add registers v and returns what a fresh viewer needs first: the local
+// replay, each member's replay, then the current snapshots. It runs under the
+// lock every broadcast takes, so each frame is either in this list or queued
+// on v.frames -- never neither.
+func (h *meshHub) add(v *viewer) []sseFrame {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.viewers[v] = struct{}{}
+	initial := h.localBacklog()
+	now := time.Now()
+	for _, m := range h.mirrors {
+		for _, ev := range replayable(m.events, now) {
+			e := ev.ev
+			e.Replay = true
+			if b, err := json.Marshal(e); err == nil {
+				initial = append(initial, sseFrame{meshapi.SSEActivity, b})
+			}
+		}
+	}
+	if h.cluster != nil {
+		initial = append(initial, sseFrame{meshapi.SSECluster, h.cluster})
+	}
+	if h.aliases != nil {
+		initial = append(initial, sseFrame{sseAliases, h.aliases})
+	}
+	return initial
+}
+
+// remove unregisters v and returns how many viewers remain.
+func (h *meshHub) remove(v *viewer) int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	delete(h.viewers, v)
+	return len(h.viewers)
+}
+
+// broadcast hands f to every viewer without blocking. Callers hold h.mu.
+func (h *meshHub) broadcast(f sseFrame) {
+	for v := range h.viewers {
+		select {
+		case v.frames <- f:
+		default:
+			delete(h.viewers, v)
+			close(v.dropped)
+		}
+	}
+}
+
+func (h *meshHub) localEvent(ev meshapi.Event) []byte {
+	b, err := json.Marshal(meshapi.MeshEvent{Event: ev, NodeID: h.localID, Hostname: h.localHost})
+	if err != nil {
+		return nil
+	}
+	return b
+}
+
+// localBacklog is the local log's replay as frames. Callers hold h.mu.
+func (h *meshHub) localBacklog() []sseFrame {
+	var out []sseFrame
+	for _, ev := range h.s.d.Activity.Backlog() {
+		if b := h.localEvent(ev); b != nil {
+			out = append(out, sseFrame{meshapi.SSEActivity, b})
+		}
+	}
+	return out
+}
+
+// localLoop re-tags this node's activity with its name and fans it out.
+func (h *meshHub) localLoop(sub chan []byte) {
+	alog := h.s.d.Activity
+	defer func() { alog.Unsubscribe(sub) }()
+	for {
+		select {
+		case <-h.ctx.Done():
+			return
+		case raw, ok := <-sub:
+			if !ok {
+				// The log evicted this subscriber to make room for another.
+				// Resubscribe, then replay: an event emitted in between would
+				// otherwise be lost to every viewer, and a lost "done" strands
+				// an in-flight row. The replay covers the gap, and viewers
+				// deduplicate the overlap.
+				sub = alog.Subscribe()
+				h.mu.Lock()
+				for _, f := range h.localBacklog() {
+					h.broadcast(f)
+				}
+				h.mu.Unlock()
+				continue
+			}
+			// Subscribe delivers already-encoded JSON, so it has to be decoded
+			// to re-tag it with the node -- once for every viewer. Activity
+			// events are low-rate, so this is not a hot path.
+			var ev meshapi.Event
+			if err := json.Unmarshal(raw, &ev); err != nil {
+				continue
+			}
+			if b := h.localEvent(ev); b != nil {
+				h.mu.Lock()
+				h.broadcast(sseFrame{meshapi.SSEActivity, b})
+				h.mu.Unlock()
+			}
+		}
+	}
+}
+
+// snapshotLoop pushes the cluster and alias snapshots when they change, and
+// keeps the member followers in step with the member list. Snapshots are
+// pushed on change rather than on a timer the client drives, so the browser
+// never polls. The diff matters: in-flight counts and GPU load change
+// constantly, but re-sending an identical snapshot every tick would be the
+// same waste as polling, just moved server-side. The same tick picks up
+// members that joined and stops following members that are gone (P6
+// Decision 8).
+func (h *meshHub) snapshotLoop() {
+	followers := newMemberFollowers(h.ctx, h)
+	deadband := newHostMemDeadband()
+	ticker := time.NewTicker(clusterPushInterval)
+	defer ticker.Stop()
+	for {
+		state := h.s.d.Cluster()
+		followers.update(h.s.members(), nodeIDs(state))
+		deadband.apply(&state)
+		if b, err := json.Marshal(state); err == nil {
+			h.publish(meshapi.SSECluster, b)
+		}
+		if h.s.d.AliasInfo != nil {
+			if b, err := json.Marshal(h.s.d.AliasInfo()); err == nil {
+				h.publish(sseAliases, b)
+			}
+		}
+		select {
+		case <-h.ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+// publish broadcasts a snapshot if its bytes differ from the last one pushed.
+// The bytes compared are the bytes sent.
+func (h *meshHub) publish(event string, b []byte) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	last := &h.cluster
+	if event == sseAliases {
+		last = &h.aliases
+	}
+	if bytes.Equal(*last, b) {
+		return
+	}
+	*last = b
+	h.broadcast(sseFrame{event, b})
+}
+
+// memberConnected starts a fresh mirror for a member whose stream was just
+// accepted: the member replays its backlog first, so the mirror is rebuilt from
+// that replay rather than carried across a gap it did not see.
+func (h *meshHub) memberConnected(name string, owner uint64) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.mirrors[name] = &memberMirror{owner: owner}
+}
+
+// memberDisconnected drops a member's mirror. While nobody follows the member,
+// a new viewer gets no replay of it -- under-reporting, never a start whose
+// done fell in the gap.
+func (h *meshHub) memberDisconnected(name string, owner uint64) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if m, ok := h.mirrors[name]; ok && m.owner == owner {
+		delete(h.mirrors, name)
+	}
+}
+
+// memberEvent records and fans out one event from a member's stream.
+func (h *meshHub) memberEvent(name string, owner uint64, ev meshapi.MeshEvent) {
+	b, err := json.Marshal(ev)
+	if err != nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if m, ok := h.mirrors[name]; ok && m.owner == owner {
+		m.add(time.Now(), ev)
+	}
+	h.broadcast(sseFrame{meshapi.SSEActivity, b})
+}
+
+// memberMirror is the recent part of one member's activity, as this hub
+// received it, so a viewer connecting later gets the replay the member itself
+// would have sent a fresh connection.
+type memberMirror struct {
+	owner  uint64 // the follower that fills it
+	events []mirroredEvent
+}
+
+type mirroredEvent struct {
+	at time.Time // when this node received it
+	ev meshapi.MeshEvent
+}
+
+func (m *memberMirror) add(now time.Time, ev meshapi.MeshEvent) {
+	m.events = append(m.events, mirroredEvent{at: now, ev: ev})
+	if len(m.events) <= mirrorCap {
+		return
+	}
+	m.events = replayable(m.events, now)
+	if n := len(m.events) - mirrorCap; n > 0 {
+		// Dropping oldest first loses a start before its done: a viewer then
+		// under-reports a request, never invents one.
+		m.events = append([]mirroredEvent(nil), m.events[n:]...)
+	}
+}
+
+// replayable applies activity.Log's replay rule to a mirror: every event from
+// the last ReplayWindow, and from before it, the events of requests with no
+// terminal event yet. Age is measured by this node's clock at receipt, which
+// only ever keeps an event longer than the member would, never shorter.
+func replayable(events []mirroredEvent, now time.Time) []mirroredEvent {
+	cutoff := now.Add(-activity.ReplayWindow)
+	var ended map[int64]bool
+	for _, e := range events {
+		if e.ev.RequestID != 0 && meshapi.IsRequestTerminal(e.ev.Message) {
+			if ended == nil {
+				ended = make(map[int64]bool)
+			}
+			ended[e.ev.RequestID] = true
+		}
+	}
+	out := make([]mirroredEvent, 0, len(events))
+	for _, e := range events {
+		if e.at.Before(cutoff) && (e.ev.RequestID == 0 || ended[e.ev.RequestID]) {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
 }
 
 func (s *server) members() []mesh.Member {
@@ -246,12 +502,13 @@ func nodeIDs(c meshapi.ClusterResponse) map[string]string {
 
 // memberFollowers runs one activity follower per alive node member.
 type memberFollowers struct {
-	ctx     context.Context
-	enqueue func(event string, payload any) bool
+	ctx context.Context
+	hub *meshHub
 
 	mu      sync.Mutex
 	ids     map[string]string // member name -> node_id, refreshed each tick
 	running map[string]followerHandle
+	nextID  uint64
 }
 
 type followerHandle struct {
@@ -259,8 +516,8 @@ type followerHandle struct {
 	cancel context.CancelFunc
 }
 
-func newMemberFollowers(ctx context.Context, enqueue func(string, any) bool) *memberFollowers {
-	return &memberFollowers{ctx: ctx, enqueue: enqueue, ids: map[string]string{}, running: map[string]followerHandle{}}
+func newMemberFollowers(ctx context.Context, hub *meshHub) *memberFollowers {
+	return &memberFollowers{ctx: ctx, hub: hub, ids: map[string]string{}, running: map[string]followerHandle{}}
 }
 
 // update starts followers for alive, non-local node members, and stops those
@@ -287,7 +544,8 @@ func (f *memberFollowers) update(members []mesh.Member, ids map[string]string) {
 		}
 		ctx, cancel := context.WithCancel(f.ctx)
 		f.running[name] = followerHandle{addr: addr, cancel: cancel}
-		go f.follow(ctx, name, addr)
+		f.nextID++
+		go f.follow(ctx, f.nextID, name, addr)
 	}
 }
 
@@ -297,50 +555,62 @@ func (f *memberFollowers) nodeID(name string) string {
 	return f.ids[name]
 }
 
+// reconnectBackoff is the delay before a follower's next connection attempt.
+type reconnectBackoff struct{ next time.Duration }
+
+// after returns how long to wait given how the last stream went: accepted
+// (HTTP 200) or not, and how long it lived. A healthy stream resets the delay.
+func (b *reconnectBackoff) after(accepted bool, lived time.Duration) time.Duration {
+	if b.next == 0 || (accepted && lived >= followerStableAfter) {
+		b.next = followerMinBackoff
+	}
+	d := b.next
+	b.next = min(2*b.next, followerMaxBackoff)
+	return d
+}
+
 // follow streams one member's activity until ctx ends, reconnecting with
 // backoff, so a member that is down or restarting does not take the mesh view
 // down with it.
-func (f *memberFollowers) follow(ctx context.Context, name, addr string) {
-	backoff := time.Second
-	const maxBackoff = 30 * time.Second
+func (f *memberFollowers) follow(ctx context.Context, id uint64, name, addr string) {
+	var backoff reconnectBackoff
 	for {
 		if ctx.Err() != nil {
 			return
 		}
-		if alive := f.streamOnce(ctx, name, addr); !alive {
-			return // the client went away; stop bothering the member
+		start := time.Now()
+		accepted := f.streamOnce(ctx, id, name, addr)
+		if ctx.Err() != nil {
+			return
 		}
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(backoff):
-		}
-		if backoff < maxBackoff {
-			backoff *= 2
+		case <-time.After(backoff.after(accepted, time.Since(start))):
 		}
 	}
 }
 
-// streamOnce connects once and pumps events. It returns false only when the
-// downstream client is gone, which is the signal to stop retrying entirely.
-func (f *memberFollowers) streamOnce(ctx context.Context, name, addr string) bool {
+// streamOnce connects once and pumps events until the stream ends. It reports
+// whether the member accepted the stream.
+func (f *memberFollowers) streamOnce(ctx context.Context, id uint64, name, addr string) bool {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+addr+meshapi.PathActivityStream, nil)
 	if err != nil {
-		return true
+		return false
 	}
-	// No client-side timeout: this is a long-lived stream. ctx cancellation is
-	// what ends it.
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := followerClient.Do(req)
 	if err != nil {
 		if logging.DebugEnabled() {
 			log.Printf("[debug] mesh activity: member %s (%s) unreachable: %v", name, addr, err)
 		}
-		return true
+		return false
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return true
+		return false
 	}
+	f.hub.memberConnected(name, id)
+	defer f.hub.memberDisconnected(name, id)
 
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 64*1024), 64*1024)
@@ -353,9 +623,7 @@ func (f *memberFollowers) streamOnce(ctx context.Context, name, addr string) boo
 		if err := json.Unmarshal([]byte(line[6:]), &ev); err != nil {
 			continue
 		}
-		if !f.enqueue(meshapi.SSEActivity, meshapi.MeshEvent{Event: ev, NodeID: f.nodeID(name), Hostname: name, Addr: addr}) {
-			return false
-		}
+		f.hub.memberEvent(name, id, meshapi.MeshEvent{Event: ev, NodeID: f.nodeID(name), Hostname: name, Addr: addr})
 	}
 	return true
 }
@@ -380,7 +648,7 @@ const hostMemBuckets = 64
 // That is a deadband, and it is what makes the suppression hold for a host
 // whose memory hovers rather than moves.
 //
-// State is per stream, keyed by member name, and /v1/cluster keeps the exact
+// State is per hub, keyed by member name, and /v1/cluster keeps the exact
 // figures for anything that needs them.
 type hostMemDeadband struct{ published map[string]int64 }
 

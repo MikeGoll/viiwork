@@ -61,6 +61,16 @@ type AliasesResponse struct {
 	Aliases []AliasInfo `json:"aliases"`
 }
 
+// AliasTimeLayout is the layout of AliasInfo.UpdatedAt: RFC 3339 in UTC with
+// milliseconds, so two writes in one second stay distinguishable.
+const AliasTimeLayout = "2006-01-02T15:04:05.000Z07:00"
+
+// FormatAliasTime renders an alias entry's TS (Unix milliseconds) in
+// AliasTimeLayout, as AliasInfo.UpdatedAt carries it.
+func FormatAliasTime(tsMillis int64) string {
+	return time.UnixMilli(tsMillis).UTC().Format(AliasTimeLayout)
+}
+
 // AliasInfo is one alias as a node currently resolves it. Resolved is null
 // when neither the target nor any fallback is served.
 type AliasInfo struct {

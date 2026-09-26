@@ -115,20 +115,23 @@ genuinely
 cannot do the job — for example an event stream you would rather not hold open
 through your own server — and accept that you are giving up the auth gate.
 
-Configure the allowlist under `server.cors` in `viiwork.yaml`:
+Configure the allowlist under `api.cors` in `viiwork.yaml`:
 
 ```yaml
-server:
+api:
   cors:
-    allow_origins: ["*.ts.net", "localhost", "127.0.0.1", "*.your-app.example"]
+    allow_origins: ["*.tail1234.ts.net", "localhost", "127.0.0.1", "*.your-app.example"]
     allow_tailnet_ips: true
 ```
 
 `*.example.com` matches subdomains only, never the bare apex; every other entry
-must match the host exactly. What ships by default covers Tailscale MagicDNS
-names, localhost, and literal tailnet IP ranges — **your application's own
-origin is deployment-specific and you must add it.** `allow_origins: []` sends
-no CORS header at all.
+must match the host exactly. Left out, the list is derived from tailscaled: this
+tailnet's own MagicDNS domain, localhost, and literal tailnet IP ranges. A list
+you write replaces that, so include your tailnet's domain in it — never
+`*.ts.net`, which is every Tailscale customer's — and **your application's own
+origin, which is deployment-specific and you must add.** `allow_origins: []`
+sends no CORS header at all. Writes (`POST` and friends) from an origin the list
+refuses are answered 403; see [security.md](security.md#cross-site-writes-csrf).
 
 Preflights are answered, and a refused origin gets `403` rather than a silent
 failure, so a misconfiguration is visible in devtools. Cross-origin responses
@@ -402,8 +405,16 @@ Response headers say what actually happened:
 
 Errors: `429` means every member is at capacity and the queue could not take it
 — respect `Retry-After`. `503` means nothing can serve the model, which is also
-what an alias whose target and fallbacks are all unavailable returns. `404`
-means the model is unknown to the mesh entirely.
+what an alias whose target and fallbacks are all unavailable returns; it is
+also the answer, with `Retry-After`, when every route a request tried refused
+it as busy or unreachable before responding. `502` means a route failed the
+request in some other way. `404` means the model is unknown to the mesh
+entirely.
+
+A response is never retried once its first byte has gone out. If the engine
+or peer serving it fails after that, the node drops the connection rather than
+ending the response normally, so a truncated stream shows up as a read error
+(no `[DONE]`, no final chunk) and never as a short but complete answer.
 
 A queue sits in front of this, so a brief burst above capacity waits rather
 than failing: `routing.queue_timeout` is 20 s by default. Treat `429` as real

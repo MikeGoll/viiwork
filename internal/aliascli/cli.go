@@ -240,7 +240,10 @@ func (c *cli) call(ctx context.Context, method, path string, in, out any) error 
 	if err != nil {
 		return err
 	}
-	if in != nil {
+	// Every write says JSON, bodiless ones (delete, revert) included: a node
+	// refuses a control write of any other type (415), because that is a
+	// request a browser could send cross-site without a preflight.
+	if in != nil || method != http.MethodGet {
 		req.Header.Set("Content-Type", "application/json")
 	}
 	if method != http.MethodGet && c.signer != nil {
@@ -516,7 +519,7 @@ func (c *cli) importTable(ctx context.Context, path string) int {
 
 // formatTS matches the nodes' updated_at: RFC 3339, UTC, milliseconds.
 func formatTS(ts int64) string {
-	return time.UnixMilli(ts).UTC().Format("2006-01-02T15:04:05.000Z07:00")
+	return meshapi.FormatAliasTime(ts)
 }
 
 func fallbackSuffix(fallbacks []string) string {

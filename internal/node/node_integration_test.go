@@ -117,6 +117,7 @@ func TestNodeMeshIntegration(t *testing.T) {
 
 	// NI4: an alias written on A resolves on B.
 	req, _ := http.NewRequest(http.MethodPut, a.url(meshapi.AliasPath("stable")), strings.NewReader(`{"target":"m"}`))
+	req.Header.Set("Content-Type", "application/json") // control writes are JSON or 415
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
