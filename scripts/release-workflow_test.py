@@ -41,4 +41,8 @@ for uses in re.findall(r"uses: (\S+)", text):
     check(bool(re.search(r"@[0-9a-f]{40}$", uses)), "pinned by SHA: " + uses)
 publish_run = "\n".join(s.get("run", "") for s in jobs.get("publish", {}).get("steps", []))
 check("SHA256SUMS.sig" in publish_run and "exit 1" in publish_run, "publish refuses a release that is already signed")
+# A beta must not become the repository's latest release, which is what
+# releases/latest and GitHub's release page offer to people.
+check('*-*) prerelease=--prerelease' in publish_run and "$prerelease" in publish_run,
+      "a tag with a pre-release suffix (vX.Y.Z-beta1) is created as a pre-release")
 sys.exit(1 if fail else 0)

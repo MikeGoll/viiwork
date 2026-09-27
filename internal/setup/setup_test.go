@@ -111,6 +111,8 @@ func newFake(t *testing.T) *fake {
 				return []byte("27.3.1\n"), nil
 			case "docker ps -a --filter name=^viiwork$ --format {{.Names}}":
 				return nil, nil
+			case "docker info --format {{json .DiscoveredDevices}}":
+				return []byte("null\n"), nil
 			case "docker info --format {{json .Runtimes}}":
 				return []byte(`{"nvidia":{"path":"nvidia-container-runtime"},"runc":{"path":"runc"}}`), nil
 			}
@@ -608,5 +610,28 @@ func TestPrereleaseIsARelease(t *testing.T) {
 		if pulled != image {
 			t.Errorf("%s: pulled %v, want %v (calls %q)", version, pulled, image, *f.calls)
 		}
+	}
+}
+
+// A host whose Docker reaches the cards through CDI, with no nvidia runtime
+// registered, is installed with a CDI compose file rather than refused.
+func TestCDIWithoutARegisteredRuntime(t *testing.T) {
+	f := newFake(t)
+	run := f.host.Run
+	f.host.Run = func(ctx context.Context, n string, a ...string) ([]byte, error) {
+		switch n + " " + strings.Join(a, " ") {
+		case "docker info --format {{json .Runtimes}}":
+			return []byte(`{"runc":{"path":"runc"}}`), nil
+		case "docker info --format {{json .DiscoveredDevices}}":
+			return []byte(`[{"Source":"cdi","ID":"nvidia.com/gpu=0"},{"Source":"cdi","ID":"nvidia.com/gpu=all"}]`), nil
+		}
+		return run(ctx, n, a...)
+	}
+	if err := f.run(newMesh...); err != nil {
+		t.Fatalf("%v\n%s", err, f.out)
+	}
+	compose := string(mustRead(t, f.path(install.ComposeFile)))
+	if !strings.Contains(compose, "nvidia.com/gpu=all") || strings.Contains(compose, "driver: nvidia") {
+		t.Errorf("compose:\n%s", compose)
 	}
 }

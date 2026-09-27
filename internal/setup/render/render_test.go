@@ -204,3 +204,28 @@ func TestPlist(t *testing.T) {
 		t.Error("an open mesh's plist names a secret")
 	}
 }
+
+// With the NVIDIA Container Toolkit's CDI spec, the cards are named devices
+// and no runtime needs registering with Docker (found on an Ubuntu 26.04 host
+// where `driver: nvidia` failed and `nvidia.com/gpu=all` worked).
+func TestComposeFileCDI(t *testing.T) {
+	c := compose()
+	c.CDI = true
+	data, err := ComposeFile(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Services map[string]struct {
+			Devices []string       `yaml:"devices"`
+			Deploy  map[string]any `yaml:"deploy"`
+		} `yaml:"services"`
+	}
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		t.Fatalf("%v\n%s", err, data)
+	}
+	s := doc.Services["viiwork"]
+	if len(s.Devices) != 1 || s.Devices[0] != "nvidia.com/gpu=all" || s.Deploy != nil {
+		t.Errorf("devices %q deploy %v\n%s", s.Devices, s.Deploy, data)
+	}
+}

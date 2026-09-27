@@ -68,10 +68,55 @@ in a workstation, or racks of MI50s in your mother-in-law's garage.
 
 ## Quick Start
 
-On a Linux machine with an NVIDIA GPU and Docker, download a release and run
-`sudo ./viiwork init`. It asks a few questions, shows every file it will write,
-then starts the node and checks it → [setup](docs/setup.md). To set a machine
-up by hand instead:
+Download a release, check it, and run the setup wizard:
+
+```bash
+v=vX.Y.Z                     # from https://github.com/janit/viiwork/releases
+os=linux_amd64               # or linux_arm64, darwin_arm64
+base=https://github.com/janit/viiwork/releases/download/$v
+curl -fLO "$base/viiwork_${v}_${os}.tar.gz" -fLO "$base/SHA256SUMS"
+sha256sum --check --ignore-missing SHA256SUMS   # macOS: shasum -a 256 --check --ignore-missing SHA256SUMS
+tar xzf "viiwork_${v}_${os}.tar.gz" && cd "viiwork_${v}_${os}"
+
+sudo ./viiwork init          # Linux; on a Mac: ./viiwork init (no sudo)
+```
+
+The wizard finds the GPUs and the GGUF models in a directory you name. It
+proposes a layout and asks whether to start a new mesh or join one. Then it
+shows every file it will write. On a yes, it writes them, starts the node (in
+Docker on Linux, under a LaunchAgent on a Mac) and checks it. Nothing is
+written before that yes. → [setup](docs/setup.md)
+
+**The next machine** joins with one code. On any node, print it:
+
+```bash
+sudo sh -c 'set -a; . /etc/viiwork/mesh.env; viiwork join-code'   # Linux
+viiwork join-code                                                  # Mac
+```
+
+Run `viiwork init` on the new machine and paste the code at the mesh
+question. The code *is* the mesh secret, so handle it like one.
+
+**Test it:**
+
+```bash
+curl http://localhost:8086/v1/models
+curl http://localhost:8086/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"<a model name from /v1/models>","messages":[{"role":"user","content":"Hello"}]}'
+```
+
+The API and every dashboard are on port 8086, and membership gossip is on 7946
+(tcp and udp), on every machine. `viiwork top` watches the whole mesh from a
+terminal. `viiwork uninstall` removes exactly what the wizard installed, and
+keeps your model files.
+
+### By hand
+
+The wizard starts a node on NVIDIA GPUs and on Apple Silicon. On a Radeon VII
+(gfx906) or another AMD card it writes the config and stops, because those need
+an image built from a checkout. Set up this way, or to lay a machine out
+yourself:
 
 ```bash
 # 1. Write the machine's config
@@ -86,17 +131,9 @@ echo "VIIWORK_MESH_SECRET=$(openssl rand -base64 32)" | sudo tee /etc/viiwork/me
 make docker
 cp configs/docker-compose.v2.example.yaml docker-compose.yaml
 docker compose up -d
-
-# 4. Test
-curl http://localhost:8086/v1/models
-curl http://localhost:8086/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model":"Qwen3.8-27B","messages":[{"role":"user","content":"Hello"}]}'
 ```
 
-Every machine runs the same image with its own `viiwork.yaml`. The API and every
-dashboard are on port 8086, and membership gossip is on 7946 (tcp and udp), on
-every machine.
+Every machine runs the same image with its own `viiwork.yaml`.
 
 ## Configuration
 

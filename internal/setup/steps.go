@@ -106,10 +106,18 @@ func hardware(ctx context.Context, h Host, p prompt.Prompter, s *state) error {
 			s.why = "this is a development build (" + h.Version + "), and only releases have published images"
 			break
 		}
-		out, err := h.Run(ctx, "docker", "info", "--format", "{{json .Runtimes}}")
-		if err != nil || !strings.Contains(string(out), `"nvidia"`) {
+		// Docker reaches the cards through the toolkit's CDI spec (preferred:
+		// no runtime to register) or through its registered nvidia runtime.
+		devices, _ := h.Run(ctx, "docker", "info", "--format", "{{json .DiscoveredDevices}}")
+		runtimes, _ := h.Run(ctx, "docker", "info", "--format", "{{json .Runtimes}}")
+		switch {
+		case strings.Contains(string(devices), `"nvidia.com/gpu=all"`):
+			s.cdi = true
+		case strings.Contains(string(runtimes), `"nvidia"`):
+		default:
 			return errors.New("Docker cannot reach the NVIDIA cards: install the NVIDIA Container Toolkit " +
-				"(https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/), then run " +
+				"(https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/); with Docker 25 or newer its CDI spec " +
+				"is enough (`nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml`), otherwise run " +
 				"`nvidia-ctk runtime configure --runtime=docker` and restart Docker")
 		}
 		s.image = imageRepo + ":" + h.Version
@@ -534,7 +542,7 @@ func writeAndStart(ctx context.Context, h Host, p prompt.Prompter, s *state) err
 	m := install.Manifest{InstalledBy: h.Version, ModelDirs: []string{s.modelsDir}}
 	if s.image != "" {
 		compose, err := render.ComposeFile(render.Compose{Image: s.image, ModelsDir: s.modelsDir, ConfigFile: install.ConfigFile,
-			EnvFile: envFile, StateDir: install.StateDir, Tailscale: s.network == config.NetworkTailnet})
+			EnvFile: envFile, StateDir: install.StateDir, Tailscale: s.network == config.NetworkTailnet, CDI: s.cdi})
 		if err != nil {
 			return err
 		}

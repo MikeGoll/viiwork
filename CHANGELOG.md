@@ -1,5 +1,38 @@
 # Changelog
 
+## v2.6.0-beta2
+
+### Found on the first real host
+
+- **The wizard accepts NVIDIA cards reached through CDI.** On an Ubuntu
+  26.04 host with the NVIDIA Container Toolkit installed, Docker had no
+  `nvidia` runtime registered. So `driver: nvidia` failed, while CDI devices
+  (`nvidia.com/gpu=all`) worked. beta1 refused such a host.
+  - The wizard now checks the devices Docker has discovered, and writes a CDI
+    compose file when the cards are there.
+  - It falls back to the registered runtime otherwise.
+  - Its refusal message now names both fixes.
+- **A beta is a GitHub pre-release.** The release workflow creates a tag with
+  a pre-release suffix as a pre-release, so `releases/latest` stays on the
+  last full release.
+- **The README's Quick Start runs the setup wizard.** Setting a machine up by
+  hand is a subsection below it.
+
+### From an audit round
+
+- **Member clients never follow a redirect.** No member endpoint redirects,
+  and a member answering 3xx must not steer this node's request to another
+  address, so the 3xx comes back as the response.
+- **A client gone during a non-streaming write is recorded as aborted**, not
+  as a completed request.
+- **A failed restore of an earlier update stage is reported**, instead of
+  being silently dropped.
+- **Pipelines:**
+  - a step failure names its model;
+  - the source text is read from content given as parts too;
+  - a recursive step is refused as a start error, rather than by
+    `log.Fatalf`.
+
 ## v2.6.0-beta1
 
 ### Download it, run it, answer a few questions

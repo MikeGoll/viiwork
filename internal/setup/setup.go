@@ -73,6 +73,7 @@ type state struct {
 	gpus      []probe.GPU
 	vendor    string
 	image     string // empty: write the config only
+	cdi       bool   // Docker reaches the cards as CDI devices
 	why       string // why there is no image
 	modelsDir string
 	models    []weights

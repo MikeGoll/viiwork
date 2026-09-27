@@ -26,8 +26,42 @@ func testPipeline(aliases map[string]string, locales ...string) *pipeline.Pipeli
 	return p
 }
 
+func mustPipelineResolver(t *testing.T, pipelines []*pipeline.Pipeline) *PipelineResolver {
+	t.Helper()
+	pr, err := NewPipelineResolver(pipelines)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pr
+}
+
+// A step that names a pipeline's own virtual model would recurse; it is a
+// configuration error the node refuses to start on, not a process exit.
+func TestPipelineResolverRefusesARecursiveStep(t *testing.T) {
+	p := testPipeline(map[string]string{}, "fi")
+	p.Steps[1].Model = "tr-fi"
+	if _, err := NewPipelineResolver([]*pipeline.Pipeline{p}); err == nil || !strings.Contains(err.Error(), `references virtual model "tr-fi"`) {
+		t.Errorf("err = %v", err)
+	}
+}
+
+func TestPipelineSourceText(t *testing.T) {
+	for _, tc := range []struct{ name, body, want string }{
+		{"string", `{"messages":[{"role":"user","content":"Hello"}]}`, "Hello"},
+		{"last user message", `{"messages":[{"role":"user","content":"a"},{"role":"assistant","content":"b"},{"role":"user","content":"c"}]}`, "c"},
+		{"parts", `{"messages":[{"role":"user","content":[{"type":"text","text":"Hello"},{"type":"image_url","image_url":{"url":"x"}},{"type":"text","text":"world"}]}]}`, "Hello\nworld"},
+		{"image only", `{"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"x"}}]}]}`, ""},
+		{"no user", `{"messages":[{"role":"system","content":"x"}]}`, ""},
+		{"not json", `{`, ""},
+	} {
+		if got := pipelineSourceText([]byte(tc.body)); got != tc.want {
+			t.Errorf("%s: got %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
 func TestPipelineResolver(t *testing.T) {
-	pr := NewPipelineResolver([]*pipeline.Pipeline{testPipeline(map[string]string{"br": "pt-BR"}, "fi", "pt-BR")})
+	pr := mustPipelineResolver(t, []*pipeline.Pipeline{testPipeline(map[string]string{"br": "pt-BR"}, "fi", "pt-BR")})
 	if p, _, key, ok := pr.Resolve("tr-br"); !ok || p.Name != "tr" || key != "pt-BR" {
 		t.Errorf("Resolve(tr-br) = %v, %q, %v", p, key, ok)
 	}
@@ -73,7 +107,7 @@ func TestHandlerPipeline(t *testing.T) {
 	newFx := func(t *testing.T, status int) *handlerFx {
 		f := newHandlerFx(t)
 		steps := newRecEngine(t, pipelineSteps(status))
-		f.pipelines = NewPipelineResolver([]*pipeline.Pipeline{testPipeline(map[string]string{}, "fi")})
+		f.pipelines = mustPipelineResolver(t, []*pipeline.Pipeline{testPipeline(map[string]string{}, "fi")})
 		f.exec = pipeline.NewExecutor("http://"+steps.addr(), nil)
 		return f.build()
 	}
@@ -122,7 +156,7 @@ func TestHandlerPipeline(t *testing.T) {
 	t.Run("step unavailable", func(t *testing.T) {
 		f := newFx(t, http.StatusServiceUnavailable)
 		rec := f.do(http.MethodPost, "/v1/chat/completions", `{"model":"tr-fi","messages":[{"role":"user","content":"x"}]}`)
-		if rec.Code != 503 || rec.Header().Get("Retry-After") != "5" || !strings.Contains(errorOf(t, rec).Message, "pipeline step 'translate' failed") {
+		if rec.Code != 503 || rec.Header().Get("Retry-After") != "5" || errorOf(t, rec).Message != "pipeline step 'translate' failed: model 'm' unavailable" {
 			t.Errorf("code=%d body=%q", rec.Code, rec.Body.String())
 		}
 	})

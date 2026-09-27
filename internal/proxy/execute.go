@@ -258,8 +258,8 @@ func serveLocal(w http.ResponseWriter, r *http.Request, body []byte, b route.Loc
 	if thinkDisabled && !sse {
 		w.Header().Set("Content-Length", strconv.Itoa(len(rewritten)))
 		w.WriteHeader(resp.StatusCode)
-		_, _ = w.Write(rewritten)
-		return res
+		_, err := w.Write(rewritten)
+		return endStream(res, r, err != nil, nil, "backend "+b.ID())
 	}
 	w.WriteHeader(resp.StatusCode)
 	var clientGone bool

@@ -25,7 +25,7 @@ type PipelineResolver struct {
 
 // NewPipelineResolver creates a resolver and validates that no pipeline step
 // references a virtual model name (which would cause infinite recursion).
-func NewPipelineResolver(pipelines []*pipeline.Pipeline) *PipelineResolver {
+func NewPipelineResolver(pipelines []*pipeline.Pipeline) (*PipelineResolver, error) {
 	pr := &PipelineResolver{pipelines: pipelines}
 	// Build set of all virtual model names for cycle detection
 	virtualNames := make(map[string]bool)
@@ -38,11 +38,11 @@ func NewPipelineResolver(pipelines []*pipeline.Pipeline) *PipelineResolver {
 	for _, p := range pipelines {
 		for _, step := range p.Steps {
 			if virtualNames[step.Model] {
-				log.Fatalf("pipeline %q step %q references virtual model %q — this would cause infinite recursion", p.Name, step.Name, step.Model)
+				return nil, fmt.Errorf("pipeline %q step %q references virtual model %q, which would recurse", p.Name, step.Name, step.Model)
 			}
 		}
 	}
-	return pr
+	return pr, nil
 }
 
 // Resolve checks if a model name matches any pipeline.
@@ -104,20 +104,47 @@ func (pr *PipelineResolver) MatchesPipelinePrefix(modelName string) (string, boo
 }
 
 // pipelineSourceText is the last user message, the text a pipeline processes.
+// Content is either a string or an array of parts; the text parts are joined
+// and any other part (an image, audio) is ignored, since a pipeline step is
+// text in, text out.
 func pipelineSourceText(body []byte) string {
 	var fullReq struct {
 		Messages []struct {
-			Role    string `json:"role"`
-			Content string `json:"content"`
+			Role    string          `json:"role"`
+			Content json.RawMessage `json:"content"`
 		} `json:"messages"`
 	}
-	json.Unmarshal(body, &fullReq)
+	if err := json.Unmarshal(body, &fullReq); err != nil {
+		return ""
+	}
 	for i := len(fullReq.Messages) - 1; i >= 0; i-- {
 		if fullReq.Messages[i].Role == "user" {
-			return fullReq.Messages[i].Content
+			return contentText(fullReq.Messages[i].Content)
 		}
 	}
 	return ""
+}
+
+// contentText is the text of a message's content, whichever shape it has.
+func contentText(raw json.RawMessage) string {
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return s
+	}
+	var parts []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if json.Unmarshal(raw, &parts) != nil {
+		return ""
+	}
+	var texts []string
+	for _, p := range parts {
+		if p.Type == "text" && p.Text != "" {
+			texts = append(texts, p.Text)
+		}
+	}
+	return strings.Join(texts, "\n")
 }
 
 func (h *Handler) handlePipeline(w http.ResponseWriter, r *http.Request, p *pipeline.Pipeline, locale *pipeline.LocaleConfig, localeKey string, sourceText string, modelName string, taskID string) {
@@ -137,7 +164,7 @@ func (h *Handler) handlePipeline(w http.ResponseWriter, r *http.Request, p *pipe
 			w.Header().Set("Retry-After", "5")
 			httpjson.Write(w, http.StatusServiceUnavailable, map[string]any{
 				"error": map[string]string{
-					"message": fmt.Sprintf("pipeline step '%s' failed: model '%s' unavailable", stepErr.Step, stepErr.Step),
+					"message": fmt.Sprintf("pipeline step '%s' failed: model '%s' unavailable", stepErr.Step, stepErr.Model),
 					"type":    "server_error",
 				},
 			})

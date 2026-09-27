@@ -155,7 +155,9 @@ func (st *Stager) Stage(ctx context.Context, version string) error {
 	}
 	if err := os.Rename(tmp, final); err != nil {
 		if aside != "" {
-			os.Rename(aside, final)
+			if rerr := os.Rename(aside, final); rerr != nil {
+				return errors.Join(err, fmt.Errorf("restoring the earlier stage: %w", rerr))
+			}
 		}
 		return err
 	}

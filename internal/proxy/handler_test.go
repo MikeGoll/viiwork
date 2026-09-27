@@ -725,7 +725,7 @@ func TestHandlerModels(t *testing.T) {
 	f := newHandlerFx(t)
 	f.capacity = fakeCapacity{{Name: "m"}}
 	f.reports.add("P", "127.0.0.1:1", time.Now().Add(-time.Hour), peerModel("m", 1, 0), peerModel("x", 1, 0))
-	f.pipelines = NewPipelineResolver([]*pipeline.Pipeline{testPipeline(map[string]string{}, "fi")})
+	f.pipelines = mustPipelineResolver(t, []*pipeline.Pipeline{testPipeline(map[string]string{}, "fi")})
 	f.extra = func() []meshapi.ModelEntry {
 		return []meshapi.ModelEntry{{ID: "stable", OwnedBy: meshapi.OwnedByAlias, Target: "m"}}
 	}
@@ -785,7 +785,7 @@ func TestModelEntriesMatchTheModelsEndpoint(t *testing.T) {
 	f := newHandlerFx(t)
 	f.capacity = fakeCapacity{{Name: "m"}}
 	f.reports.add("P", "127.0.0.1:1", time.Now().Add(-time.Hour), peerModel("x", 1, 0))
-	f.pipelines = NewPipelineResolver([]*pipeline.Pipeline{testPipeline(map[string]string{}, "fi")})
+	f.pipelines = mustPipelineResolver(t, []*pipeline.Pipeline{testPipeline(map[string]string{}, "fi")})
 	f.extra = func() []meshapi.ModelEntry {
 		return []meshapi.ModelEntry{{ID: "stable", OwnedBy: meshapi.OwnedByAlias, Target: "m"}}
 	}
@@ -829,7 +829,7 @@ func TestFleetModelsCarryContext(t *testing.T) {
 func TestModelsEndpointCarriesTheServedContext(t *testing.T) {
 	f := newHandlerFx(t)
 	f.capacity = fakeCapacity{{Name: "m", Slots: 1, Ctx: 32768}}
-	f.pipelines = NewPipelineResolver([]*pipeline.Pipeline{testPipeline(map[string]string{}, "fi")})
+	f.pipelines = mustPipelineResolver(t, []*pipeline.Pipeline{testPipeline(map[string]string{}, "fi")})
 	f.extra = func() []meshapi.ModelEntry {
 		return []meshapi.ModelEntry{{ID: "stable", OwnedBy: meshapi.OwnedByAlias, Target: "m"}}
 	}

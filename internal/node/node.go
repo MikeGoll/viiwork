@@ -261,7 +261,10 @@ func New(cfg *config.Config, o Options) (*Node, error) {
 		StaleAfter: cfg.Routing.StaleAfter.Duration, QueueMax: cfg.Routing.QueueMax,
 		QueueTimeout: cfg.Routing.QueueTimeout.Duration,
 	})
-	resolverPipelines := proxy.NewPipelineResolver(pipelines)
+	resolverPipelines, err := proxy.NewPipelineResolver(pipelines)
+	if err != nil {
+		return nil, err
+	}
 	pipelineNames := func() []string {
 		out := append([]string(nil), names...)
 		return append(out, resolverPipelines.VirtualModelNames()...)

@@ -149,6 +149,10 @@ type Compose struct {
 	EnvFile    string // empty for an open mesh
 	StateDir   string
 	Tailscale  bool // mount tailscaled's socket directory
+	// CDI names the cards as CDI devices (nvidia.com/gpu=all), which needs
+	// the NVIDIA Container Toolkit's CDI spec but no runtime registered with
+	// Docker. Otherwise the nvidia device driver is requested.
+	CDI bool
 }
 
 var composeTmpl = template.Must(template.New("compose").Parse(`# Written by viiwork init; ` + "`viiwork uninstall`" + ` removes it.
@@ -166,6 +170,11 @@ services:
     network_mode: host
     # The on-GPU check matches backends against host PIDs.
     pid: host
+{{- if .CDI}}
+    # Every card, through the NVIDIA Container Toolkit's CDI spec.
+    devices:
+      - nvidia.com/gpu=all
+{{- else}}
     environment:
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
     deploy:
@@ -175,6 +184,7 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
+{{- end}}
     volumes:
       - "{{.ModelsDir}}:/models:ro"
       - "{{.ConfigFile}}:/etc/viiwork/viiwork.yaml:ro"

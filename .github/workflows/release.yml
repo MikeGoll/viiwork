@@ -73,8 +73,11 @@ jobs:
             echo "$TAG is already signed; re-uploading would put new archives under the old signature" >&2
             exit 1
           fi
+          # A beta is a pre-release, so it never becomes the latest release.
+          prerelease=
+          case "$TAG" in *-*) prerelease=--prerelease ;; esac
           if ! gh release view "$TAG" >/dev/null 2>&1; then
-            gh release create "$TAG" --verify-tag --title "$TAG" \
+            gh release create "$TAG" --verify-tag --title "$TAG" $prerelease \
               --notes "Unsigned until SHA256SUMS.sig is attached. Nodes refuse a release without a valid signature."
           fi
           gh release upload "$TAG" dist/*.tar.gz dist/SHA256SUMS --clobber

@@ -14,6 +14,10 @@
 //     interval, a prompt lookup by seconds, and a stream or a long generation by
 //     nothing at all — for those only the dial and, optionally, the wait for
 //     response headers are bounded, and cancellation comes from a context.
+//
+// Redirects are not followed either: no member endpoint redirects, and a
+// member that answers 3xx must not steer this node's request to another
+// address. The 3xx comes back as the response.
 package meshclient
 
 import (
@@ -57,7 +61,8 @@ func New(o Options) *http.Client {
 		idle = defaultIdlePerHost
 	}
 	return &http.Client{
-		Timeout: o.Timeout,
+		Timeout:       o.Timeout,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 		Transport: &http.Transport{
 			Proxy:                 nil,
 			DialContext:           (&net.Dialer{Timeout: dial, KeepAlive: 30 * time.Second}).DialContext,

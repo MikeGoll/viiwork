@@ -2,6 +2,7 @@ package alias
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 
 	"github.com/janit/viiwork/v2/meshapi"
@@ -214,19 +215,7 @@ func historiesEqual(a, b []meshapi.AliasVersion) bool {
 		return false
 	}
 	for i := range a {
-		if a[i].TS != b[i].TS || a[i].By != b[i].By || a[i].Target != b[i].Target || !stringsEqual(a[i].Fallbacks, b[i].Fallbacks) {
-			return false
-		}
-	}
-	return true
-}
-
-func stringsEqual(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
+		if a[i].TS != b[i].TS || a[i].By != b[i].By || a[i].Target != b[i].Target || !slices.Equal(a[i].Fallbacks, b[i].Fallbacks) {
 			return false
 		}
 	}
