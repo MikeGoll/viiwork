@@ -449,6 +449,13 @@ func TestLoopL20NoCheckWithoutGPUs(t *testing.T) {
 	h2.deps.Run = failIfCalled
 	m2, _ := h2.start(fakeModel("l20-cpu", nil))
 	waitHealthy(t, m2.Backends()[0], 3*time.Second)
+
+	// macOS has no per-process GPU accounting, so there is nothing to check.
+	h3 := newHarness(t)
+	h3.deps.Vendor = gpu.VendorApple
+	h3.deps.Run = failIfCalled
+	m3, _ := h3.start(fakeModel("l20-apple", []int{0}))
+	waitHealthy(t, m3.Backends()[0], 3*time.Second)
 	time.Sleep(300 * time.Millisecond)
 }
 

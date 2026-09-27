@@ -5,9 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"net"
-	"net/http"
 	"strings"
 )
 
@@ -30,31 +27,12 @@ var ErrNoMagicDNSSuffix = errors.New("tailscaled reports no MagicDNS suffix")
 // allowlist should trust in place of "*.ts.net", which matches every
 // Tailscale customer's Funnel pages too.
 //
-// It reads the same status document ReadTailnetStatus does, over the same
-// unix socket, and is bounded by ctx.
+// It reads the same status document ReadTailnetStatus does, from the same
+// place, and is bounded by ctx.
 func ReadMagicDNSSuffix(ctx context.Context, socket string) (string, error) {
-	client := &http.Client{Transport: &http.Transport{
-		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			var d net.Dialer
-			return d.DialContext(ctx, "unix", socket)
-		},
-		DisableKeepAlives: true,
-	}}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, localAPIStatusURL, nil)
+	body, err := readStatusDocument(ctx, socket, socket == DefaultTailnetSocket)
 	if err != nil {
 		return "", err
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("tailscaled LocalAPI at %s: %w", socket, err)
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxStatusBody))
-	if err != nil {
-		return "", fmt.Errorf("tailscaled LocalAPI: reading status: %w", err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("tailscaled LocalAPI answered HTTP %d: %s", resp.StatusCode, truncate(body, 200))
 	}
 	return parseMagicDNSSuffix(body)
 }

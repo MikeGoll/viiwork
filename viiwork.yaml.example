@@ -156,3 +156,9 @@ models:
 
 power:
   source: none               # auto | dcmi | sdr | sensor:<NAME> | none
+
+# Rolling updates (docs/releases.md). Off unless enabled.
+# update:
+#   enabled: true
+#   source: https://github.com/janit/viiwork/releases/download
+#   confirm_timeout: 0     # 0 = sum of the models' startup timeouts + 10m

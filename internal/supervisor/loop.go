@@ -397,7 +397,8 @@ func (l *loop) checkGPU() {
 	if l.gpuDecided {
 		return
 	}
-	if b.deps.Vendor == gpu.VendorNone || len(b.gpus) == 0 {
+	// Apple Silicon offers no per-process GPU accounting to check against.
+	if b.deps.Vendor == gpu.VendorNone || b.deps.Vendor == gpu.VendorApple || len(b.gpus) == 0 {
 		l.gpuDecided = true
 		return
 	}

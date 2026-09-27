@@ -44,3 +44,18 @@ type TokenProgressReader interface {
 type GPUBindingReader interface {
 	BoundGPU(ctx context.Context, addr string) (uuid string, ok bool, err error)
 }
+
+// Versioner is an engine that can say which version of itself is installed
+// and which version this viiwork needs. Optional, like every capability here:
+// an engine without it declares no requirement and is never checked
+// (FreeToken's rolling nightly has no version to read).
+type Versioner interface {
+	// MinVersion is the oldest engine this viiwork works with, in the
+	// engine's own spelling; "" means no requirement. Raise it in the change
+	// that starts relying on a newer engine.
+	MinVersion() string
+	// Version runs the binary s's options name and reports its version.
+	Version(ctx context.Context, s Spec) (string, error)
+	// AtLeast reports whether installed satisfies min in this engine's order.
+	AtLeast(installed, min string) (bool, error)
+}

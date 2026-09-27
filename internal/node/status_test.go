@@ -114,10 +114,3 @@ func TestBuildStatusOptional(t *testing.T) {
 		t.Errorf("no GPUs: %+v", st.GPUs)
 	}
 }
-
-func TestReadHostMemory(t *testing.T) {
-	meminfo := "MemTotal:       65536000 kB\nMemFree:         1000000 kB\nMemAvailable:   16384000 kB\n"
-	if total, used := parseMemInfo(strings.NewReader(meminfo)); total != 64000 || used != 48000 {
-		t.Errorf("S4: total=%d used=%d", total, used)
-	}
-}

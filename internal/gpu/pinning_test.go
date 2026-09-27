@@ -24,6 +24,9 @@ func TestPinningEnv(t *testing.T) {
 		{"amd order kept", VendorAMD, []int{5, 4}, []string{"PATH=/usr/bin", "HOME=/home/janit", "ROCR_VISIBLE_DEVICES=5,4"}},
 		{"nvidia cpu backend", VendorNVIDIA, nil, []string{"PATH=/usr/bin", "HOME=/home/janit"}},
 		{"no vendor", VendorNone, []int{0}, []string{"PATH=/usr/bin", "HOME=/home/janit"}},
+		// One GPU on an Apple Silicon host, so nothing selects it; the
+		// inherited variables are still stripped like on every vendor.
+		{"apple", VendorApple, []int{0}, []string{"PATH=/usr/bin", "HOME=/home/janit"}},
 	}
 	for _, tc := range cases {
 		if got := PinningEnv(inherited, tc.vendor, tc.gpus); !slices.Equal(got, tc.want) {

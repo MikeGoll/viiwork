@@ -25,6 +25,7 @@ const (
 	VendorAuto   = "auto"
 	VendorNVIDIA = "nvidia"
 	VendorAMD    = "amd"
+	VendorApple  = "apple"
 	VendorNone   = "none"
 )
 
@@ -101,6 +102,7 @@ type Config struct {
 	Energy        EnergyConfig                       `yaml:"energy"`
 	Cost          CostConfig                         `yaml:"cost"`
 	ViiworkParrot ViiworkParrotConfig                `yaml:"viiwork_parrot"`
+	Update        UpdateConfig                       `yaml:"update"`
 	Pipelines     map[string]pipeline.PipelineConfig `yaml:"pipelines"`
 }
 

@@ -209,7 +209,8 @@ func (c *CORS) refusesCrossSite(r *http.Request) bool {
 // must be JSON so that no browser can send them as a simple request.
 func controlPath(path string) bool {
 	return path == meshapi.PathPower || path == meshapi.PathMeshPower ||
-		path == meshapi.PathAliases || strings.HasPrefix(path, meshapi.PathAliases+"/")
+		path == meshapi.PathAliases || strings.HasPrefix(path, meshapi.PathAliases+"/") ||
+		strings.HasPrefix(path, meshapi.PathUpdate+"/")
 }
 
 // isJSON reports whether a Content-Type header names application/json,

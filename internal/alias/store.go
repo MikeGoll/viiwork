@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/janit/viiwork/v2/internal/durable"
 	"github.com/janit/viiwork/v2/meshapi"
 )
 
@@ -35,37 +36,8 @@ type fileWriter func(dir, name string, data []byte) error
 // writeFileDurable replaces dir/name so that a crash leaves either the old
 // file or the new one: it writes and syncs a temporary file, renames it over
 // the target, then syncs the directory so the rename itself survives.
-func writeFileDurable(dir, name string, data []byte) (err error) {
-	tmp := filepath.Join(dir, name+".tmp")
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		if err != nil {
-			os.Remove(tmp)
-		}
-	}()
-	if _, err = f.Write(data); err != nil {
-		f.Close()
-		return err
-	}
-	if err = f.Sync(); err != nil {
-		f.Close()
-		return err
-	}
-	if err = f.Close(); err != nil {
-		return err
-	}
-	if err = os.Rename(tmp, filepath.Join(dir, name)); err != nil {
-		return err
-	}
-	d, err := os.Open(dir)
-	if err != nil {
-		return err
-	}
-	defer d.Close()
-	return d.Sync()
+func writeFileDurable(dir, name string, data []byte) error {
+	return durable.WriteFile(dir, name, data)
 }
 
 // Store is this node's alias table. Every write is on disk before it returns.

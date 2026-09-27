@@ -79,6 +79,7 @@ func TestDefaultRouteIPv4BadInput(t *testing.T) {
 func failingAdvertiseDeps(t *testing.T) advertiseDeps {
 	return advertiseDeps{
 		readRoutes: func() ([]byte, error) { t.Error("readRoutes called"); return nil, errors.New("no") },
+		routeIface: func([]byte) (string, error) { t.Error("routeIface called"); return "", errors.New("no") },
 		ifaceAddrs: func(string) ([]netip.Addr, error) { t.Error("ifaceAddrs called"); return nil, errors.New("no") },
 		tailnet: func(context.Context) (TailnetStatus, error) {
 			t.Error("tailnet called")
@@ -100,10 +101,49 @@ func TestResolveAdvertiseOverride(t *testing.T) {
 func TestResolveAdvertiseLAN(t *testing.T) {
 	d := failingAdvertiseDeps(t)
 	d.readRoutes = func() ([]byte, error) { return routeFixture(t), nil }
+	d.routeIface = procRouteIface
 	d.ifaceAddrs = addrsOf("eno1np0", "fe80::1", "192.168.42.144")
 	got, err := resolveAdvertise(context.Background(), NetworkLAN, netip.Addr{}, d)
 	if err != nil || got != netip.MustParseAddr("192.168.42.144") {
 		t.Errorf("lan = %v, %v", got, err)
+	}
+}
+
+func darwinRouteFixture(t *testing.T) []byte {
+	t.Helper()
+	data, err := os.ReadFile("testdata/route-get-default-darwin.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
+func TestResolveAdvertiseLANDarwin(t *testing.T) {
+	d := failingAdvertiseDeps(t)
+	d.readRoutes = func() ([]byte, error) { return darwinRouteFixture(t), nil }
+	d.routeIface = parseRouteGetDefault
+	d.ifaceAddrs = addrsOf("en0", "fe80::1c2a:5bff:fe10:9e01", "192.168.42.77")
+	got, err := resolveAdvertise(context.Background(), NetworkLAN, netip.Addr{}, d)
+	if err != nil || got != netip.MustParseAddr("192.168.42.77") {
+		t.Errorf("lan on darwin = %v, %v", got, err)
+	}
+}
+
+func TestParseRouteGetDefault(t *testing.T) {
+	if got, err := parseRouteGetDefault(darwinRouteFixture(t)); err != nil || got != "en0" {
+		t.Errorf("fixture: %q, %v, want en0", got, err)
+	}
+	// Reordered, with a line this parser has never seen, and an interface
+	// line indented differently.
+	reordered := "interface: utun4\n  gateway: 10.64.0.1\n  some-future-key: 7\n   route to: default\n"
+	if got, err := parseRouteGetDefault([]byte(reordered)); err != nil || got != "utun4" {
+		t.Errorf("reordered: %q, %v, want utun4", got, err)
+	}
+	// What route prints on a machine with no default route.
+	for _, in := range []string{"route: writing to routing socket: not in table\n", "", "  interface: \n"} {
+		if got, err := parseRouteGetDefault([]byte(in)); err == nil {
+			t.Errorf("%q: got %q, want an error", in, got)
+		}
 	}
 }
 
@@ -155,5 +195,15 @@ func TestResolveAdvertiseCancelled(t *testing.T) {
 	_, err := resolveAdvertise(ctx, NetworkTailnet, netip.Addr{}, d)
 	if !errors.Is(err, context.Canceled) || time.Since(start) > time.Second {
 		t.Errorf("err = %v after %v, want context.Canceled at once", err, time.Since(start))
+	}
+}
+
+func TestLANAddressIsUsable(t *testing.T) {
+	a, err := LANAddress()
+	if err != nil {
+		t.Skipf("no default route here: %v", err)
+	}
+	if !a.Is4() || a.IsLoopback() || a.IsLinkLocalUnicast() {
+		t.Errorf("LANAddress = %v", a)
 	}
 }

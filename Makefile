@@ -1,21 +1,32 @@
-.PHONY: build mcp accept test clean docker docker-stable docker-rocm docker-vllm docker-freetoken up down
+.PHONY: build build-darwin mcp accept release test vet-cross clean docker docker-stable docker-rocm docker-vllm docker-freetoken up down
 
 # scripts/version.sh, not `git describe` inline: the private repo carries no
 # tags, so describe reports the last one it can still see. See that script.
 VERSION ?= $(shell ./scripts/version.sh)
 
 build:
-	go build -ldflags "-X main.version=$(VERSION)" -o bin/viiwork ./cmd/viiwork
+	./scripts/gobuild.sh ./cmd/viiwork bin/viiwork $(VERSION)
+
+# A native macOS (Apple Silicon) node and its acceptance checker, built from any
+# host. No cgo, so no Xcode toolchain is needed to cross-compile. docs/macos.md.
+build-darwin:
+	GOOS=darwin GOARCH=arm64 ./scripts/gobuild.sh ./cmd/viiwork bin/darwin-arm64/viiwork $(VERSION)
+	GOOS=darwin GOARCH=arm64 ./scripts/gobuild.sh ./cmd/viiwork-accept bin/darwin-arm64/viiwork-accept $(VERSION)
 
 # Version-stamped like the node: the MCP server reports this string to the
 # assistant in its initialize response.
 mcp:
-	go build -ldflags "-X main.version=$(VERSION)" -o bin/viiwork-mcp ./cmd/viiwork-mcp
+	./scripts/gobuild.sh ./cmd/viiwork-mcp bin/viiwork-mcp $(VERSION)
 
 # The acceptance checker. Version-stamped like the node because `viiwork-accept
 # --version` is what a conversion report records.
 accept:
-	go build -ldflags "-X main.version=$(VERSION)" -o bin/viiwork-accept ./cmd/viiwork-accept
+	./scripts/gobuild.sh ./cmd/viiwork-accept bin/viiwork-accept $(VERSION)
+
+# Every release target and its archives, as the release workflow builds them:
+# make release VERSION=v2.6.0 (docs/releases.md).
+release:
+	./scripts/build-release.sh $(VERSION) dist
 
 # TEST_CPUS caps the container fallback. An uncapped compile of the whole tree
 # on a host that is also serving live lanes has made a backend miss its health
@@ -24,11 +35,19 @@ TEST_CPUS ?= 2
 
 test:
 	@if command -v go >/dev/null 2>&1; then \
-		go test ./... -v; \
+		go test ./... -v && $(MAKE) --no-print-directory vet-cross; \
 	else \
 		echo "go not found on host, running tests in container (--cpus=$(TEST_CPUS))..."; \
-		docker run --rm --cpus=$(TEST_CPUS) -v $(CURDIR):/src -w /src -e GOFLAGS=-buildvcs=false golang:1.27.1 go test ./... -v; \
+		docker run --rm --cpus=$(TEST_CPUS) -v $(CURDIR):/src -w /src -e GOFLAGS=-buildvcs=false golang:1.27.1 \
+			sh -c 'go test ./... -v && GOOS=linux GOARCH=amd64 go vet ./... && GOOS=darwin GOARCH=arm64 go vet ./...'; \
 	fi
+
+# The tree builds for Linux and macOS from either one. Tests run only on the
+# host's own OS, so vet both: a /proc read slipping into a darwin build, or a
+# darwin-only call into a Linux one, fails here rather than on the machine.
+vet-cross:
+	GOOS=linux GOARCH=amd64 go vet ./...
+	GOOS=darwin GOARCH=arm64 go vet ./...
 
 clean:
 	rm -rf bin/

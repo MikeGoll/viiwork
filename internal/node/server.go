@@ -55,6 +55,7 @@ type ServerDeps struct {
 	Catalog        http.Handler      // *catalog.Handler; nil = /api.json is 404
 	ModelInfo      http.Handler      // *modelinfo.Handler; nil = /v1/model/info is 404
 	Health         func() (healthy, total int, models int)
+	Update         http.Handler // /v1/update; nil = 404
 }
 
 type server struct {
@@ -203,6 +204,12 @@ func (s *server) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 		s.handlePower(w, r)
 	case path == meshapi.PathMeshPower && r.Method == http.MethodPost:
 		s.handleMeshPower(w, r)
+	case path == meshapi.PathUpdate || strings.HasPrefix(path, meshapi.PathUpdate+"/"):
+		if s.d.Update == nil {
+			http.NotFound(w, r)
+			return
+		}
+		s.d.Update.ServeHTTP(w, r)
 	default:
 		http.NotFound(w, r)
 	}

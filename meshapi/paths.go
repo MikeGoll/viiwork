@@ -22,6 +22,13 @@ const (
 	PathPower           = "/v1/power"
 	PathMeshPower       = "/v1/mesh/power"
 
+	// PathUpdate is GET (status); stage, activate and rollback are POSTs
+	// below it, authorised like alias writes.
+	PathUpdate         = "/v1/update"
+	PathUpdateStage    = "/v1/update/stage"
+	PathUpdateActivate = "/v1/update/activate"
+	PathUpdateRollback = "/v1/update/rollback"
+
 	// PathAliases is GET (list) on its own, and PUT/DELETE on
 	// PathAliases+"/<name>"; revert is POST on AliasRevertPath(name).
 	PathAliases       = "/v1/aliases"

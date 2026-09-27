@@ -4,6 +4,7 @@ package node
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -88,7 +89,27 @@ func TestWebFixture(t *testing.T) {
 				w.Header().Set(meshapi.HeaderAlias, "stable")
 			}
 			w.Header().Set("Content-Type", "text/event-stream")
-			io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"Hyvää huomenta\"}}]}\n\ndata: [DONE]\n\n")
+			// Paced like a real decode, one token per chunk after a prompt
+			// delay, and closed with llama.cpp's timings, so the chat page's
+			// tokens/second meter has something live to show.
+			flush := func() {
+				if f, ok := w.(http.Flusher); ok {
+					f.Flush()
+				}
+			}
+			flush()
+			time.Sleep(600 * time.Millisecond)
+			const n = 60
+			for i := 0; i < n; i++ {
+				tok := "Hyvää "
+				if i%2 == 1 {
+					tok = "huomenta. "
+				}
+				fmt.Fprintf(w, "data: {\"choices\":[{\"delta\":{\"content\":%q}}]}\n\n", tok)
+				flush()
+				time.Sleep(40 * time.Millisecond)
+			}
+			fmt.Fprintf(w, "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"timings\":{\"predicted_n\":%d,\"predicted_per_second\":24.6}}\n\ndata: [DONE]\n\n", n)
 		default:
 			http.NotFound(w, r)
 		}

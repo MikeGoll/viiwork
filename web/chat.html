@@ -28,6 +28,13 @@
   button:hover { background: #2ea043; }
   button:disabled { background: #21262d; color: #484f58; cursor: not-allowed; }
   .meta { font-size: 0.75rem; color: #484f58; margin-top: 4px; }
+  #tps { margin-left: auto; display: flex; align-items: baseline; gap: 10px; background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 4px 12px; font-variant-numeric: tabular-nums; }
+  #tps .rate { font-size: 1.05rem; font-weight: 600; color: #8b949e; min-width: 5.5em; text-align: right; }
+  #tps .rate small { font-size: 0.72rem; font-weight: 400; color: #8b949e; margin-left: 4px; }
+  #tps .detail { font-size: 0.72rem; color: #484f58; white-space: nowrap; }
+  #tps.live { border-color: #238636; }
+  #tps.live .rate { color: #3fb950; }
+  #tps.waiting .rate { color: #d29922; }
 </style>
 </head>
 <body>
@@ -38,6 +45,7 @@
   <span style="color:#c9d1d9;font-weight:600">chat</span>
   <span class="sel"><label for="model-select">model</label><select id="model-select"><option>loading...</option></select></span>
   <span class="sel"><label for="host-select">backend</label><select id="host-select"><option value="mesh">mesh</option></select></span>
+  <span id="tps"><span class="rate">&ndash;<small>tok/s</small></span><span class="detail">idle</span></span>
 </header>
 
 <div id="messages"></div>
@@ -55,6 +63,9 @@ const promptEl = document.getElementById('prompt');
 const sendBtn = document.getElementById('send');
 const modelSelect = document.getElementById('model-select');
 const hostSelect = document.getElementById('host-select');
+const tpsEl = document.getElementById('tps');
+const tpsRate = tpsEl.querySelector('.rate');
+const tpsDetail = tpsEl.querySelector('.detail');
 
 let conversation = [];
 let streaming = false;
@@ -206,6 +217,90 @@ function syncURL() {
   document.title = (modelSelect.value || 'chat') + (host ? ' @ ' + host : '') + ' · viiwork chat';
 }
 
+// The tokens/second meter. The live figure counts streamed deltas, one per
+// token as llama.cpp and vLLM send them, over a sliding window so it follows
+// the decode rate as it changes; it starts at the first token, so prompt
+// processing shows as time to first token rather than dragging the rate down.
+// When the stream's last chunk carries the engine's own numbers (llama.cpp's
+// `timings`, or `usage`), the final figure is taken from them instead.
+const TPS_WINDOW_MS = 2000;
+let tpsTimer = null;
+
+function tpsShow(state, rate, detail) {
+  tpsEl.className = state;
+  tpsRate.innerHTML = '';
+  tpsRate.append(rate);
+  const unit = document.createElement('small');
+  unit.textContent = 'tok/s';
+  tpsRate.appendChild(unit);
+  tpsDetail.textContent = detail;
+}
+
+function fmtRate(r) {
+  return Number.isFinite(r) && r > 0 ? r.toFixed(1) : '\u2013';
+}
+
+function newMeter(t0) {
+  return { t0, first: 0, last: 0, n: 0, stamps: [], engineRate: 0, engineN: 0 };
+}
+
+function meterToken(m, now) {
+  if (!m.first) m.first = now;
+  m.last = now;
+  m.n++;
+  m.stamps.push(now);
+}
+
+// meterEngine reads the engine's own count from a chunk, when it has one.
+function meterEngine(m, chunk) {
+  const t = chunk.timings;
+  if (t && t.predicted_per_second > 0) {
+    m.engineRate = t.predicted_per_second;
+    m.engineN = t.predicted_n || m.engineN;
+  }
+  if (chunk.usage && chunk.usage.completion_tokens > 0) m.engineN = chunk.usage.completion_tokens;
+}
+
+function meterAverage(m) {
+  if (m.engineRate) return m.engineRate;
+  const n = m.engineN || m.n;
+  const span = (m.last - m.first) / 1000;
+  return n > 1 && span > 0 ? (n - 1) / span : 0;
+}
+
+function meterTick(m) {
+  const now = performance.now();
+  if (!m.first) {
+    tpsShow('waiting', '\u2026', 'prompt ' + ((now - m.t0) / 1000).toFixed(1) + 's');
+    return;
+  }
+  while (m.stamps.length && m.stamps[0] < now - TPS_WINDOW_MS) m.stamps.shift();
+  // Rate over the window, measured from its oldest token to now, so a stall
+  // pulls the figure down instead of freezing it at the last good value.
+  let rate = 0;
+  if (m.stamps.length > 1) rate = (m.stamps.length - 1) / ((now - m.stamps[0]) / 1000);
+  else if (m.n > 1) rate = meterAverage(m);
+  tpsShow('live', fmtRate(rate), m.n + ' tok \u00b7 ttft ' + ((m.first - m.t0) / 1000).toFixed(1) + 's');
+}
+
+function meterStart(m) {
+  clearInterval(tpsTimer);
+  meterTick(m);
+  tpsTimer = setInterval(() => meterTick(m), 250);
+}
+
+// meterStop leaves the finished request's average on screen until the next.
+function meterStop(m, failed) {
+  clearInterval(tpsTimer);
+  tpsTimer = null;
+  if (failed || !m.first) {
+    tpsShow('', '\u2013', failed ? 'failed' : 'no tokens');
+    return;
+  }
+  const n = m.engineN || m.n;
+  tpsShow('', fmtRate(meterAverage(m)), 'last: ' + n + ' tok \u00b7 ttft ' + ((m.first - m.t0) / 1000).toFixed(1) + 's');
+}
+
 function addMessage(role, content) {
   const div = document.createElement('div');
   div.className = 'msg ' + role;
@@ -244,6 +339,9 @@ async function send() {
   const t0 = performance.now();
   const model = modelSelect.value;
   const pinned = pinnedHost();
+  const meter = newMeter(t0);
+  let failed = true;
+  meterStart(meter);
 
   try {
     // The pin rides as a query parameter: the node applies it to its route
@@ -297,8 +395,10 @@ async function send() {
 
         try {
           const chunk = JSON.parse(payload);
+          meterEngine(meter, chunk);
           const delta = chunk.choices?.[0]?.delta;
           if (!delta) continue;
+          if (delta.reasoning_content || delta.content) meterToken(meter, performance.now());
 
           // Handle thinking content (Gemma 4 thinking mode)
           if (delta.reasoning_content) {
@@ -326,8 +426,11 @@ async function send() {
     const elapsed = ((performance.now() - t0) / 1000).toFixed(1);
     const meta = document.createElement('div');
     meta.className = 'meta';
-    meta.textContent = modelLabel + ' @ ' + ranOn + (gpu ? ' ' + gpu : '') + ' | ' + elapsed + 's';
+    const rate = meterAverage(meter);
+    meta.textContent = modelLabel + ' @ ' + ranOn + (gpu ? ' ' + gpu : '') + ' | ' + elapsed + 's' +
+      (rate ? ' | ' + fmtRate(rate) + ' tok/s' : '');
     msgDiv.appendChild(meta);
+    failed = false;
 
     conversation.push({ role: 'assistant', content: fullText });
 
@@ -335,6 +438,7 @@ async function send() {
     msgDiv.className = 'msg error';
     msgDiv.textContent = 'Error: ' + e.message;
   } finally {
+    meterStop(meter, failed);
     streaming = false;
     sendBtn.disabled = false;
     sendBtn.textContent = 'Send';

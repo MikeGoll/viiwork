@@ -10,13 +10,16 @@ type Vendor string
 const (
 	VendorNVIDIA Vendor = "nvidia"
 	VendorAMD    Vendor = "amd"
-	VendorNone   Vendor = "none"
+	// VendorApple is Apple Silicon: one GPU in unified memory, driven through
+	// Metal, with no device-selection variable and no per-process accounting.
+	VendorApple Vendor = "apple"
+	VendorNone  Vendor = "none"
 )
 
 func ParseVendor(s string) (Vendor, error) {
 	switch v := Vendor(s); v {
-	case VendorNVIDIA, VendorAMD, VendorNone:
+	case VendorNVIDIA, VendorAMD, VendorApple, VendorNone:
 		return v, nil
 	}
-	return "", fmt.Errorf("gpu vendor %q must be nvidia, amd or none", s)
+	return "", fmt.Errorf("gpu vendor %q must be nvidia, amd, apple or none", s)
 }

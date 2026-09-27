@@ -1,5 +1,130 @@
 # Changelog
 
+## v2.6.0-beta1
+
+### Download it, run it, answer a few questions
+
+**`viiwork init` sets up a machine.** Run `sudo ./viiwork init` on Linux, or
+`./viiwork init` on a Mac. `./viiwork` on a terminal with no config starts it
+too. The wizard finds the GPUs, then scans a models directory and lists each
+GGUF with its architecture and size. It proposes a layout, which you can
+accept, edit or trim, and asks about the mesh. Before writing anything it shows
+every file with its content, the secret masked, and on a yes it writes them,
+starts the node, and runs the `viiwork-accept` config, ready and join checks.
+`docs/setup.md` is the guide.
+
+- **Nothing is written before the last yes.** Ctrl-C or end of input at any
+  question leaves the host untouched. The config goes through the node's own
+  `config.Parse` and `Validate` first, so a layout the node would refuse is
+  shown with the reason and asked again.
+- **The layout comes from the model files' headers.**
+  - Weights come from the file size; the KV cache from the attention layers
+    only, since hybrid models such as Qwen3.8 keep a cache in one layer in
+    four.
+  - Discrete cards are grouped by the smallest card times the group size,
+    because llama.cpp splits evenly.
+  - A Mac plans against its Metal budget, shared by every model.
+  - A model that does not fit is shown with what it needs.
+- **Linux runs the node in Docker** from a published engine image (NVIDIA
+  today), with `restart: always`, the state directory as a host path, and a
+  90 s stop grace. Other GPUs get the config and no start, with the reason:
+  gfx906 has no published image, and the Vulkan build cannot pin a backend to
+  its cards. A development build is config-only too.
+- **A Mac runs natively** under a user LaunchAgent, with no sudo. llama.cpp is
+  fetched at the binary's pin and checked against the sha256 GitHub publishes
+  for the asset. The archive is unpacked through `os.Root`, so no entry can
+  land outside the build directory. A build already fetched by hand is reused
+  and left alone.
+- **Preflight refuses rather than overwrites.** It refuses when:
+  - a config, `mesh.env`, compose file or install manifest already exists;
+  - a container named `viiwork`, or a loaded agent, shows a node set up by
+    hand;
+  - Docker, Compose v2 or the NVIDIA Container Toolkit is missing;
+  - a port is busy;
+  - a Mac has no GUI session.
+- **A node that does not come up keeps its files.** The wizard prints each
+  unhealthy backend's status and phase and the last log lines, then how to
+  retry and how to undo. A large model's load is waited for model by model,
+  since `/health` stays 503 until one loads. A backend that dies ends the wait
+  at once.
+
+**Join codes.** `viiwork join-code` prints one pasteable string that carries
+the mesh secret and a seed address (`viiwork1-…`, with a checksum). The next
+machine's wizard takes it at the mesh question. The code *is* the secret and
+says so. On a Mac, join-code reads the secret from the agent's plist.
+
+**`viiwork uninstall` removes exactly what the install created.**
+- It trusts the install manifest (`install.json`) only within the paths an
+  install uses. Entries elsewhere, other projects' images, and paths that run
+  through a symlinked directory are skipped and named.
+- It stops the node the normal way first, and a failed stop removes nothing.
+- Nothing is ever pruned.
+- Model weights are kept unless `--delete-models`, which lists them and asks
+  separately.
+- A host set up by hand has no manifest, so uninstall refuses;
+  `--from-config` only lists what its config points at.
+
+### Signed releases and rolling updates
+
+- **Releases are reproducible archives with a signed `SHA256SUMS`.**
+  - CI builds them.
+  - The publisher rebuilds, compares and signs locally with ed25519
+    (`scripts/release-sign.sh`, `viiwork-release`). The signature covers the
+    version too.
+  - The public keys are compiled into every build. `docs/releases.md`.
+- **A node can update itself.** Enable it with `update.enabled: true`, default
+  off.
+  - `/v1/update` stages a release: it verifies the signature and checksum,
+    checks the binary runs and reports its version, and checks this host's
+    engines meet the release's minimum versions.
+  - It then activates and confirms against the backends that were healthy
+    before. A dead backend, or a missed deadline, rolls back.
+  - Writes are authorised like alias writes.
+- **`viiwork update` rolls a release across the mesh.** It asks for a typed
+  phrase, stages everywhere first, then activates one host at a time with the
+  entry node last, and stops at the first rollback. `status` and `rollback`
+  act on one node.
+- **Engine images** (`viiwork-llamacpp-cuda`, `-vulkan`, `viiwork-vllm`) are
+  upstream engine images with the verified `viiwork` added as one layer.
+  Their base is pinned by digest in `docker/pins.env`, and each tag is written
+  once.
+
+### `viiwork top`
+
+A live full-screen view of the whole mesh from any terminal:
+- hosts, model totals and in-flight requests;
+- per-host GPU history graphs and backends.
+
+It is read only, built on `golang.org/x/term`, which is the fourth dependency.
+`--once` prints one frame, and `--host` opens a host. Everything drawn from the
+network is sanitised.
+
+### macOS (Apple Silicon) as a node
+
+A Mac runs llama.cpp on Metal as a normal mesh member:
+- `gpu.vendor: apple` lets several models share its one GPU;
+- GPU telemetry comes from `ioreg`, and host RAM on darwin;
+- tailnet status works with any Tailscale build;
+- LAN mode uses the darwin default route.
+
+`docs/macos.md`. The default `--config` on a Mac is
+`~/.config/viiwork/viiwork.yaml`.
+
+### Smaller
+
+- `/chat` shows live tokens per second.
+- `internal/durable` writes each file through a temporary file of its own, so
+  concurrent writers never tear the target.
+- The llama.cpp version is read from `llama-server`'s current version line.
+
+Additive only: the `update:` config block and the `/v1/update` wire types are
+new, and no existing key or field changed.
+
+**Not yet exercised on real hardware:**
+- `viiwork init`, `join-code` between two new machines, and `uninstall`, on
+  Linux and on a Mac. Everything so far runs against fakes.
+- The engine images stay private on ghcr until they are made public.
+
 ## v2.5.0
 
 ### A six-lens review, and everything it found

@@ -5,6 +5,7 @@ go 1.27.1
 require (
 	github.com/hashicorp/mdns v1.0.7
 	github.com/hashicorp/memberlist v0.6.0
+	golang.org/x/term v0.46.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 

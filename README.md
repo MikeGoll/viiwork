@@ -52,6 +52,8 @@ in a workstation, or racks of MI50s in your mother-in-law's garage.
 - **Live cluster dashboards.** Models, in-flight jobs, backends, prompts and
   power for the whole fleet, served identically by every node →
   [dashboards](docs/dashboards.md)
+- **`viiwork top`.** The whole mesh live in a terminal, with a per-host
+  drill-down → [operations](docs/operations.md#watching-the-mesh-viiwork-top)
 - **Power, cost and energy accounting.** Per-host wattage, ENTSO-E spot cost, and
   a durable per-model kWh history → [power and energy](docs/power-and-energy.md)
 - **Pipelines.** Chain several LLM steps into one virtual model name →
@@ -65,6 +67,11 @@ in a workstation, or racks of MI50s in your mother-in-law's garage.
   maintain and no numbers typed in → [autodiscovery](docs/autodiscovery.md)
 
 ## Quick Start
+
+On a Linux machine with an NVIDIA GPU and Docker, download a release and run
+`sudo ./viiwork init`. It asks a few questions, shows every file it will write,
+then starts the node and checks it → [setup](docs/setup.md). To set a machine
+up by hand instead:
 
 ```bash
 # 1. Write the machine's config
@@ -284,10 +291,14 @@ that base is how the inference stack gets pinned.
 unqualified target points there. Base image pins, CUDA GPU access through CDI,
 the gfx906 FP8 patch and the retired fork track: **[BUILDS.md](BUILDS.md)**.
 
+Tagged releases also ship static binaries for linux/amd64, linux/arm64 and
+darwin/arm64, reproducibly built and signed: **[docs/releases.md](docs/releases.md)**.
+
 ## Documentation
 
 | Document | What's in it |
 |---|---|
+| [setup.md](docs/setup.md) | `viiwork init`: the first-run wizard, what it writes, join codes, config-only cases |
 | [configuration.md](docs/configuration.md) | Every config key: models, tensor-split, reloading, pipelines, GPU power limits, environment variables, host requirements |
 | [mesh.md](docs/mesh.md) | Discovery, secured and open mode, routing and refusal handling, aliases |
 | [dashboards.md](docs/dashboards.md) | `/`, `/mesh`, `/chat`, `/prompt`; how the live view is reconstructed; prompt and output history |
@@ -295,6 +306,7 @@ the gfx906 FP8 patch and the retired fork track: **[BUILDS.md](BUILDS.md)**.
 | [models.md](docs/models.md) | The measured catalogue: reference fleet, large models on one card via FreeToken offload, validated deployments, failed bring-ups, gfx906 tuning rules |
 | [security.md](docs/security.md) | The trust model, what the lack of authentication exposes, CORS |
 | [operations.md](docs/operations.md) | Scripts, `viiwork-accept` acceptance checks, the MCP server |
+| [macos.md](docs/macos.md) | An Apple Silicon Mac as a native node: llama.cpp on Metal, sharing the one GPU, viiwork-parrot, Tailscale variants, launchd, sleep, uninstall |
 | [api-integration.md](docs/api-integration.md) | Full API reference, both integration modes, semantics that bite, acceptance checklist |
 | [autodiscovery.md](docs/autodiscovery.md) | Clients discovering the fleet: the enriched `/v1/models`, OpenCode's `/api.json` catalogue, LiteLLM's `/v1/model/info`, and what viiwork will not claim |
 | [consuming-fleet-capacity.md](docs/consuming-fleet-capacity.md) | Building a client that reacts to fleet capacity rather than assuming it |

@@ -1,18 +1,14 @@
 package node
 
 import (
-	"bufio"
-	"io"
 	"net/netip"
-	"os"
 	"sort"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/janit/viiwork/v2/energy"
 	"github.com/janit/viiwork/v2/internal/cost"
 	"github.com/janit/viiwork/v2/internal/gpu"
+	"github.com/janit/viiwork/v2/internal/hostinfo"
 	"github.com/janit/viiwork/v2/internal/power"
 	"github.com/janit/viiwork/v2/internal/proxy"
 	"github.com/janit/viiwork/v2/meshapi"
@@ -61,7 +57,7 @@ type StatusSources struct {
 	Energy        EnergyReader // nil = none
 	Cost          CostReader   // nil = none
 	PromptHistory int
-	HostMemory    func() (totalMB, usedMB int64) // nil = readHostMemory
+	HostMemory    func() (totalMB, usedMB int64) // nil = hostinfo.HostMemoryMB
 	Now           func() time.Time
 }
 
@@ -85,7 +81,7 @@ func BuildStatus(s StatusSources) meshapi.NodeStatus {
 			st.Addr = a.String()
 		}
 	}
-	memory := readHostMemory
+	memory := hostinfo.HostMemoryMB
 	if s.HostMemory != nil {
 		memory = s.HostMemory
 	}
@@ -150,45 +146,4 @@ func BuildStatus(s StatusSources) meshapi.NodeStatus {
 		}
 	}
 	return st
-}
-
-// readHostMemory is the v1 proxy's reading of /proc/meminfo: used is total
-// minus MemAvailable, the figure the RAM strip on /mesh renders.
-func readHostMemory() (totalMB, usedMB int64) {
-	f, err := os.Open("/proc/meminfo")
-	if err != nil {
-		return 0, 0
-	}
-	defer f.Close()
-	return parseMemInfo(f)
-}
-
-// parseMemInfo is v1's readHostMemory loop, split from the file so it can be
-// tested against a fixture.
-func parseMemInfo(r io.Reader) (totalMB, usedMB int64) {
-	var memTotal, memAvailable int64
-	scanner := bufio.NewScanner(r)
-	for scanner.Scan() {
-		line := scanner.Text()
-		if strings.HasPrefix(line, "MemTotal:") {
-			memTotal = parseMemInfoKB(line)
-		} else if strings.HasPrefix(line, "MemAvailable:") {
-			memAvailable = parseMemInfoKB(line)
-		}
-		if memTotal > 0 && memAvailable > 0 {
-			break
-		}
-	}
-	totalMB = memTotal / 1024
-	usedMB = (memTotal - memAvailable) / 1024
-	return totalMB, usedMB
-}
-
-func parseMemInfoKB(line string) int64 {
-	fields := strings.Fields(line)
-	if len(fields) < 2 {
-		return 0
-	}
-	v, _ := strconv.ParseInt(fields[1], 10, 64)
-	return v
 }

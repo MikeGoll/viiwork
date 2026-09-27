@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/janit/viiwork/v2/internal/engine"
+	"github.com/janit/viiwork/v2/internal/hostinfo"
 )
 
 func init() { engine.Register(New()) }
@@ -39,7 +40,7 @@ func New() *Engine {
 			IdleConnTimeout: 30 * time.Second,
 		}},
 		nproc:     runtime.NumCPU,
-		totalRAM:  readTotalRAMBytes,
+		totalRAM:  hostinfo.TotalRAMBytes,
 		modelSize: modelTotalSize,
 	}
 }

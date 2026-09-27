@@ -2,6 +2,7 @@ package node
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
 	"errors"
 	"fmt"
@@ -33,6 +34,7 @@ import (
 	"github.com/janit/viiwork/v2/internal/proxy"
 	"github.com/janit/viiwork/v2/internal/route"
 	"github.com/janit/viiwork/v2/internal/supervisor"
+	"github.com/janit/viiwork/v2/internal/update"
 	"github.com/janit/viiwork/v2/mesh"
 	"github.com/janit/viiwork/v2/mesh/capacity"
 	"github.com/janit/viiwork/v2/meshapi"
@@ -61,6 +63,8 @@ type Options struct {
 	// allowlist. nil = mesh.ReadMagicDNSSuffix.
 	MagicDNS         func(ctx context.Context, socket string) (string, error)
 	SupervisorTiming supervisor.Timing // test seam; zero fields take the defaults
+	// ReleaseKeys verifies staged releases. Test seam; nil = release.Keys().
+	ReleaseKeys []ed25519.PublicKey
 }
 
 // Node is one viiwork 2 node: its models, its mesh membership, its router and
@@ -104,6 +108,9 @@ type Node struct {
 	streamCtx    context.Context
 	streamCancel context.CancelFunc
 	handler      http.Handler
+	restart      chan struct{}
+	restartOnce  sync.Once
+	confirmer    *update.Confirmer
 }
 
 // members is the mesh's member list once it has started, else empty. The
@@ -270,6 +277,12 @@ func New(cfg *config.Config, o Options) (*Node, error) {
 	if err != nil {
 		return nil, err
 	}
+	n.restart = make(chan struct{})
+	updateSvc, confirmer, err := n.buildUpdate(cfg, aliasAuth)
+	if err != nil {
+		return nil, err
+	}
+	n.confirmer = confirmer
 	var executor *pipeline.Executor
 	if len(pipelines) > 0 {
 		// Steps call back into this node's own API. The host in the base URL
@@ -306,6 +319,7 @@ func New(cfg *config.Config, o Options) (*Node, error) {
 		GPUHistory: n.history, GPUBroadcaster: n.broadcaster,
 		GPUAvailable: func() bool { return n.collector != nil && n.collector.Available() },
 		PowerControl: n.powerCtl, CORS: cors, Health: n.health,
+		Update: updateSvc,
 	})
 	n.meshOpts = n.buildMeshOptions(cfg, keys)
 	return n, nil
@@ -528,6 +542,10 @@ func (n *Node) Run(ctx context.Context) error {
 		})
 	}
 
+	if n.confirmer != nil {
+		goLoop(func(ctx context.Context) { n.confirmer.Run(ctx, confirmEvery) })
+	}
+
 	var runErr error
 	if err := n.sup.Apply(cfg.Models); err != nil {
 		runErr = fmt.Errorf("applying models: %w", err)
@@ -535,6 +553,8 @@ func (n *Node) Run(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 		case runErr = <-m.Fatal():
+		case <-n.restart:
+			runErr = ErrRestart
 		}
 	}
 	n.shutdown(srv, m, cfg)

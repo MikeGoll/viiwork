@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -106,7 +107,15 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 // processGone is true when pid no longer exists or is a zombie. A zombie
 // counts as gone: inside the gorun container PID 1 is the go command, which
 // never reaps orphaned grandchildren.
+// processGone reports whether pid has exited or is a zombie. It must not
+// read /proc off Linux: there the file is always missing, and every "gone"
+// wait would pass without the process having been killed.
 func processGone(pid int) bool {
+	if runtime.GOOS != "linux" {
+		out, err := exec.Command("ps", "-o", "stat=", "-p", strconv.Itoa(pid)).Output()
+		stat := strings.TrimSpace(string(out))
+		return err != nil || stat == "" || strings.HasPrefix(stat, "Z")
+	}
 	data, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
 	if err != nil {
 		return true
@@ -118,4 +127,12 @@ func processGone(pid int) bool {
 	}
 	fields := strings.Fields(s[close+1:])
 	return len(fields) > 0 && fields[0] == "Z"
+}
+
+// Every "gone" wait is only as good as processGone's ability to see a live
+// process; a check that always said gone would make them all vacuous.
+func TestProcessGoneSeesALiveProcess(t *testing.T) {
+	if processGone(os.Getpid()) {
+		t.Fatal("processGone reports the running test process as gone")
+	}
 }

@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"strings"
 )
 
 // autoThreads is the --threads a backend gets when the operator set none:
@@ -71,23 +70,4 @@ func modelTotalSize(path string) (int64, error) {
 		return st.Size(), nil
 	}
 	return total, nil
-}
-
-// readTotalRAMBytes returns MemTotal from /proc/meminfo, or 0 if unreadable.
-func readTotalRAMBytes() int64 {
-	data, err := os.ReadFile("/proc/meminfo")
-	if err != nil {
-		return 0
-	}
-	for _, line := range strings.Split(string(data), "\n") {
-		if !strings.HasPrefix(line, "MemTotal:") {
-			continue
-		}
-		var kb int64
-		if _, err := fmt.Sscanf(line, "MemTotal: %d kB", &kb); err != nil {
-			return 0
-		}
-		return kb * 1024
-	}
-	return 0
 }

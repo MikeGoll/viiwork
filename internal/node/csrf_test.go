@@ -132,6 +132,10 @@ func TestCSRFControlWritesRequireJSON(t *testing.T) {
 		{http.MethodDelete, "/v1/aliases/x", ""},
 		{http.MethodPost, "/v1/aliases/x/revert", ""},
 		{http.MethodPost, "/v1/aliases/x/revert", "application/jsonp"},
+		// Update writes restart the node or change what it runs.
+		{http.MethodPost, meshapi.PathUpdateStage, "text/plain"},
+		{http.MethodPost, meshapi.PathUpdateActivate, "application/x-www-form-urlencoded"},
+		{http.MethodPost, meshapi.PathUpdateRollback, ""},
 	} {
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, csrfRequest(tc.method, tc.path, "", tc.ct, `{"host":"gb2","action":"off"}`))

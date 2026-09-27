@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -87,7 +88,13 @@ func TestProcessStopKillsGroup(t *testing.T) {
 		child, _ = strconv.Atoi(m[1])
 		return true
 	})
-	waitFor(t, "child in TreePIDs", func() bool { return slices.Contains(p.TreePIDs(), child) })
+	// TreePIDs reads /proc, so off Linux the precondition is only that the
+	// child is running; the group kill below is POSIX and tested everywhere.
+	if runtime.GOOS == "linux" {
+		waitFor(t, "child in TreePIDs", func() bool { return slices.Contains(p.TreePIDs(), child) })
+	} else if processGone(child) {
+		t.Fatalf("child %d is not running", child)
+	}
 	p.Stop(300 * time.Millisecond)
 	waitFor(t, "child gone", func() bool { return processGone(child) })
 }
@@ -127,6 +134,9 @@ func TestProcessLeaderExitKillsOrphanedWorker(t *testing.T) {
 }
 
 func TestProcessRSS(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("RSSMB reads /proc/<pid>/statm, which only Linux has; elsewhere it reads as absent")
+	}
 	out := &syncBuffer{}
 	p := startHelper(t, "sleep", out)
 	waitFor(t, "ready", func() bool { return strings.Contains(out.String(), "ready") })

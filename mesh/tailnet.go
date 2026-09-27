@@ -4,9 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net"
-	"net/http"
 	"net/netip"
 	"sort"
 )
@@ -50,38 +47,22 @@ const localAPIStatusURL = "http://local-tailscaled.sock/localapi/v0/status"
 // maxStatusBody bounds the LocalAPI response; a large tailnet is well under it.
 const maxStatusBody = 16 << 20
 
-// ReadTailnetStatus asks tailscaled's LocalAPI over its unix socket. This keeps
-// Tailscale's Go module out of the build. The request is bounded by ctx and
-// its connection closed after use.
+// ReadTailnetStatus asks tailscaled for this machine's tailnet status: over
+// its LocalAPI unix socket, or, when socket is the default and nothing listens
+// there, wherever this platform keeps it instead (readStatusDocument).
 //
 // ipnstate.Status and PeerStatus carry no json tags, so the keys are Go field
 // names: BackendState, Self, Peer (a map keyed by node key), HostName,
 // TailscaleIPs, Online.
 func ReadTailnetStatus(ctx context.Context, socket string) (TailnetStatus, error) {
-	client := &http.Client{Transport: &http.Transport{
-		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			var d net.Dialer
-			return d.DialContext(ctx, "unix", socket)
-		},
-		DisableKeepAlives: true,
-	}}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, localAPIStatusURL, nil)
+	body, err := readStatusDocument(ctx, socket, socket == DefaultTailnetSocket)
 	if err != nil {
 		return TailnetStatus{}, err
 	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return TailnetStatus{}, fmt.Errorf("tailscaled LocalAPI at %s: %w", socket, err)
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxStatusBody))
-	if err != nil {
-		return TailnetStatus{}, fmt.Errorf("tailscaled LocalAPI: reading status: %w", err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return TailnetStatus{}, fmt.Errorf("tailscaled LocalAPI answered HTTP %d: %s", resp.StatusCode, truncate(body, 200))
-	}
+	return decodeTailnetStatus(body)
+}
 
+func decodeTailnetStatus(body []byte) (TailnetStatus, error) {
 	type rawPeer struct {
 		HostName     string
 		TailscaleIPs []string

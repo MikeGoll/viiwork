@@ -79,5 +79,6 @@ func Defaults() Config {
 		},
 		Cost:          CostConfig{Timezone: "Europe/Helsinki"},
 		ViiworkParrot: ViiworkParrotConfig{API: DefaultParrotAPI},
+		Update:        UpdateConfig{Source: DefaultUpdateSource},
 	}
 }

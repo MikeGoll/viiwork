@@ -84,6 +84,30 @@ Two behaviours are worth knowing before you read a report:
 The per-host conversion procedure that strings these together is section 7 of
 [migrating-to-v2.md](migrating-to-v2.md).
 
+## Watching the mesh: `viiwork top`
+
+A live terminal view of the whole mesh, like nvtop for the fleet. Run it on any
+node, or anywhere that can reach one:
+
+```sh
+viiwork top                          # the local node on 127.0.0.1:8086
+viiwork top --node node-b:8086       # any member shows every member
+viiwork top --host node-b            # open one host's detail screen
+viiwork top --once | less            # one plain-text frame; the default when stdout is not a terminal
+docker exec -it viiwork viiwork top  # inside a container
+```
+
+The fleet screen has a row per host (GPU utilisation per card, VRAM, power,
+RAM, models busy/slots), model totals across the mesh (slots, busy, queued,
+the context floor, tokens per second), and the requests in flight. Enter on a
+host opens its GPUs with 60-sample history graphs and its backends. Keys:
+↑↓ host, enter detail, esc back, `m` sort models, `p` pause, `q` quit.
+
+It reads the same `/v1/mesh/stream` as `/mesh` and changes nothing. Remote
+hosts' GPU and backend figures refresh every 5 s, so their graphs are coarser
+than the entry node's. A value a host cannot report shows `—`. `NO_COLOR` is
+honoured.
+
 ## MCP server
 
 `viiwork-mcp` exposes the viiwork cluster as tools for any MCP-compatible AI

@@ -104,6 +104,34 @@ func TestValidate(t *testing.T) {
 		{name: "missing path", mutate: func(c *Config) { c.Models[0].Path = "" }, wantErr: "models[0].path"},
 		{name: "gpu shared across models", mutate: func(c *Config) { c.Models = append(c.Models, engineModel(testEngineGPU, "other", 2)) }, wantErr: "models[1].gpus: GPU 2 is already used by models[0] (granite-4.2-8b)"},
 		{name: "gpu listed twice", mutate: func(c *Config) { c.Models[0].GPUs = []int{2, 2} }, wantErr: "lists GPU 2 twice"},
+		// Apple Silicon has one GPU, so several models share it — but only
+		// under an explicit gpu.vendor: apple, never under auto, so a config
+		// validates the same wherever it is checked.
+		{name: "apple vendor", mutate: func(c *Config) { c.GPU.Vendor = VendorApple }},
+		{name: "apple shares gpu across models", mutate: func(c *Config) {
+			c.GPU.Vendor = VendorApple
+			c.Models = append(c.Models, engineModel(testEngineGPU, "other", 2), engineModel(testEngineCPU, "third", 2))
+		}},
+		{name: "apple still refuses gpu listed twice", mutate: func(c *Config) {
+			c.GPU.Vendor = VendorApple
+			c.Models = append(c.Models, engineModel(testEngineGPU, "other", 2, 2))
+		}, wantErr: "models[1].gpus lists GPU 2 twice"},
+		{name: "auto refuses a shared gpu", mutate: func(c *Config) {
+			c.GPU.Vendor = VendorAuto
+			c.Models = append(c.Models, engineModel(testEngineGPU, "other", 2))
+		}, wantErr: "GPU 2 is already used by models[0]"},
+		{name: "amd refuses a shared gpu", mutate: func(c *Config) {
+			c.GPU.Vendor = VendorAMD
+			c.Models = append(c.Models, engineModel(testEngineGPU, "other", 2))
+		}, wantErr: "GPU 2 is already used by models[0]"},
+		{name: "nvidia refuses a shared gpu", mutate: func(c *Config) {
+			c.GPU.Vendor = VendorNVIDIA
+			c.Models = append(c.Models, engineModel(testEngineGPU, "other", 2))
+		}, wantErr: "GPU 2 is already used by models[0]"},
+		{name: "none refuses a shared gpu", mutate: func(c *Config) {
+			c.GPU.Vendor = VendorNone
+			c.Models = append(c.Models, engineModel(testEngineGPU, "other", 2))
+		}, wantErr: "GPU 2 is already used by models[0]"},
 		{name: "negative gpu", mutate: func(c *Config) { c.Models[0].GPUs = []int{-1} }, wantErr: "is not a GPU index"},
 		{name: "gpus not divisible", mutate: func(c *Config) { c.Models[0].GPUs = []int{0, 1, 2}; c.Models[0].GPUsPerBackend = 2 }, wantErr: "not divisible"},
 		{name: "llamacpp on cpu", mutate: func(c *Config) { c.Models[0].GPUs = nil }},

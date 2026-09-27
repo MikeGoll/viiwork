@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -19,6 +18,16 @@ import (
 // /proc/net/route. Among several default routes (a wired and a wireless
 // link, say) the lowest metric wins, as it does for the kernel.
 func DefaultRouteIPv4(routeTable []byte, ifaceAddrs func(name string) ([]netip.Addr, error)) (netip.Addr, error) {
+	iface, err := procRouteIface(routeTable)
+	if err != nil {
+		return netip.Addr{}, err
+	}
+	return ifaceIPv4(iface, ifaceAddrs)
+}
+
+// procRouteIface names the interface holding the lowest-metric IPv4 default
+// route in a Linux /proc/net/route table.
+func procRouteIface(routeTable []byte) (string, error) {
 	iface, found := "", false
 	best := int64(-1)
 	sc := bufio.NewScanner(bytes.NewReader(routeTable))
@@ -47,8 +56,28 @@ func DefaultRouteIPv4(routeTable []byte, ifaceAddrs func(name string) ([]netip.A
 		}
 	}
 	if !found {
-		return netip.Addr{}, errors.New("no IPv4 default route in /proc/net/route")
+		return "", errors.New("no IPv4 default route in /proc/net/route")
 	}
+	return iface, nil
+}
+
+// parseRouteGetDefault names the interface in the output of macOS's
+// `route -n get default`, whose "interface:" line is the only one read. Other
+// lines and their order are not relied on.
+func parseRouteGetDefault(out []byte) (string, error) {
+	for _, line := range strings.Split(string(out), "\n") {
+		key, value, ok := strings.Cut(strings.TrimSpace(line), ":")
+		if ok && key == "interface" {
+			if iface := strings.TrimSpace(value); iface != "" {
+				return iface, nil
+			}
+		}
+	}
+	return "", errors.New("no IPv4 default route in `route -n get default`")
+}
+
+// ifaceIPv4 is the first usable IPv4 of the named interface.
+func ifaceIPv4(iface string, ifaceAddrs func(name string) ([]netip.Addr, error)) (netip.Addr, error) {
 	addrs, err := ifaceAddrs(iface)
 	if err != nil {
 		return netip.Addr{}, fmt.Errorf("default route interface %s: %w", iface, err)
@@ -62,9 +91,25 @@ func DefaultRouteIPv4(routeTable []byte, ifaceAddrs func(name string) ([]netip.A
 	return netip.Addr{}, fmt.Errorf("default route interface %s has no usable IPv4 address", iface)
 }
 
+// LANAddress is this machine's default-route IPv4: the address a LAN mesh
+// advertises. The setup wizard browses mDNS from it.
+func LANAddress() (netip.Addr, error) {
+	read, parse := routeSource()
+	routes, err := read()
+	if err != nil {
+		return netip.Addr{}, err
+	}
+	iface, err := parse(routes)
+	if err != nil {
+		return netip.Addr{}, err
+	}
+	return ifaceIPv4(iface, interfaceAddrs)
+}
+
 // advertiseDeps are resolveAdvertise's inputs, injectable for tests.
 type advertiseDeps struct {
 	readRoutes func() ([]byte, error)
+	routeIface func(routes []byte) (string, error) // parses what readRoutes read
 	ifaceAddrs func(name string) ([]netip.Addr, error)
 	tailnet    func(ctx context.Context) (TailnetStatus, error)
 	poll       time.Duration
@@ -73,12 +118,14 @@ type advertiseDeps struct {
 	logf       func(format string, args ...any)
 }
 
-// defaultAdvertiseDeps are the production inputs: the kernel route table, the
-// host's interfaces, the LocalAPI on socket, and the tailnet wait of Decision 9
+// defaultAdvertiseDeps are the production inputs: the default route as this
+// OS reports it (routeSource), the host's interfaces, the LocalAPI on socket, and the tailnet wait of Decision 9
 // (poll every 2 s, log at most every 10 s, give up after 5 minutes).
 func defaultAdvertiseDeps(socket string, logf func(format string, args ...any)) advertiseDeps {
+	readRoutes, routeIface := routeSource()
 	return advertiseDeps{
-		readRoutes: func() ([]byte, error) { return os.ReadFile("/proc/net/route") },
+		readRoutes: readRoutes,
+		routeIface: routeIface,
 		ifaceAddrs: interfaceAddrs,
 		tailnet: func(ctx context.Context) (TailnetStatus, error) {
 			return ReadTailnetStatus(ctx, socket)
@@ -125,7 +172,11 @@ func resolveAdvertise(ctx context.Context, network string, override netip.Addr, 
 		if err != nil {
 			return netip.Addr{}, fmt.Errorf("reading the route table: %w", err)
 		}
-		return DefaultRouteIPv4(routes, d.ifaceAddrs)
+		iface, err := d.routeIface(routes)
+		if err != nil {
+			return netip.Addr{}, err
+		}
+		return ifaceIPv4(iface, d.ifaceAddrs)
 	case NetworkTailnet:
 		return waitTailnetIPv4(ctx, d)
 	}

@@ -17,7 +17,9 @@ import (
 
 // DefaultTailnetSocket is where tailscaled's LocalAPI listens on Linux. A
 // tailnet mesh needs a socket to learn its own address even when tailnet
-// discovery is off; this one is used when Options names none.
+// discovery is off; this one is used when Options names none. On macOS, where
+// it does not exist, the default falls back to the Homebrew socket or the
+// tailscale CLI (readStatusDocument).
 const DefaultTailnetSocket = "/var/run/tailscale/tailscaled.sock"
 
 const (

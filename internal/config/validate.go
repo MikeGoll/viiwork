@@ -115,9 +115,9 @@ func (c *Config) Validate(lookupEnv func(string) (string, bool)) error {
 		return err
 	}
 	switch c.GPU.Vendor {
-	case VendorAuto, VendorNVIDIA, VendorAMD, VendorNone:
+	case VendorAuto, VendorNVIDIA, VendorAMD, VendorApple, VendorNone:
 	default:
-		return fmt.Errorf("gpu.vendor %q must be one of: auto, nvidia, amd, none", c.GPU.Vendor)
+		return fmt.Errorf("gpu.vendor %q must be one of: auto, nvidia, amd, apple, none", c.GPU.Vendor)
 	}
 	if c.GPU.PowerLimitWatts < 0 {
 		return fmt.Errorf("gpu.power_limit_watts must be >= 0")
@@ -146,6 +146,9 @@ func (c *Config) Validate(lookupEnv func(string) (string, bool)) error {
 		}
 	}
 	if err := c.validateParrot(); err != nil {
+		return err
+	}
+	if err := c.validateUpdate(); err != nil {
 		return err
 	}
 	return c.validateModels()
@@ -297,6 +300,15 @@ func (c *Config) validateModels() error {
 			if j, used := owner[g]; used {
 				if j == i {
 					return fmt.Errorf("%s.gpus lists GPU %d twice", p, g)
+				}
+				// An Apple Silicon host has one GPU, so its models share it
+				// and each one's concurrency comes from parallel. Only an
+				// explicit vendor relaxes the rule, never auto on darwin:
+				// validation stays a function of the YAML alone, so a Mac's
+				// config checks the same from any machine.
+				if c.GPU.Vendor == VendorApple {
+					owner[g] = i
+					continue
 				}
 				return fmt.Errorf("%s.gpus: GPU %d is already used by models[%d] (%s)", p, g, j, c.Models[j].Name)
 			}

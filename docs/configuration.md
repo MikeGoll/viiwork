@@ -219,6 +219,19 @@ viiwork_parrot:
 from another machine. A change needs a restart: `viiwork_parrot` is captured at
 start, and `SIGHUP` names it among the sections it did not apply.
 
+## Rolling updates (`update`)
+
+```yaml
+update:
+  enabled: false        # opt in to stage/activate/rollback over /v1/update
+  source: https://github.com/janit/viiwork/releases/download
+  confirm_timeout: 0    # 0: the sum of the models' startup timeouts + 10m
+```
+
+A request names a version; the node builds the URL from `source` itself.
+`source` must be https (http only for a loopback test server). Changing any of
+these needs a restart. See docs/releases.md.
+
 ## Environment variables
 
 | Variable | Purpose |
