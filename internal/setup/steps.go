@@ -29,6 +29,7 @@ import (
 	"github.com/janit/viiwork/v2/internal/setup/probe"
 	"github.com/janit/viiwork/v2/internal/setup/prompt"
 	"github.com/janit/viiwork/v2/internal/setup/render"
+	"gopkg.in/yaml.v3"
 )
 
 func preflight(ctx context.Context, h Host, configPath string) error {
@@ -144,6 +145,11 @@ func chooseModels(_ context.Context, h Host, p prompt.Prompter, s *state) error 
 	if s.vendor == string(gpu.VendorApple) {
 		suggest = []string{filepath.Join(h.Home, "models"), "/models"}
 	}
+	// A host whose models came through viiwork-parrot keeps them in its
+	// data_dir, which none of the usual places are.
+	if d := parrotDataDir(h); d != "" {
+		suggest = append(suggest, d)
+	}
 	for _, d := range suggest {
 		if fi, err := os.Stat(h.path(d)); err == nil && fi.IsDir() {
 			def = d
@@ -154,6 +160,13 @@ func chooseModels(_ context.Context, h Host, p prompt.Prompter, s *state) error 
 		dir, err := p.Ask("Models directory", def)
 		if err != nil {
 			return err
+		}
+		if dir == "" {
+			p.Say("Enter the directory that holds your GGUF model files, for example %s.", filepath.Join(h.Home, "models"))
+			continue
+		}
+		if dir == "~" || strings.HasPrefix(dir, "~/") {
+			dir = filepath.Join(h.Home, strings.TrimPrefix(dir, "~"))
 		}
 		// The Linux compose file mounts it, and Compose expands a '$'.
 		if !filepath.IsAbs(dir) || strings.ContainsAny(dir, ":\"\\\n\r") || (s.vendor != string(gpu.VendorApple) && strings.Contains(dir, "$")) {
@@ -193,6 +206,56 @@ func chooseModels(_ context.Context, h Host, p prompt.Prompter, s *state) error 
 		s.modelsDir = dir
 		return nil
 	}
+}
+
+// parrotDataDir is viiwork-parrot's data_dir on this host, from its config
+// in the user's ~/.config (a Mac) or /etc (Linux); "" when there is none.
+func parrotDataDir(h Host) string {
+	dirs := []string{filepath.Join(h.Home, ".config", "viiwork-parrot")}
+	if h.GOOS == "linux" {
+		dirs = append(dirs, "/etc/viiwork-parrot")
+	}
+	var files []string
+	for _, dir := range dirs {
+		found, _ := filepath.Glob(filepath.Join(h.path(dir), "*.yaml"))
+		files = append(files, found...)
+	}
+	for _, f := range files {
+		data, err := os.ReadFile(f)
+		if err != nil {
+			continue
+		}
+		var doc any
+		if yaml.Unmarshal(data, &doc) != nil {
+			continue
+		}
+		if d := findKey(doc, "data_dir"); filepath.IsAbs(d) {
+			return filepath.Clean(d)
+		}
+	}
+	return ""
+}
+
+// findKey is the first string value of key anywhere in a decoded YAML document.
+func findKey(doc any, key string) string {
+	switch v := doc.(type) {
+	case map[string]any:
+		if s, ok := v[key].(string); ok {
+			return s
+		}
+		for _, child := range v {
+			if s := findKey(child, key); s != "" {
+				return s
+			}
+		}
+	case []any:
+		for _, child := range v {
+			if s := findKey(child, key); s != "" {
+				return s
+			}
+		}
+	}
+	return ""
 }
 
 var modelNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)

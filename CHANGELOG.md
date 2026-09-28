@@ -1,5 +1,34 @@
 # Changelog
 
+## v2.6.0-beta4
+
+### What the first Mac install found
+
+beta3's `viiwork init` installed a MacBook (M3 Max, App Store Tailscale,
+models from viiwork-parrot). It joined the fleet with a code, from a host
+other than the first, and served granite. It reused the llama.cpp build
+already on the Mac and left it unclaimed, as designed. It needed one manual
+fix on the way, and these came out of it:
+
+- **A Mac node finds its tailnet under launchd.** The App Store Tailscale
+  binary acts as its CLI only when `TERM` is set. A LaunchAgent has no
+  `TERM`, so the binary tried to start its GUI and printed "The Tailscale GUI
+  failed to start" instead of the JSON status. The node then waited for its
+  tailnet address, and launchd restarted it every few minutes. The node now
+  runs that CLI with `TERM=dumb` when its own environment has none. A
+  hand-built Mac node worked only because a shell wrapper on its `PATH`
+  happened to supply the missing piece.
+- **A status that is not JSON is quoted in the log.** "invalid character 'T'"
+  alone hid the message above.
+- **The wizard's wait notices a restart loop.** A node that keeps exiting
+  answers its API after every start, so the wait held for its whole budget.
+  Uptime going backwards between polls now ends the wait with the reason.
+- **The models-directory prompt:**
+  - it suggests viiwork-parrot's `data_dir` when parrot is set up;
+  - an empty answer asks for the directory, instead of reporting a malformed
+    path;
+  - `~` means the home directory.
+
 ## v2.6.0-beta3
 
 ### What the first real install found

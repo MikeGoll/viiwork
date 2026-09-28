@@ -349,3 +349,44 @@ func TestJoinCodeReadsTheInstalledPlist(t *testing.T) {
 		t.Errorf("%+v, %v", c, err)
 	}
 }
+
+// Found on ruutana: its models were viiwork-parrot's, so no suggested
+// directory existed, an empty answer got a message about path syntax, and
+// "~/…" was refused. Parrot's data_dir is suggested now, an empty answer is
+// asked for plainly, and ~ is the home directory.
+func TestModelsPromptOnAParrotMac(t *testing.T) {
+	m := newMac(t)
+	// The model lives only in parrot's store, as on ruutana.
+	os.RemoveAll(filepath.Join(m.home, "models"))
+	store := filepath.Join(m.home, ".local", "share", "viiwork-parrot", "models")
+	writeGGUF(t, filepath.Join(store, "alpha-8b.gguf"), "llama", 7<<30)
+	os.MkdirAll(filepath.Join(m.home, ".config", "viiwork-parrot"), 0o755)
+	os.WriteFile(filepath.Join(m.home, ".config", "viiwork-parrot", "viiwork-parrot.yaml"),
+		[]byte("node:\n  data_dir: "+store+"\n  state_dir: /elsewhere\n"), 0o644)
+
+	p := prompt.Script(m.out, "")
+	s := &state{vendor: "apple"}
+	if err := chooseModels(context.Background(), m.host, p, s); !errors.Is(err, prompt.ErrAbort) {
+		t.Fatalf("err %v", err)
+	}
+	if !strings.Contains(m.out.String(), "Models directory ["+store+"]") {
+		t.Errorf("parrot's directory was not suggested:\n%s", m.out)
+	}
+
+	// With nothing to suggest, an empty answer is asked for, not refused as a
+	// malformed path; then "~/…" is expanded.
+	os.Remove(filepath.Join(m.home, ".config", "viiwork-parrot", "viiwork-parrot.yaml"))
+	m.out.Reset()
+	s = &state{vendor: "apple"}
+	p = prompt.Script(m.out, "", "~/.local/share/viiwork-parrot/models", "all", "")
+	if err := chooseModels(context.Background(), m.host, p, s); err != nil {
+		t.Fatalf("%v\n%s", err, m.out)
+	}
+	out := m.out.String()
+	if !strings.Contains(out, "Enter the directory that holds your GGUF model files") || strings.Contains(out, "without ':'") {
+		t.Errorf("empty answer:\n%s", out)
+	}
+	if s.modelsDir != store || len(s.models) != 1 {
+		t.Errorf("dir %q models %d", s.modelsDir, len(s.models))
+	}
+}

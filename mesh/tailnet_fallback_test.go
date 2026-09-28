@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/netip"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -136,5 +137,42 @@ func TestDarwinStatusChain(t *testing.T) {
 		if !slices.Equal(got.sockets, tc.want.sockets) || !slices.Equal(got.runs, tc.want.runs) {
 			t.Errorf("%s: tried sockets %v runs %v, want %+v", tc.name, got.sockets, got.runs, tc.want)
 		}
+	}
+}
+
+// The App Store Tailscale binary runs as its CLI only when TERM is set; a
+// LaunchAgent's environment has none, so the binary tried to start its GUI
+// and printed "The Tailscale GUI failed to start" instead of JSON (found on a
+// Mac installed by viiwork init). The command gets TERM whenever the node's
+// environment lacks it, and keeps the node's own value otherwise.
+func TestStatusCommandHasATerminalType(t *testing.T) {
+	env, err := exec.LookPath("env")
+	if err != nil {
+		t.Skip(err)
+	}
+	t.Setenv("TERM", "")
+	os.Unsetenv("TERM")
+	out, err := runCommand(context.Background(), env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains("\n"+string(out), "\nTERM=dumb\n") {
+		t.Errorf("no TERM for the CLI:\n%s", out)
+	}
+	t.Setenv("TERM", "xterm-256color")
+	out, _ = runCommand(context.Background(), env)
+	if !strings.Contains("\n"+string(out), "\nTERM=xterm-256color\n") || strings.Contains(string(out), "TERM=dumb") {
+		t.Errorf("the node's own TERM was not kept:\n%s", out)
+	}
+}
+
+// A status that is not JSON is quoted in the error, so the node's log shows
+// what Tailscale said: "invalid character 'T'" alone hid "The Tailscale GUI
+// failed to start" for a whole debugging session.
+func TestNonJSONStatusIsQuoted(t *testing.T) {
+	api := startLocalAPI(t, 200, "The Tailscale GUI failed to start: The operation couldn't be completed.")
+	_, err := ReadTailnetStatus(context.Background(), api.socket)
+	if err == nil || !strings.Contains(err.Error(), "The Tailscale GUI failed to start") {
+		t.Errorf("err = %v", err)
 	}
 }

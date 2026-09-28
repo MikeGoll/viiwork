@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -203,5 +204,28 @@ func TestWaitUpAcceptsAnyAnswer(t *testing.T) {
 	srv.Close()
 	if err := l.WaitUp(context.Background(), 1500*time.Millisecond); err == nil {
 		t.Error("no node, yet up")
+	}
+}
+
+// A node that keeps restarting (launchd KeepAlive, restart: always) answers
+// its API after every start, so a wait that only looked for healthy models
+// waited out its whole budget (found on a Mac whose node could not read its
+// tailnet address). Uptime going backwards between polls ends the wait.
+func TestWaitModelsStopsOnARestartLoop(t *testing.T) {
+	var n atomic.Int32
+	uptimes := []int64{30, 40, 3}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		i := min(int(n.Add(1))-1, len(uptimes)-1)
+		json.NewEncoder(w).Encode(meshapi.NodeStatus{Node: "mac", UptimeS: uptimes[i]})
+	}))
+	defer srv.Close()
+	node := Node{HTTP: srv.Client(), API: strings.TrimPrefix(srv.URL, "http://")}
+	start := time.Now()
+	err := node.WaitModels(context.Background(), []string{"m"}, 30*time.Second, 10*time.Millisecond)
+	if err == nil || !strings.Contains(err.Error(), "restarted") {
+		t.Errorf("err %v", err)
+	}
+	if time.Since(start) > 5*time.Second {
+		t.Errorf("waited %v", time.Since(start))
 	}
 }

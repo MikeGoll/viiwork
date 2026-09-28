@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"os/exec"
 )
 
@@ -107,6 +108,14 @@ func (s darwinStatusSource) read(ctx context.Context) ([]byte, error) {
 	return body, nil
 }
 
+// runCommand runs the Tailscale CLI. The App Store app's binary acts as its
+// CLI only when TERM is set; without it (a LaunchAgent's environment) it tries
+// to start the GUI and prints "The Tailscale GUI failed to start" instead of
+// JSON. So the command gets TERM=dumb when the node has none.
 func runCommand(ctx context.Context, name string, args ...string) ([]byte, error) {
-	return exec.CommandContext(ctx, name, args...).Output()
+	cmd := exec.CommandContext(ctx, name, args...)
+	if _, ok := os.LookupEnv("TERM"); !ok {
+		cmd.Env = append(os.Environ(), "TERM=dumb")
+	}
+	return cmd.Output()
 }

@@ -74,7 +74,9 @@ func decodeTailnetStatus(body []byte) (TailnetStatus, error) {
 		Peer         map[string]rawPeer
 	}
 	if err := json.Unmarshal(body, &raw); err != nil {
-		return TailnetStatus{}, fmt.Errorf("tailscaled LocalAPI: decoding status: %w", err)
+		// Quote what came back: a Tailscale CLI that prints a message instead
+		// of JSON says why in it.
+		return TailnetStatus{}, fmt.Errorf("tailscaled LocalAPI: decoding status: %w (got %q)", err, truncate(body, 120))
 	}
 	convert := func(p rawPeer) TailnetPeer {
 		out := TailnetPeer{HostName: p.HostName, Online: p.Online}

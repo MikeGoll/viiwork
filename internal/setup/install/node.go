@@ -68,9 +68,17 @@ func (n Node) WaitUp(ctx context.Context, timeout time.Duration) error {
 func (n Node) WaitModels(ctx context.Context, names []string, timeout, poll time.Duration) error {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	var lastUptime int64 = -1
 	for {
 		pending := names
 		if st, err := n.Status(ctx); err == nil {
+			// Uptime going backwards is a restart: a node in a restart loop
+			// (launchd KeepAlive, restart: always) answers after every start,
+			// and would otherwise hold the wait for its whole budget.
+			if lastUptime >= 0 && st.UptimeS < lastUptime {
+				return fmt.Errorf("the node restarted (uptime %d s, then %d s): it is exiting; its log says why", lastUptime, st.UptimeS)
+			}
+			lastUptime = st.UptimeS
 			pending = nil
 			for _, name := range names {
 				ready, dead := modelState(st, name)
