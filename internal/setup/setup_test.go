@@ -190,6 +190,9 @@ func TestNewSecuredMesh(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if !strings.Contains(string(mustRead(t, f.path(install.ManifestFile))), `"volumes": []`) {
+		t.Error(`the manifest's compose volumes are not [] (beta2 wrote null)`)
+	}
 	if !slices.Equal(m.Files, []string{install.ConfigFile, install.EnvFile, install.ComposeFile}) ||
 		m.Binary != install.BinaryPath || !slices.Equal(m.Images, []string{"ghcr.io/janit/viiwork-llamacpp-cuda:v2.6.0"}) ||
 		!slices.Equal(m.ModelDirs, []string{"/models"}) || m.Compose == nil {

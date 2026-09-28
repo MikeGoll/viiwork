@@ -84,7 +84,7 @@ func TestCommandSingleGPUExact(t *testing.T) {
 	if cmd.Path != "llama-server" {
 		t.Errorf("Path = %q", cmd.Path)
 	}
-	want := strings.Fields("--model /models/granite-4.2-8b-Q8_0.gguf --alias granite-4.2-8b --host 127.0.0.1 --port 40001 --ctx-size 32768 --parallel 2 --n-gpu-layers -1 --slots --log-disable --threads 16 --jinja")
+	want := strings.Fields("--model /models/granite-4.2-8b-Q8_0.gguf --alias granite-4.2-8b --host 127.0.0.1 --port 40001 --ctx-size 32768 --parallel 2 --n-gpu-layers -1 --slots --log-verbosity 1 --threads 16 --jinja")
 	if !slices.Equal(cmd.Args, want) {
 		t.Errorf("Args =\n %v\nwant\n %v", cmd.Args, want)
 	}
@@ -289,5 +289,27 @@ func TestCommandAcceptsAFile(t *testing.T) {
 	}
 	if _, err := testEngine(8, 64*gib, 0, nil).Command(engine.Spec{Name: "file", Path: f, Port: 41000, Context: 512, Parallel: 1, Backends: 1}); err != nil {
 		t.Fatalf("a file must be accepted: %v", err)
+	}
+}
+
+// llama-server's own errors must reach the node's log: with --log-disable a
+// backend that cannot load (found on teddy: a chat template llama.cpp could
+// not parse) died as "dead" with no reason anywhere. Verbosity 1 keeps errors
+// and drops the per-request info lines the load poll would otherwise flood.
+func TestBackendErrorsAreLogged(t *testing.T) {
+	m := parseModel(t, `  - name: m
+    engine: llamacpp
+    path: /models/m.gguf
+    gpus: [0]
+    context: 8192
+    parallel: 1
+`)
+	args := command(t, testEngine(16, 247*gib, 9*gib, nil), m, 0).Args
+	if slices.Contains(args, "--log-disable") {
+		t.Errorf("--log-disable silences the backend's errors: %v", args)
+	}
+	i := slices.Index(args, "--log-verbosity")
+	if i < 0 || i+1 >= len(args) || args[i+1] != "1" {
+		t.Errorf("want --log-verbosity 1 (errors only): %v", args)
 	}
 }

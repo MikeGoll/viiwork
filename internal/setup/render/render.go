@@ -143,12 +143,15 @@ func MeshEnv(secret []byte) []byte {
 
 // Compose is the Docker Compose file's inputs. Every path is the host's.
 type Compose struct {
-	Image      string
-	ModelsDir  string // mounted read-only at /models
-	ConfigFile string
-	EnvFile    string // empty for an open mesh
-	StateDir   string
-	Tailscale  bool // mount tailscaled's socket directory
+	Image     string
+	ModelsDir string // mounted read-only at /models
+	// ConfigDir is mounted read-only at /etc/viiwork, as a directory: a
+	// single-file bind mount pins the inode, so an edit saved as a new file
+	// would stay invisible to the node's SIGHUP reload.
+	ConfigDir string
+	EnvFile   string // empty for an open mesh
+	StateDir  string
+	Tailscale bool // mount tailscaled's socket directory
 	// CDI names the cards as CDI devices (nvidia.com/gpu=all), which needs
 	// the NVIDIA Container Toolkit's CDI spec but no runtime registered with
 	// Docker. Otherwise the nvidia device driver is requested.
@@ -187,7 +190,7 @@ services:
 {{- end}}
     volumes:
       - "{{.ModelsDir}}:/models:ro"
-      - "{{.ConfigFile}}:/etc/viiwork/viiwork.yaml:ro"
+      - "{{.ConfigDir}}:/etc/viiwork:ro"
       - "{{.StateDir}}:/var/lib/viiwork"
 {{- if .Tailscale}}
       - "/var/run/tailscale:/var/run/tailscale:ro"
@@ -211,7 +214,7 @@ services:
 // absolute, or holds a colon, a quote or a line break, is refused: it would
 // break the volume syntax. So is a '$', which Compose expands as a variable.
 func ComposeFile(c Compose) ([]byte, error) {
-	paths := []string{c.ModelsDir, c.ConfigFile, c.StateDir}
+	paths := []string{c.ModelsDir, c.ConfigDir, c.StateDir}
 	if c.EnvFile != "" {
 		paths = append(paths, c.EnvFile)
 	}

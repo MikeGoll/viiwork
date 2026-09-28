@@ -93,9 +93,11 @@ func (e *Engine) Command(s engine.Spec) (engine.Command, error) {
 	} else {
 		args = append(args, "--n-gpu-layers", "-1")
 	}
-	// --slots enables /slots, which Load reads; --log-disable stops
-	// per-request logging, which the once-a-second load poll would flood.
-	args = append(args, "--slots", "--log-disable")
+	// --slots enables /slots, which Load reads. --log-verbosity 1 keeps
+	// llama-server's errors (a model that cannot load says why, in the node's
+	// log) and drops its info lines: the per-request ones the once-a-second
+	// load poll would flood. --log-disable silenced the errors too.
+	args = append(args, "--slots", "--log-verbosity", "1")
 
 	if len(s.GPUs) >= 2 {
 		mode := o.SplitMode

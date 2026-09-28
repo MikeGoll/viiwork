@@ -108,12 +108,26 @@ on the new machine and paste the code at the mesh question. In an open mesh,
 ## When the node does not come up
 
 The files are kept. The wizard prints each backend that is not healthy, with
-its status and phase, followed by the container's last log lines. The most
-common cause is a model that does not fit in memory at the chosen context: edit
-the `context` or `gpus` in `viiwork.yaml`, then retry:
+its status and phase, followed by the container's last log lines. llama.cpp's
+own errors are in those lines: `sudo docker logs viiwork` shows them all.
+
+- **The model does not fit** at the chosen context. Lower `context`, or give
+  it more `gpus`, in `/etc/viiwork/viiwork.yaml`.
+- **The model needs llama.cpp flags.** Some models' chat templates cannot be
+  parsed by llama.cpp's default (Jinja) handling. The log then says `chat
+  template parsing error` and suggests `--no-jinja`. The wizard cannot know
+  this from a model's header. Add the model's flags to its entry, for example
+  for TranslateGemma:
+
+  ```yaml
+      args: ["--no-jinja", "--chat-template", "gemma"]
+  ```
+
+After editing, reload the node, or retry the start:
 
 ```sh
-sudo docker compose -f /etc/viiwork/docker-compose.yaml -p viiwork up -d
+sudo docker kill -s HUP viiwork                                        # reload the config
+sudo docker compose -f /etc/viiwork/docker-compose.yaml -p viiwork up -d   # start it again
 ```
 
 To start over, `sudo viiwork uninstall` removes everything in the manifest and

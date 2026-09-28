@@ -1,5 +1,31 @@
 # Changelog
 
+## v2.6.0-beta3
+
+### What the first real install found
+
+beta2's `viiwork init` installed teddy, which has three RTX A4000 cards and
+Docker reaching them through CDI. It joined the fleet with a join code and
+served TranslateGemma, but only after three fixes, all found on the way:
+
+- **A backend that cannot load now says why.** The llamacpp engine started
+  llama-server with `--log-disable`, which silenced its errors too, so a model
+  whose chat template llama.cpp could not parse died as `dead` with no reason
+  anywhere. Backends now run with `--log-verbosity 1`: errors reach the node's
+  log, and the per-request info lines stay out.
+- **Config edits reach the node.** The generated compose file mounted
+  `viiwork.yaml` as a single file. That pins the inode, so an edit saved as a
+  new file (`sed -i`, many editors) stayed invisible, and a SIGHUP reloaded
+  the old config. The wizard now mounts `/etc/viiwork` as a directory, and so
+  does `configs/docker-compose.v2.example.yaml`. Existing hand-built hosts
+  keep the old mount until their compose file is edited.
+- **Models that need llama.cpp flags are documented.** A chat template that
+  llama.cpp's Jinja handling rejects needs `args` such as
+  `["--no-jinja", "--chat-template", "gemma"]`. The wizard cannot see this in
+  a model's header, so `docs/setup.md` says what the log shows and what to
+  add.
+- The manifest records the compose project's volumes as `[]`, not `null`.
+
 ## v2.6.0-beta2
 
 ### Found on the first real host

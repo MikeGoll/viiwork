@@ -115,7 +115,7 @@ func TestMeshEnv(t *testing.T) {
 
 func compose() Compose {
 	return Compose{Image: "ghcr.io/janit/viiwork-llamacpp-cuda:v2.6.0", ModelsDir: "/srv/my models",
-		ConfigFile: "/etc/viiwork/viiwork.yaml", EnvFile: "/etc/viiwork/mesh.env", StateDir: "/var/lib/viiwork", Tailscale: true}
+		ConfigDir: "/etc/viiwork", EnvFile: "/etc/viiwork/mesh.env", StateDir: "/var/lib/viiwork", Tailscale: true}
 }
 
 func TestComposeFile(t *testing.T) {
@@ -152,7 +152,7 @@ func TestComposeFile(t *testing.T) {
 	if doc.Name != "viiwork" || s.Image != compose().Image || s.Restart != "always" || s.Network != "host" || s.PID != "host" || s.StopGrace != "90s" {
 		t.Errorf("service %+v", s)
 	}
-	want := []string{"/srv/my models:/models:ro", "/etc/viiwork/viiwork.yaml:/etc/viiwork/viiwork.yaml:ro", "/var/lib/viiwork:/var/lib/viiwork", "/var/run/tailscale:/var/run/tailscale:ro"}
+	want := []string{"/srv/my models:/models:ro", "/etc/viiwork:/etc/viiwork:ro", "/var/lib/viiwork:/var/lib/viiwork", "/var/run/tailscale:/var/run/tailscale:ro"}
 	if strings.Join(s.Volumes, "|") != strings.Join(want, "|") {
 		t.Errorf("volumes %q", s.Volumes)
 	}
@@ -227,5 +227,22 @@ func TestComposeFileCDI(t *testing.T) {
 	s := doc.Services["viiwork"]
 	if len(s.Devices) != 1 || s.Devices[0] != "nvidia.com/gpu=all" || s.Deploy != nil {
 		t.Errorf("devices %q deploy %v\n%s", s.Devices, s.Deploy, data)
+	}
+}
+
+// The config is mounted by its directory, never as a single file: a file
+// bind mount pins the inode, so an edit saved as a new file (sed -i, many
+// editors) stays invisible to the node, and a SIGHUP reloads the old config
+// (found on teddy, the first real install).
+func TestComposeMountsTheConfigDirectory(t *testing.T) {
+	data, err := ComposeFile(compose())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "viiwork.yaml:/etc") {
+		t.Errorf("a single-file config mount:\n%s", data)
+	}
+	if !strings.Contains(string(data), `"/etc/viiwork:/etc/viiwork:ro"`) {
+		t.Errorf("no directory mount:\n%s", data)
 	}
 }

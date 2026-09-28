@@ -541,13 +541,13 @@ func writeAndStart(ctx context.Context, h Host, p prompt.Prompter, s *state) err
 	}
 	m := install.Manifest{InstalledBy: h.Version, ModelDirs: []string{s.modelsDir}}
 	if s.image != "" {
-		compose, err := render.ComposeFile(render.Compose{Image: s.image, ModelsDir: s.modelsDir, ConfigFile: install.ConfigFile,
+		compose, err := render.ComposeFile(render.Compose{Image: s.image, ModelsDir: s.modelsDir, ConfigDir: install.ConfigDir,
 			EnvFile: envFile, StateDir: install.StateDir, Tailscale: s.network == config.NetworkTailnet, CDI: s.cdi})
 		if err != nil {
 			return err
 		}
 		files = append(files, install.File{Path: install.ComposeFile, Mode: 0o644, Data: compose})
-		m.Compose = &install.Compose{File: install.ComposeFile, Project: install.Project}
+		m.Compose = &install.Compose{File: install.ComposeFile, Project: install.Project, Volumes: []string{}}
 		m.Images = []string{s.image}
 	}
 

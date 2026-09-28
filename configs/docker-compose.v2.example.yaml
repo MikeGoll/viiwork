@@ -36,7 +36,10 @@ services:
 
     volumes:
       - /models:/models:ro
-      - ./viiwork.yaml:/etc/viiwork/viiwork.yaml:ro
+      # The directory holding viiwork.yaml, not the file: a single-file bind
+      # mount pins the inode, so an edit saved as a new file (sed -i, many
+      # editors) stays invisible and `docker kill -s HUP` reloads the old one.
+      - .:/etc/viiwork:ro
       # The alias table lives here and must survive recreating the container.
       # A host directory rather than a named volume, which any
       # `docker volume prune` deletes while the node is stopped.
