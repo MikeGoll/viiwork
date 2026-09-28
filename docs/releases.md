@@ -20,7 +20,8 @@ signature covers the version, and only a `SHA256SUMS` listing exactly that
 version's three archives is signed, so a signature can never be replayed for
 another release. CI never holds the key, so a compromised
 workflow can publish archives but cannot get them signed. A release without
-`SHA256SUMS.sig` is not installable: nodes refuse it.
+`SHA256SUMS.sig` is not installable by `viiwork update`: a node refuses to
+stage it.
 
 ## Builds are reproducible
 
@@ -89,9 +90,16 @@ node runs a version that lacks the new one.
 
 ## Checking a download by hand
 
+The checksum proves the archive is the one listed in `SHA256SUMS`. The
+signature proves `SHA256SUMS` is the publisher's, for exactly that version.
+Checking the signature needs a checkout and Go 1.27.1:
+
 ```sh
-sha256sum --check --ignore-missing SHA256SUMS
-go run ./cmd/viiwork-release verify --version vX.Y.Z SHA256SUMS SHA256SUMS.sig   # from a checkout
+curl -fLO "$base/SHA256SUMS.sig"                  # beside the archive and SHA256SUMS
+sha256sum --check --ignore-missing SHA256SUMS      # on a Mac: shasum -a 256 --check --ignore-missing SHA256SUMS
+git clone --branch vX.Y.Z https://github.com/janit/viiwork viiwork-src
+(cd viiwork-src && go run ./cmd/viiwork-release verify --version vX.Y.Z ../SHA256SUMS ../SHA256SUMS.sig)
+# prints "signature ok"
 ```
 
 ## How a node updates itself
@@ -107,15 +115,17 @@ recorded launcher) and one directory per staged version.
   `viiwork-accept`, runs the new binary with `--version` (it must run here and
   report that version) and `--engine-requirements` (this host's engines must be
   new enough). Anything that fails leaves nothing behind.
-- **Activate** (`POST /v1/update/activate`): records the backends healthy right
-  now as the baseline, marks the version pending, answers 202, shuts down in
+- **Activate** (`POST /v1/update/activate`): refused while any model is still
+  loading. Otherwise it records the backends healthy right now as the
+  baseline, marks the version pending, answers 202, shuts down in
   the usual order and execs the launcher, which runs the staged release in the
   same process.
 - **Confirm**: the new release becomes last good once every baseline backend is
   healthy again. A baseline backend going dead, or the window passing
   (`update.confirm_timeout`, else the sum of the models' startup timeouts plus
   10 minutes, fetching time excluded), rolls it back. A release that crashes
-  before it can confirm gets three starts.
+  before it can confirm is started twice; the third start runs last good.
+  Every start counts, a routine restart during the window included.
 - **Rollback** (`POST /v1/update/rollback`): back to last good at once.
 - A newer image or binary installed out of band always wins over an older
   staged release.
@@ -129,21 +139,27 @@ the staged versions and the installed engine versions.
 ```sh
 viiwork update status                        # every member: running, current, last good, pending, engines
 viiwork update                               # the latest signed release, everywhere it is enabled
-viiwork update --to v2.6.0 --hosts gb1,gb2   # one version, some hosts
-viiwork update rollback --host gb2           # one host back to its last good release
+viiwork update --to v2.6.0 --hosts node-a,node-b   # one version, some hosts
+viiwork update rollback --host node-b              # one host back to its last good release
 ```
+
+After a host confirms, the rollout also waits until the node it talks to sees
+that host alive on the new release, so a release that breaks mesh membership
+stops the rollout at the first host.
 
 A rollout lists its plan — every member with what will happen to it, or why it
 is skipped (not alive, updates off, already there, newer, older than rolling
-updates) — and asks for `YES I WANT TO UPDATE ALL NODES` (or `--confirm`). It
+updates) — and asks for `YES I WANT TO UPDATE THE NODES ABOVE` (or `--confirm`). It
 then stages the release on every chosen host, so a download, signature or
 engine problem stops everything before any host restarts, and activates them
 one at a time, the node it talks to last. Each host must come back on the new
 release and confirm it before the next starts; a host that rolls itself back,
 or misses its own confirmation deadline, stops the rollout with the rest
-untouched. In a secured mesh, run it where the mesh secret is loaded (`set -a;
-. /etc/viiwork/mesh.env; set +a`, or inside a node's container); without it the
-CLI says so before asking for anything. An open mesh accepts update writes only
+untouched. In a secured mesh, run it where the mesh secret is loaded. On a Linux node
+installed by `viiwork init`, `mesh.env` is readable by root only:
+`sudo sh -c 'set -a; . /etc/viiwork/mesh.env; /usr/local/bin/viiwork update'`.
+On a Mac installed by `viiwork init`, the CLI reads the secret from the node's
+LaunchAgent. Without a secret the CLI says so before asking for anything. An open mesh accepts update writes only
 from each node's own machine, so there a rollout updates only the node the CLI
 talks to — run it on that machine against `127.0.0.1` — and lists the others as
 skipped. A version below a host's installed binary is skipped too: the node's

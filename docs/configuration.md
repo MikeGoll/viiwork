@@ -1,7 +1,7 @@
 # Configuration
 
 One file per machine. `viiwork --config /etc/viiwork/viiwork.yaml` (the default
-path) is the only input — there are no command-line overrides. The node
+path; on a Mac, `~/.config/viiwork/viiwork.yaml`) is the only input — there are no command-line overrides. The node
 validates the whole file at startup and on every reload, and names the offending
 field when something is wrong. A viiwork 1.x file is refused with a pointer to
 [migrating-to-v2.md](migrating-to-v2.md).
@@ -111,11 +111,11 @@ models start, removed ones drain and stop, and a changed entry restarts that
 model only. The whole file is re-validated first, so a bad edit is refused
 rather than half-applied.
 
-There is no interactive setup script. `scripts/setup-node.sh` wrote viiwork 1.x
-instance configs, which a v2 node refuses, and was removed in v2.1.0 rather than
-left as a trap. Write the machine's file from `viiwork.yaml.example` and check
-it with `viiwork-accept config` (see [operations.md](operations.md));
-[migrating-to-v2.md](migrating-to-v2.md) converts existing 1.x instances.
+`viiwork init` writes this file on a new machine, checked by the same
+validation the node runs; see [setup.md](setup.md). To write it by hand, start
+from `viiwork.yaml.example` and check it with `viiwork-accept config` (see
+[operations.md](operations.md)). [migrating-to-v2.md](migrating-to-v2.md)
+converts existing 1.x instances.
 
 ## GPU power limits
 
@@ -144,7 +144,19 @@ Two pipeline types are included:
 
 Each step specifies a model, a Go template prompt and a temperature. Steps
 execute sequentially, each step's output feeding the next. Configure pipelines
-in `viiwork.yaml` — see the example config for both types.
+under `pipelines:` in `viiwork.yaml`, keyed by pipeline name:
+
+```yaml
+pipelines:
+  tr:
+    locales:
+      fi:
+        language: Finnish
+    steps: []          # name, model, prompt, temperature, json_output per step
+```
+
+Every key, with its meaning, is in `internal/pipeline/config.go`
+(`PipelineConfig`, `StepConfig`, `LocaleFileConfig`).
 
 A pipeline is node-local: it is absent from capacity reports and status, and is
 dispatched only on the node that received the request. It therefore cannot be an
@@ -244,7 +256,8 @@ these needs a restart. See docs/releases.md.
 
 ## Host requirements
 
-- Linux, Docker with GPU device access
+- Linux with Docker and GPU device access, or an Apple Silicon Mac running
+  natively ([macos.md](macos.md))
 - **AMD / ROCm:** `amdgpu` kernel driver loaded (standard on modern kernels) and
   `/dev/kfd`, `/dev/dri` passed to the container. No ROCm installation is needed
   on the host — the image carries it.
@@ -253,9 +266,7 @@ these needs a restart. See docs/releases.md.
   images ship no `nvidia-smi` and no `libcuda` on purpose — the runtime injects
   them from the host so they always match the running driver. See
   [BUILDS.md](../BUILDS.md).
-- `huggingface-cli` for model downloads (`pip install huggingface-hub`)
-- Optional: `jq` for "I'm feeling lucky" model discovery
-- Optional: [llmfit](https://www.llmfit.org/) for hardware-aware model
-  recommendations
+- GGUF model files; `hf download` (`pip install huggingface-hub`) fetches them
+  from Hugging Face
 - Optional: `/dev/ipmi0` passed through for chassis power readings — see
   [power-and-energy.md](power-and-energy.md)

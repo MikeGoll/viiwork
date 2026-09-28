@@ -28,13 +28,14 @@ import (
 
 	"github.com/janit/viiwork/v2/internal/config"
 	"github.com/janit/viiwork/v2/internal/meshauth"
+	"github.com/janit/viiwork/v2/internal/plistenv"
 	"github.com/janit/viiwork/v2/internal/release"
 	"github.com/janit/viiwork/v2/internal/update"
 	"github.com/janit/viiwork/v2/meshapi"
 )
 
 // Phrase is what an operator types to start a rollout. There is no --yes.
-const Phrase = "YES I WANT TO UPDATE ALL NODES"
+const Phrase = "YES I WANT TO UPDATE THE NODES ABOVE"
 
 const Usage = `usage: viiwork update [--to vX.Y.Z] [--hosts a,b] [--allow-downgrade] [--confirm PHRASE] [flags]
        viiwork update status [--json] [flags]
@@ -69,9 +70,12 @@ type Env struct {
 	Hostname       func() (string, error)
 	Client         *http.Client
 	ReadFile       func(string) ([]byte, error)
-	GitHubAPI      string        // "" = https://api.github.com
-	PollEvery      time.Duration // 0 = 2s
-	ComeBack       time.Duration // 0 = 10m: how long a restarting host may be unreachable
+	// Plist is the node's LaunchAgent, read for the mesh secret when the
+	// variable is unset (a Mac installed by viiwork init). "" elsewhere.
+	Plist     string
+	GitHubAPI string        // "" = https://api.github.com
+	PollEvery time.Duration // 0 = 2s
+	ComeBack  time.Duration // 0 = 10m: how long a restarting host may be unreachable
 }
 
 func withDefaults(env Env) Env {
@@ -190,7 +194,13 @@ func newCLI(env Env, node, configPath, secretEnv string) (*cli, int) {
 	if secretEnv != "" {
 		envName = secretEnv
 	}
-	if v, ok := env.LookupEnv(envName); ok && v != "" {
+	v, ok := env.LookupEnv(envName)
+	if (!ok || v == "") && env.Plist != "" {
+		if data, err := env.ReadFile(env.Plist); err == nil {
+			v, ok = plistenv.Value(data, envName)
+		}
+	}
+	if ok && v != "" {
 		secret, err := base64.StdEncoding.DecodeString(v)
 		if err != nil || len(secret) != secretBytes {
 			fmt.Fprintf(env.Stderr, "%s must be the standard base64 encoding of a %d-byte mesh secret\n", envName, secretBytes)
@@ -306,7 +316,8 @@ var errOpenMesh = errors.New("open mesh: a node accepts update writes only from 
 func (c *cli) canWrite(v view) error {
 	if v.mode == meshapi.MeshSecured && c.signer == nil {
 		return errors.New("this mesh is secured and no mesh secret is loaded, so every node would refuse the writes: " +
-			"set -a; . /etc/viiwork/mesh.env; set +a (or --secret-env)")
+			"sudo sh -c 'set -a; . /etc/viiwork/mesh.env; viiwork update …' on a Linux node, " +
+			"or run it on a Mac node installed by viiwork init, which reads the secret from its LaunchAgent (or --secret-env)")
 	}
 	return nil
 }
@@ -590,6 +601,10 @@ func (c *cli) rollout(ctx context.Context, o rolloutOpts) int {
 			fmt.Fprintf(c.env.Stderr, "rollout stopped at %s: %v; later hosts untouched\n", h.name, err)
 			return 1
 		}
+		if err := c.waitInMesh(ctx, h, to); err != nil {
+			fmt.Fprintf(c.env.Stderr, "rollout stopped at %s: confirmed, but %v; later hosts untouched\n", h.name, err)
+			return 1
+		}
 		fmt.Fprintf(c.env.Stdout, "%s: on %s, confirmed\n", h.name, to)
 	}
 	fmt.Fprintf(c.env.Stdout, "rollout of %s complete\n", to)
@@ -604,6 +619,56 @@ func (c *cli) confirmed(flagValue string) bool {
 	fmt.Fprintf(c.env.Stdout, "Type %q to continue: ", Phrase)
 	line, _ := bufio.NewReader(c.env.Stdin).ReadString('\n')
 	return strings.TrimSpace(line) == Phrase
+}
+
+// waitInMesh waits until the node the CLI talks to sees h alive on to. A host
+// confirms itself from its own backends only, so a release that breaks mesh
+// membership would confirm while alone; checking the entry node's view keeps
+// the rollout from splitting the fleet one host at a time. When h is the entry
+// node itself, its view must still hold another alive node if it had one.
+func (c *cli) waitInMesh(ctx context.Context, h host, to string) error {
+	start := time.Now()
+	var last string
+	for {
+		var cl meshapi.ClusterResponse
+		if err := c.getJSON(ctx, "http://"+c.node+meshapi.PathCluster, &cl); err != nil {
+			last = err.Error()
+		} else {
+			others, peers := 0, 0
+			found := false
+			for _, m := range cl.Members {
+				if m.Role != "" && m.Role != meshapi.RoleNode {
+					continue
+				}
+				if m.Node == h.name {
+					found = m.State == meshapi.MemberAlive && m.Status != nil && m.Status.Ver == to
+					continue
+				}
+				peers++
+				if m.State == meshapi.MemberAlive {
+					others++
+				}
+			}
+			switch {
+			case cl.View == h.name && found && (peers == 0 || others > 0):
+				return nil
+			case cl.View != h.name && found:
+				return nil
+			case cl.View == h.name:
+				last = "it sees no other node alive"
+			default:
+				last = cl.View + " does not see it alive on " + to
+			}
+		}
+		if time.Since(start) > c.env.ComeBack {
+			return fmt.Errorf("it is not back in the mesh: %s", last)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(c.env.PollEvery):
+		}
+	}
 }
 
 // waitConfirmed follows one host through its restart until it runs to and has

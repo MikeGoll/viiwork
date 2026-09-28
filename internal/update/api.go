@@ -169,8 +169,14 @@ func (s *Service) activate(_ context.Context, req meshapi.UpdateRequest) (int, a
 	baseline := []string{}
 	for _, m := range s.Backends() {
 		for _, b := range m.Backends {
-			if b.Status == meshapi.StatusHealthy {
+			switch b.Status {
+			case meshapi.StatusHealthy:
 				baseline = append(baseline, b.ID)
+			case meshapi.StatusStarting:
+				// The baseline is what the new release must bring back. A
+				// model still loading would be left out of it, so the release
+				// would confirm without ever having to load it.
+				return http.StatusConflict, fmt.Errorf("model %s is still loading (backend %s, %s): activate when it is healthy", m.Name, b.ID, b.Phase)
 			}
 		}
 	}

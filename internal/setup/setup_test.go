@@ -15,6 +15,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -286,6 +287,10 @@ func TestOpenMeshSkipsUpdates(t *testing.T) {
 	}
 	if _, err := os.Stat(f.path(install.EnvFile)); err == nil {
 		t.Error("mesh.env written for an open mesh")
+	} // With update.enabled off a node refuses even local update writes, so the
+	// wizard must not promise "local only" updates.
+	if strings.Contains(f.out.String(), "local only") {
+		t.Errorf("the open-mesh note promises local updates:\n%s", f.out)
 	}
 }
 
@@ -636,5 +641,56 @@ func TestCDIWithoutARegisteredRuntime(t *testing.T) {
 	compose := string(mustRead(t, f.path(install.ComposeFile)))
 	if !strings.Contains(compose, "nvidia.com/gpu=all") || strings.Contains(compose, "driver: nvidia") {
 		t.Errorf("compose:\n%s", compose)
+	}
+}
+
+// From the adversarial review: a models directory that is itself a symlink
+// (/models -> a big disk) listed nothing; an absolute link inside it pointed
+// outside the container's mount; a FIFO named .gguf hung the scan; and a
+// GGUF's own strings reached a root terminal raw.
+func TestScanReviewFindings(t *testing.T) {
+	root := t.TempDir()
+	disk := filepath.Join(root, "disk")
+	writeGGUF(t, filepath.Join(disk, "alpha.gguf"), "llama", 1<<20)
+	writeGGUF(t, filepath.Join(disk, "sub", "qwen.gguf"), "llama", 1<<20)
+	os.Symlink(filepath.Join(disk, "sub", "qwen.gguf"), filepath.Join(disk, "current.gguf")) // absolute, inside
+	if err := syscall.Mkfifo(filepath.Join(disk, "pipe.gguf"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeGGUF(t, filepath.Join(disk, "evil.gguf"), "llama\x1b]0;owned\x07", 1<<20)
+	link := filepath.Join(root, "models")
+	os.Symlink(disk, link)
+
+	var out bytes.Buffer
+	done := make(chan []weights, 1)
+	go func() { done <- scan(prompt.Script(&out), link, true) }()
+	var found []weights
+	select {
+	case found = <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the scan hung (a FIFO?)")
+	}
+	files := map[string]bool{}
+	for _, w := range found {
+		files[w.file] = true
+	}
+	if !files["alpha.gguf"] {
+		t.Errorf("a symlinked models directory listed %v", files)
+	}
+	if files["current.gguf"] {
+		t.Error("an absolute link was kept by its own name; in the container it points outside /models")
+	}
+	if !files["sub/qwen.gguf"] {
+		t.Errorf("the real file behind the link was not listed: %v", files)
+	}
+	if files["pipe.gguf"] {
+		t.Error("a FIFO was listed as a model")
+	}
+	opts := make([]string, 0, len(found))
+	for _, w := range found {
+		opts = append(opts, w.describe())
+	}
+	if strings.Contains(strings.Join(opts, "\n")+out.String(), "\x1b") {
+		t.Error("an escape sequence from a GGUF header reached the terminal")
 	}
 }

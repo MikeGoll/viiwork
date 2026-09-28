@@ -313,3 +313,37 @@ func TestBackendErrorsAreLogged(t *testing.T) {
 		t.Errorf("want --log-verbosity 1 (errors only): %v", args)
 	}
 }
+
+// Older llama-server builds read --log-verbosity as a threshold where 1 also
+// enables debug: every request and response body, prompts included, and the
+// once-a-second /slots poll would go to the node's log. Only a build whose
+// --help lists the levels (1 = error) gets it; any other keeps --log-disable.
+func TestOlderBuildsKeepLogsDisabled(t *testing.T) {
+	m := parseModel(t, `  - name: m
+    engine: llamacpp
+    path: /models/m.gguf
+    gpus: [0]
+    context: 8192
+    parallel: 1
+    llamacpp:
+      binary: /opt/old/llama-server
+`)
+	e := testEngine(16, 247*gib, 9*gib, nil)
+	var asked []string
+	e.levelLogs = func(binary string) bool { asked = append(asked, binary); return false }
+	args := command(t, e, m, 0).Args
+	if !slices.Contains(args, "--log-disable") || slices.Contains(args, "--log-verbosity") {
+		t.Errorf("an older build: %v", args)
+	}
+	if len(asked) != 1 || asked[0] != "/opt/old/llama-server" {
+		t.Errorf("detection asked about %q", asked)
+	}
+}
+
+func TestLevelListDetection(t *testing.T) {
+	newHelp := "-lv,   --verbosity, --log-verbosity N   Set the verbosity threshold.\n  - 0: generic output\n  - 1: error\n  - 2: warning\n"
+	oldHelp := "-lv,   --verbosity, --log-verbosity N   set the verbosity threshold. messages with a higher verbosity will be ignored.\n"
+	if !levelList(newHelp) || levelList(oldHelp) || levelList("") {
+		t.Error("levelList misreads a --help")
+	}
+}

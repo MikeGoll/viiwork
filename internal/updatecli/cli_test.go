@@ -3,11 +3,13 @@ package updatecli
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -30,6 +32,7 @@ type fakeNode struct {
 	stage  int  // status code for stage; 0 = 200
 	drop   bool // the GET that set it, and every one while set, gets a closed connection
 	behave func(n *fakeNode, polls int)
+	splits bool // once on a new release, the entry node sees it dead: it lost the mesh
 	polls  int
 	calls  []string
 	auth   []string // X-Viiwork-Auth of every write
@@ -167,8 +170,8 @@ func (m *fakeMesh) cluster() meshapi.ClusterResponse {
 		host, port, _ := net.SplitHostPort(addr)
 		p, _ := strconv.Atoi(port)
 		mem := meshapi.Member{Node: n.name, Addr: host, Role: meshapi.RoleNode, State: meshapi.MemberAlive,
-			Status: &meshapi.NodeStatus{Node: n.name, Addr: host, APIPort: p}}
-		if n.dead {
+			Status: &meshapi.NodeStatus{Node: n.name, Addr: host, APIPort: p, Ver: n.st.Running}}
+		if n.dead || n.splits && n.st.Running != "v2.5.0" {
 			mem.State, mem.Status = meshapi.MemberDead, nil
 		}
 		c.Members = append(c.Members, mem)
@@ -461,6 +464,10 @@ func TestSecuredMeshNeedsTheSecretFirst(t *testing.T) {
 	if code != 1 || !strings.Contains(errOut, "secret") || strings.Contains(out, "Type") {
 		t.Fatalf("exit %d\nstdout %s\nstderr %s", code, out, errOut)
 	}
+	// The hint must work on a wizard install, whose mesh.env is root's.
+	if !strings.Contains(errOut, "sudo sh -c") {
+		t.Errorf("the hint does not load a root-only mesh.env: %s", errOut)
+	}
 	for _, n := range m.nodes {
 		if len(n.calls) != 0 {
 			t.Errorf("%s was written to: %v", n.name, n.calls)
@@ -495,5 +502,52 @@ func TestDowngradeBelowTheInstalledBinaryIsSkipped(t *testing.T) {
 	}
 	if got := strings.Join(m.order, ","); got != "node-b" {
 		t.Errorf("activated %s, want node-b only", got)
+	}
+}
+
+// The phrase must be true of what is on screen: with --hosts picking one
+// machine, "update all nodes" was not (found rolling one host of seven).
+func TestPhraseMatchesAPartialRollout(t *testing.T) {
+	if strings.Contains(Phrase, "ALL") || !strings.Contains(Phrase, "ABOVE") {
+		t.Errorf("Phrase %q must name the planned nodes, not all of them", Phrase)
+	}
+}
+
+// On a Mac installed by viiwork init the mesh secret lives only in the node's
+// LaunchAgent: the rollout CLI reads it from there, as join-code does, so a
+// Mac can run `viiwork update` with nothing exported.
+func TestSecretFromTheLaunchAgent(t *testing.T) {
+	secret := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{7}, 32))
+	plist := "<plist><dict><key>EnvironmentVariables</key><dict>" +
+		"<key>VIIWORK_MESH_SECRET</key><string>" + secret + "</string></dict></dict></plist>"
+	env := withDefaults(Env{
+		Stdout: io.Discard, Stderr: io.Discard,
+		LookupEnv: func(string) (string, bool) { return "", false },
+		ReadFile: func(p string) ([]byte, error) {
+			if p == "/Users/u/Library/LaunchAgents/fi.viiwork.node.plist" {
+				return []byte(plist), nil
+			}
+			return nil, os.ErrNotExist
+		},
+		Plist: "/Users/u/Library/LaunchAgents/fi.viiwork.node.plist",
+	})
+	c, code := newCLI(env, "127.0.0.1:1", "", "")
+	if c == nil || code != 0 || c.signer == nil {
+		t.Fatalf("no signer from the plist: code %d", code)
+	}
+}
+
+// A release that breaks mesh membership still loads its models, so the host
+// confirms itself. The rollout must also see the host back in the mesh
+// before moving on, or it would split the fleet one host at a time.
+func TestRolloutStopsWhenAHostLeavesTheMesh(t *testing.T) {
+	m := newFakeMesh(t, "node-a", "node-b", "node-c")
+	m.node("node-a").splits = true
+	code, _, errOut := run(t, m, "", "--to", "v2.6.0", "--confirm", Phrase)
+	if code == 0 || !strings.Contains(errOut, "mesh") {
+		t.Fatalf("code %d, stderr %q", code, errOut)
+	}
+	if strings.Contains(strings.Join(m.order, ","), "node-b") {
+		t.Errorf("the next host was activated after one left the mesh: %v", m.order)
 	}
 }

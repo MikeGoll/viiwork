@@ -19,7 +19,9 @@ var versionRe = regexp.MustCompile(`^v([0-9]+)\.([0-9]+)\.([0-9]+)(?:-([0-9A-Za-
 // release: -g<sha>, -dirty, or both. Such a build IS the release it was cut
 // from, not a pre-release of it, or the fleet's own builds would count as
 // downgrades from the release they carry.
-var privateSuffix = regexp.MustCompile(`^(g[0-9a-f]{7,40}(-dirty)?|dirty)$`)
+// It is stripped from the end of any pre-release too: v2.6.0-beta4-g<sha> is
+// v2.6.0-beta4.
+var privateSuffix = regexp.MustCompile(`(^|-)(g[0-9a-f]{7,40}(-dirty)?|dirty)$`)
 
 type parsed struct {
 	n   [3]int
@@ -39,8 +41,8 @@ func parse(v string) (parsed, bool) {
 		}
 		p.n[i] = n
 	}
-	if m[4] != "" && !privateSuffix.MatchString(m[4]) {
-		p.pre = strings.Split(m[4], ".")
+	if pre := privateSuffix.ReplaceAllString(m[4], ""); pre != "" {
+		p.pre = strings.Split(pre, ".")
 	}
 	return p, true
 }

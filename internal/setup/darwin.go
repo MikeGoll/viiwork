@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -118,16 +120,16 @@ func writeAndStartMac(ctx context.Context, h Host, p prompt.Prompter, s *state) 
 	reused := install.Fetched(h.path(m.P.LlamaRoot), h.LlamaPin)
 	server, verified, err := f.Llama(ctx, h.LlamaPin, h.path(m.P.LlamaRoot))
 	if err != nil {
-		return notStarted(p, err)
+		return notStarted(p, h, m, err)
 	}
 	if server != h.path(s.llama) {
-		return notStarted(p, fmt.Errorf("llama-server is at %s, not at %s as the config says", server, s.llama))
+		return notStarted(p, h, m, fmt.Errorf("llama-server is at %s, not at %s as the config says", server, s.llama))
 	}
 	if !verified && !reused {
 		p.Say("Note: the llama.cpp release publishes no sha256, so this build is unverified.")
 	}
 	if err := m.Bootstrap(ctx); err != nil {
-		return notStarted(p, err)
+		return notStarted(p, h, m, err)
 	}
 	if err := m.Node.WaitUp(ctx, h.UpTimeout); err != nil {
 		return failedMac(ctx, p, m, err)
@@ -142,20 +144,33 @@ func writeAndStartMac(ctx context.Context, h Host, p prompt.Prompter, s *state) 
 	}
 	ready := accept.WaitReady(ctx, h.Accept, h.NodeAPI, time.Minute, h.Poll)
 	target := fmt.Sprintf("gui/%d/%s", h.UID, install.LaunchAgent)
-	return finish(ctx, h, p, s, ready, h.path(m.P.ConfigFile), "", []string{
+	notes := []string{
 		"Reload after editing " + m.P.ConfigFile + ": launchctl kill HUP " + target,
 		"Restart: " + m.Kickstart(),
 		"Log: " + m.P.LogFile,
 		fmt.Sprintf("Files: %s, %s; node state in %s", m.P.ConfigDir, m.P.BinaryPath, m.P.StateDir),
 		"A sleeping Mac leaves the mesh: run `caffeinate -s` while it serves on power.",
 		"Power and energy read as unavailable on a Mac (reading them needs root).",
-	})
+	}
+	// ~/.local/bin is not on a Mac's default PATH: without it, the commands
+	// above are "command not found".
+	if !slices.Contains(filepath.SplitList(h.Path), filepath.Dir(m.P.BinaryPath)) {
+		notes = append(notes, "viiwork is in "+filepath.Dir(m.P.BinaryPath)+", which is not on your PATH. Add it once:",
+			`  echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zprofile && . ~/.zprofile`)
+	}
+	return finish(ctx, h, p, s, ready, h.path(m.P.ConfigFile), "", notes)
 }
 
 // notStarted is a failure before the agent was loaded: there is nothing to
 // restart or diagnose, only files to undo.
-func notStarted(p prompt.Prompter, err error) error {
+func notStarted(p prompt.Prompter, h Host, m install.Mac, err error) error {
 	p.Say("\nSetup stopped: %v", err)
+	// launchd loads every plist in LaunchAgents at login: one left here would
+	// start a node with no llama-server that still joins the mesh with the
+	// secret. The manifest still lists it, so uninstall is unaffected.
+	if rerr := os.Remove(h.path(m.P.Plist)); rerr == nil {
+		p.Say("The launch agent was removed, so nothing starts at your next login.")
+	}
 	p.Say("Nothing was started. The files written so far are recorded: run `viiwork uninstall`, then `viiwork init` again.")
 	return err
 }

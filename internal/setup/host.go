@@ -54,6 +54,7 @@ func DefaultHost(version, llamaPin string, out io.Writer) Host {
 		// Downloads from GitHub honour HTTPS_PROXY; the node-facing client
 		// above never uses a proxy.
 		Download: downloadClient(),
+		Path:     os.Getenv("PATH"),
 		Signals: func(ctx context.Context) (context.Context, context.CancelFunc) {
 			return signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 		},

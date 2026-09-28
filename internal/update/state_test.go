@@ -52,7 +52,6 @@ func TestStateRefusesWhatItCannotRead(t *testing.T) {
 		"not a version":   `{"current":"../../bin/sh","last_good":"builtin"}`,
 		"empty last_good": `{"current":"builtin","last_good":""}`,
 		"bad pending":     `{"current":"v2.6.0","last_good":"builtin","pending":{"version":"x"}}`,
-		"unknown field":   `{"current":"builtin","last_good":"builtin","exec":"/bin/sh"}`,
 	} {
 		dir := t.TempDir()
 		os.WriteFile(filepath.Join(dir, "state.json"), []byte(content), 0o644)
@@ -119,5 +118,23 @@ func TestLaunchers(t *testing.T) {
 	SaveState(dir, s)
 	if _, err := RestartTarget(dir); err == nil || !strings.Contains(err.Error(), "changed") {
 		t.Errorf("replaced launcher: %v", err)
+	}
+}
+
+// A later release may add fields to state.json and then roll back to this
+// one. If an unknown field were refused, the launcher that must recover the
+// node could not read the file, and every start would fail: docker, systemd
+// and launchd would crash-loop it. Unknown fields are ignored (never acted
+// on); the fields this release uses are still validated.
+func TestStateReadsAFileFromANewerRelease(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "state.json"), []byte(`{"current":"v2.6.0","last_good":"builtin",`+
+		`"format":2,"exec":"/bin/sh","pending":{"version":"v2.7.0","attempts":1,"canary":true},"launcher":{"future":1}}`), 0o644)
+	s, err := LoadState(dir)
+	if err != nil {
+		t.Fatalf("a newer release's state.json: %v", err)
+	}
+	if s.Current != "v2.6.0" || s.LastGood != Builtin || s.Pending == nil || s.Pending.Version != "v2.7.0" {
+		t.Errorf("state %+v", s)
 	}
 }

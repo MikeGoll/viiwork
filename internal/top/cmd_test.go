@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/janit/viiwork/v2/internal/top/stream"
 	"github.com/janit/viiwork/v2/meshapi"
 )
 
@@ -215,5 +216,18 @@ func waitFor(t *testing.T, cond func() bool) {
 			t.Fatal("condition not met")
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// failure() prints a version another node sent, after the terminal is back
+// in normal mode: it must not carry escape sequences.
+func TestFailureCleansTheVersion(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(meshapi.NodeStatus{Node: "x", Ver: "v2.5.0\x1b]52;c;aGk=\x07"})
+	}))
+	defer srv.Close()
+	msg := failure(context.Background(), Env{Client: srv.Client()}, strings.TrimPrefix(srv.URL, "http://"), stream.ErrNoStream)
+	if strings.ContainsAny(msg, "\x1b\x07") || !strings.Contains(msg, "v2.5.0") {
+		t.Errorf("failure = %q", msg)
 	}
 }

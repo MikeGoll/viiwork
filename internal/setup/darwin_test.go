@@ -328,6 +328,11 @@ func TestMacFetchFailureSaysNothingStarted(t *testing.T) {
 			t.Errorf("ran %q", c)
 		}
 	}
+	// launchd would load a plist left behind at the next login, and start a
+	// node with no llama-server that still joins the mesh with the secret.
+	if _, err := os.Stat(m.p.Plist); err == nil {
+		t.Error("the LaunchAgent was left in place after a failed fetch")
+	}
 }
 
 // The plist the installer writes is one join-code can read the secret from.
@@ -388,5 +393,26 @@ func TestModelsPromptOnAParrotMac(t *testing.T) {
 	}
 	if s.modelsDir != store || len(s.models) != 1 {
 		t.Errorf("dir %q models %d", s.modelsDir, len(s.models))
+	}
+}
+
+// ~/.local/bin is not on a Mac's default PATH, so the commands the finish
+// screen names would be "command not found": the wizard says how to add it.
+func TestMacFinishSaysHowToReachTheBinary(t *testing.T) {
+	m := newMac(t)
+	m.host.Path = "/usr/bin:/bin"
+	if err := m.run(macAnswers...); err != nil {
+		t.Fatalf("%v\n%s", err, m.out)
+	}
+	if !strings.Contains(m.out.String(), `export PATH="$HOME/.local/bin:$PATH"`) {
+		t.Errorf("no PATH hint:\n%s", m.out)
+	}
+	m = newMac(t)
+	m.host.Path = "/usr/bin:" + filepath.Join(m.home, ".local", "bin")
+	if err := m.run(macAnswers...); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(m.out.String(), "export PATH=") {
+		t.Error("a PATH hint although ~/.local/bin is on PATH")
 	}
 }

@@ -5,13 +5,16 @@
 package llamacpp
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
 	"runtime"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/janit/viiwork/v2/internal/engine"
@@ -28,6 +31,9 @@ type Engine struct {
 	nproc     func() int
 	totalRAM  func() int64
 	modelSize func(path string) (int64, error)
+	// levelLogs reports whether a llama-server binary reads --log-verbosity
+	// as levels (1 = errors only). nil in tests means yes.
+	levelLogs func(binary string) bool
 }
 
 // New returns the engine for this host. Its HTTP client keeps up to 100 idle
@@ -42,6 +48,7 @@ func New() *Engine {
 		nproc:     runtime.NumCPU,
 		totalRAM:  hostinfo.TotalRAMBytes,
 		modelSize: modelTotalSize,
+		levelLogs: cachedLevelLogs,
 	}
 }
 
@@ -97,7 +104,14 @@ func (e *Engine) Command(s engine.Spec) (engine.Command, error) {
 	// llama-server's errors (a model that cannot load says why, in the node's
 	// log) and drops its info lines: the per-request ones the once-a-second
 	// load poll would flood. --log-disable silenced the errors too.
-	args = append(args, "--slots", "--log-verbosity", "1")
+	// An older build reads --log-verbosity as a threshold where 1 also turns
+	// debug on, request and response bodies included: prompts would reach the
+	// node's log. Such a build keeps --log-disable.
+	if e.levelLogs == nil || e.levelLogs(o.Binary) {
+		args = append(args, "--slots", "--log-verbosity", "1")
+	} else {
+		args = append(args, "--slots", "--log-disable")
+	}
 
 	if len(s.GPUs) >= 2 {
 		mode := o.SplitMode
@@ -155,4 +169,27 @@ func hasAnyArg(args []string, flags ...string) bool {
 		}
 	}
 	return false
+}
+
+var levelLogsCache sync.Map // binary path -> bool
+
+// cachedLevelLogs asks a binary's --help once per process.
+func cachedLevelLogs(binary string) bool {
+	if v, ok := levelLogsCache.Load(binary); ok {
+		return v.(bool)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, binary, "--help")
+	cmd.WaitDelay = time.Second
+	out, _ := cmd.CombinedOutput()
+	ok := levelList(string(out))
+	levelLogsCache.Store(binary, ok)
+	return ok
+}
+
+// levelList reports whether a llama-server --help lists --log-verbosity's
+// levels, as builds do since verbosity became levels ("1: error").
+func levelList(help string) bool {
+	return strings.Contains(help, "- 1: error")
 }

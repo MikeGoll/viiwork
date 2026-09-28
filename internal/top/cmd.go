@@ -186,7 +186,7 @@ func failure(ctx context.Context, env Env, node string, err error) string {
 	if resp, err := env.Client.Do(req); err == nil {
 		var st meshapi.NodeStatus
 		if json.NewDecoder(resp.Body).Decode(&st) == nil && st.Ver != "" {
-			ver = st.Ver
+			ver = sanitize(st.Ver) // another node's text, printed on a normal terminal
 		}
 		resp.Body.Close()
 	}

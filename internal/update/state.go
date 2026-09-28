@@ -1,7 +1,6 @@
 package update
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -68,10 +67,12 @@ func LoadState(dir string) (State, error) {
 	if err != nil {
 		return State{}, err
 	}
+	// Unknown fields are ignored, never refused: the launcher is the floor,
+	// the oldest binary, and it reads a file a newer release may have written
+	// with fields it added. Refusing them would leave a rolled-back node unable
+	// to start. What this release acts on is validated below.
 	var s State
-	dec := json.NewDecoder(bytes.NewReader(b))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&s); err != nil {
+	if err := json.Unmarshal(b, &s); err != nil {
 		return State{}, fmt.Errorf("%s: %w", filepath.Join(dir, stateFile), err)
 	}
 	if !validName(s.Current) || !validName(s.LastGood) || s.Pending != nil && !release.ValidVersion(s.Pending.Version) {

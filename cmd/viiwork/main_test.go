@@ -8,9 +8,12 @@ import (
 	"errors"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/janit/viiwork/v2/internal/update"
 )
@@ -233,5 +236,38 @@ func TestDefaultConfigFollowsTheOS(t *testing.T) {
 	}
 	if got := defaultConfig("linux", "/root"); got != "/etc/viiwork/viiwork.yaml" {
 		t.Errorf("linux: %s", got)
+	}
+}
+
+// The usage lists what each command really takes: init takes no --config (the
+// install decides the path), join-code has --open, uninstall --from-config.
+func TestUsageMatchesTheCommands(t *testing.T) {
+	var stderr bytes.Buffer
+	run([]string{"--bogus-flag"}, runEnv{stdout: io.Discard, stderr: &stderr})
+	u := stderr.String()
+	for _, want := range []string{"viiwork init\n", "join-code [--open]", "--from-config"} {
+		if !strings.Contains(u, want) {
+			t.Errorf("usage lacks %q:\n%s", want, u)
+		}
+	}
+	if strings.Contains(u, "viiwork init [--config") {
+		t.Errorf("usage offers init --config, which preflight refuses:\n%s", u)
+	}
+}
+
+// SIGHUP's default action ends the process, and systemd counts that as a
+// clean exit, so Restart=on-failure would not start the node again: a reload
+// in the window before the node's handler existed stopped a native node for
+// good. catchHUP is installed first thing; a HUP then waits for the node.
+func TestEarlySIGHUPIsHeldForTheNode(t *testing.T) {
+	hup := catchHUP()
+	defer signal.Stop(hup)
+	if err := syscall.Kill(os.Getpid(), syscall.SIGHUP); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-hup:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the HUP was not held")
 	}
 }

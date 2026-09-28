@@ -11,7 +11,9 @@ services:
   viiwork:
     image: viiwork:latest
     container_name: viiwork
-    restart: unless-stopped
+    # always, not unless-stopped: unless-stopped remembers a manual stop across
+    # a daemon restart and leaves the node down after a reboot.
+    restart: always
 
     # Gossip binds the machine's tailnet (or LAN) address on 7946 and the API
     # listens on 8086. Members dial each other's real addresses, which a

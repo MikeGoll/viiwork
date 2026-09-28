@@ -7,7 +7,7 @@ their own: any node is an entry point, and a request goes to a free slot whereve
 one exists in the fleet.
 
 Three inference engines (`llamacpp`, `vllm`, `freetoken`), on ROCm or CUDA, in
-one binary whose only dependencies are `yaml.v3`, `memberlist` and `mdns`.
+one binary whose only dependencies are `yaml.v3`, `memberlist`, `mdns` and `x/term`.
 
 ![viiwork mesh dashboard](docs/img/viiwork-v220.webp)
 
@@ -68,18 +68,25 @@ in a workstation, or racks of MI50s in your mother-in-law's garage.
 
 ## Quick Start
 
-Download a release, check it, and run the setup wizard:
+You need an NVIDIA GPU with Docker and the NVIDIA Container Toolkit, or an
+Apple Silicon Mac, plus some GGUF model files. The full list is in
+[setup](docs/setup.md#before-you-start). Download the newest release, check
+it, and run the setup wizard:
 
 ```bash
-v=vX.Y.Z                     # from https://github.com/janit/viiwork/releases
+v=vX.Y.Z                     # the newest release, from https://github.com/janit/viiwork/releases
 os=linux_amd64               # or linux_arm64, darwin_arm64
 base=https://github.com/janit/viiwork/releases/download/$v
 curl -fLO "$base/viiwork_${v}_${os}.tar.gz" -fLO "$base/SHA256SUMS"
-sha256sum --check --ignore-missing SHA256SUMS   # macOS: shasum -a 256 --check --ignore-missing SHA256SUMS
+sha256sum --check --ignore-missing SHA256SUMS
+# on a Mac instead: shasum -a 256 --check --ignore-missing SHA256SUMS
 tar xzf "viiwork_${v}_${os}.tar.gz" && cd "viiwork_${v}_${os}"
 
 sudo ./viiwork init          # Linux; on a Mac: ./viiwork init (no sudo)
 ```
+
+That checks the download's checksum; [releases](docs/releases.md#checking-a-download-by-hand)
+shows how to verify its signature too.
 
 The wizard finds the GPUs and the GGUF models in a directory you name. It
 proposes a layout and asks whether to start a new mesh or join one. Then it
@@ -90,12 +97,12 @@ written before that yes. → [setup](docs/setup.md)
 **The next machine** joins with one code. On any node, print it:
 
 ```bash
-sudo sh -c 'set -a; . /etc/viiwork/mesh.env; viiwork join-code'   # Linux
-viiwork join-code                                                  # Mac
+sudo sh -c 'set -a; . /etc/viiwork/mesh.env; /usr/local/bin/viiwork join-code'   # Linux
+~/.local/bin/viiwork join-code                                                    # Mac
 ```
 
-Run `viiwork init` on the new machine and paste the code at the mesh
-question. The code *is* the mesh secret, so handle it like one.
+Run the wizard on the new machine and paste the code at the mesh question. The
+code *is* the mesh secret, so handle it like one.
 
 **Test it:**
 
@@ -108,32 +115,35 @@ curl http://localhost:8086/v1/chat/completions \
 
 The API and every dashboard are on port 8086, and membership gossip is on 7946
 (tcp and udp), on every machine. `viiwork top` watches the whole mesh from a
-terminal. `viiwork uninstall` removes exactly what the wizard installed, and
-keeps your model files.
+terminal, `viiwork update` rolls a new release across it
+([updating](docs/setup.md#updating)), and `viiwork uninstall` (with `sudo` on
+Linux) removes exactly what the wizard installed and keeps your model files.
 
 ### By hand
 
-The wizard starts a node on NVIDIA GPUs and on Apple Silicon. On a Radeon VII
-(gfx906) or another AMD card it writes the config and stops, because those need
-an image built from a checkout. Set up this way, or to lay a machine out
-yourself:
+The wizard starts a node on NVIDIA GPUs and on Apple Silicon. On an AMD card it
+writes the config and stops, and [setup](docs/setup.md#when-it-writes-the-config-only)
+shows how to start that node. To lay out a machine entirely by hand instead:
 
 ```bash
-# 1. Write the machine's config
-cp viiwork.yaml.example viiwork.yaml
-# Edit viiwork.yaml: one entry under models: per model, with its GPUs.
+git clone https://github.com/janit/viiwork && cd viiwork
 
-# 2. Choose the mesh mode: a shared secret, or mesh.open: true in viiwork.yaml
-sudo install -d /etc/viiwork && sudo install -m 0640 /dev/null /etc/viiwork/mesh.env
+# 1. The config: one entry under models: per model, with its GPUs
+sudo install -d /etc/viiwork
+sudo cp viiwork.yaml.example /etc/viiwork/viiwork.yaml && sudoedit /etc/viiwork/viiwork.yaml
+
+# 2. The mesh: a shared secret (or mesh.open: true in viiwork.yaml)
+sudo install -m 0640 /dev/null /etc/viiwork/mesh.env
 echo "VIIWORK_MESH_SECRET=$(openssl rand -base64 32)" | sudo tee /etc/viiwork/mesh.env >/dev/null
 
-# 3. Build and run
-make docker
-cp configs/docker-compose.v2.example.yaml docker-compose.yaml
-docker compose up -d
+# 3. The image and the container (set the models mount in the compose file)
+make docker                  # the ROCm image; BUILDS.md has the others
+sudo cp configs/docker-compose.v2.example.yaml /etc/viiwork/docker-compose.yaml
+sudo docker compose -f /etc/viiwork/docker-compose.yaml -p viiwork up -d
 ```
 
-Every machine runs the same image with its own `viiwork.yaml`.
+Every machine runs the same image with its own `viiwork.yaml`. The secret is
+the same on every machine of a secured mesh.
 
 ## Configuration
 
@@ -335,14 +345,15 @@ darwin/arm64, reproducibly built and signed: **[docs/releases.md](docs/releases.
 
 | Document | What's in it |
 |---|---|
-| [setup.md](docs/setup.md) | `viiwork init`: the first-run wizard, what it writes, join codes, config-only cases |
+| [setup.md](docs/setup.md) | `viiwork init`: the first-run wizard, what it writes, join codes, config-only cases, updating, uninstalling |
+| [releases.md](docs/releases.md) | Verifying a download, how a node updates itself, `viiwork update` rollouts, publishing a release |
 | [configuration.md](docs/configuration.md) | Every config key: models, tensor-split, reloading, pipelines, GPU power limits, environment variables, host requirements |
 | [mesh.md](docs/mesh.md) | Discovery, secured and open mode, routing and refusal handling, aliases |
 | [dashboards.md](docs/dashboards.md) | `/`, `/mesh`, `/chat`, `/prompt`; how the live view is reconstructed; prompt and output history |
 | [power-and-energy.md](docs/power-and-energy.md) | Fleet power, ENTSO-E cost tracking, the durable energy store, IPMI chassis control |
 | [models.md](docs/models.md) | The measured catalogue: reference fleet, large models on one card via FreeToken offload, validated deployments, failed bring-ups, gfx906 tuning rules |
 | [security.md](docs/security.md) | The trust model, what the lack of authentication exposes, CORS |
-| [operations.md](docs/operations.md) | Scripts, `viiwork-accept` acceptance checks, the MCP server |
+| [operations.md](docs/operations.md) | Scripts, `viiwork-accept` acceptance checks, `viiwork top`, the MCP server |
 | [macos.md](docs/macos.md) | An Apple Silicon Mac as a native node: llama.cpp on Metal, sharing the one GPU, viiwork-parrot, Tailscale variants, launchd, sleep, uninstall |
 | [api-integration.md](docs/api-integration.md) | Full API reference, both integration modes, semantics that bite, acceptance checklist |
 | [autodiscovery.md](docs/autodiscovery.md) | Clients discovering the fleet: the enriched `/v1/models`, OpenCode's `/api.json` catalogue, LiteLLM's `/v1/model/info`, and what viiwork will not claim |
@@ -370,8 +381,9 @@ go test -bench=. -benchmem ./internal/proxy ./internal/route   # hot-path benchm
 ```
 
 Requires Go 1.27.1 (pinned in `go.mod` and the Dockerfiles). Dependencies are
-`gopkg.in/yaml.v3`, `hashicorp/memberlist` (membership) and `hashicorp/mdns` (LAN
-discovery); everything else is stdlib, deliberately.
+`gopkg.in/yaml.v3`, `hashicorp/memberlist` (membership), `hashicorp/mdns` (LAN
+discovery) and `golang.org/x/term` (raw mode for `viiwork top`); everything else
+is stdlib, deliberately.
 
 The integration tests run whole nodes in one process on an in-memory network,
 with the test binary standing in for `llama-server`, so they touch no GPU and no

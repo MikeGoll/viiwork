@@ -51,6 +51,7 @@ type Host struct {
 	LlamaPin     string        // the llama.cpp release this build was cut against
 	LlamaAPI     string        // install.LlamaReleaseAPI in production
 	Download     *http.Client  // for GitHub downloads; honours HTTPS_PROXY
+	Path         string        // the invoking shell's PATH (the Mac hint for ~/.local/bin)
 	// Signals wraps the write step so that Ctrl-C stops after the current
 	// file. nil: no signal handling.
 	Signals func(ctx context.Context) (context.Context, context.CancelFunc)

@@ -1,5 +1,90 @@
 # Changelog
 
+## v2.6.0
+
+**Set up a machine with one command, add the next with one code, update the
+fleet with one more.** Everything from v2.6.0-beta1 to beta4 below, tested on
+real hardware, plus a documentation pass and an adversarial review of every
+new feature.
+
+- `viiwork init`: the first-run wizard. Linux (NVIDIA, in Docker) and Apple
+  Silicon (native, under a LaunchAgent). `viiwork join-code`, and
+  `viiwork uninstall`.
+- Signed, reproducible releases; nodes that update themselves; `viiwork update`
+  rolling a release across the mesh one host at a time.
+- `viiwork top`, and macOS as a first-class node.
+
+**Tested on real hardware:**
+
+- `init`:
+  - an NVIDIA host (three A4000 cards reached through CDI), beta3;
+  - an M3 Max MacBook with App Store Tailscale and viiwork-parrot models,
+    beta4.
+- `join-code` from a second new machine.
+- `uninstall` on both.
+- A beta3 → beta4 self-update, and a fleet of seven machines taken to beta4
+  with rolling updates enabled.
+
+### Since beta4
+
+**Documentation, reviewed as a newcomer would read it.**
+
+- The README's Quick Start and `docs/setup.md`:
+  - download, check and run for Linux and the Mac, prerequisites first;
+  - what to do when the wizard writes the config only (AMD);
+  - the logs on both platforms;
+  - a new "Updating" section.
+- `docs/releases.md` shows how to verify a signature from a download.
+- `docs/configuration.md` no longer says there is no interactive setup.
+- `viiwork update` on a Mac reads the mesh secret from the node's LaunchAgent,
+  as `join-code` does.
+- The usage line lists what each command takes.
+- On a Mac, the wizard says how to put `~/.local/bin` on `PATH`.
+
+**Found by an adversarial review, fixed:**
+
+- **`state.json` is read leniently.** The launcher is the oldest binary, and it
+  must read what a newer release wrote, or a rolled-back node could not start.
+- **A host still loading a model is not activated.** Its baseline would have
+  left that model out, so a release that could not load it would have
+  confirmed.
+- **A rollout waits for each host to be back in the mesh before the next.** A
+  release that broke membership would otherwise confirm host after host.
+- **llama-server gets `--log-verbosity 1` only when its `--help` lists the
+  levels.** An older build reads the number as a threshold that also turns on
+  debug, request bodies included, so it keeps `--log-disable`, and prompts
+  never reach the log.
+- **The wizard's model scan:**
+  - it follows a symlinked models directory;
+  - it maps an absolute link to the file it names inside the container's
+    mount;
+  - it skips anything that is not a regular file (a FIFO would hang it);
+  - it cleans text from GGUF headers and file names before printing it.
+- **A Mac setup that stops before starting removes its LaunchAgent,** so nothing
+  starts half-installed at the next login.
+- **SIGHUP is caught before startup.** Its default action ends the process, and
+  systemd's `Restart=on-failure` counts that as a clean stop.
+- A private build of a pre-release (`v2.6.0-beta4-g<sha>`) compares as that
+  pre-release.
+- The confirmation phrase is `YES I WANT TO UPDATE THE NODES ABOVE`: it is
+  true for a partial rollout too.
+- Smaller:
+  - `viiwork top` cleans a node's version in its failure line;
+  - the open-mesh and missing-secret messages say what actually works;
+  - the example compose file uses `restart: always` and mounts `/etc/viiwork`
+    as a directory.
+
+**Known, for v2.6.1 or later:**
+
+- After a host confirms a release, `viiwork update rollback` has nothing to
+  roll back to. Going back is a manual binary or image change.
+- A self-update moves the viiwork binary only. A wizard install's engine (the
+  Docker image, or the Mac's llama.cpp) stays as installed until a reinstall.
+- `viiwork top` can keep an in-flight row after a member crashes and comes
+  back under the same name.
+- `llama.cpp` release lookups use GitHub's API without a token, so behind a
+  shared address they can hit its rate limit.
+
 ## v2.6.0-beta4
 
 ### What the first Mac install found
@@ -33,7 +118,7 @@ fix on the way, and these came out of it:
 
 ### What the first real install found
 
-beta2's `viiwork init` installed teddy, which has three RTX A4000 cards and
+beta2's `viiwork init` installed a host with three RTX A4000 cards and
 Docker reaching them through CDI. It joined the fleet with a join code and
 served TranslateGemma, but only after three fixes, all found on the way:
 
@@ -208,10 +293,8 @@ A Mac runs llama.cpp on Metal as a normal mesh member:
 Additive only: the `update:` config block and the `/v1/update` wire types are
 new, and no existing key or field changed.
 
-**Not yet exercised on real hardware:**
-- `viiwork init`, `join-code` between two new machines, and `uninstall`, on
-  Linux and on a Mac. Everything so far runs against fakes.
-- The engine images stay private on ghcr until they are made public.
+At the time of beta1 none of this had run on real hardware; beta2 to beta4
+below are what that found.
 
 ## v2.5.0
 

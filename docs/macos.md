@@ -5,17 +5,19 @@ through the ordinary `llamacpp` engine. On a Mac that engine uses Metal. The
 node joins the mesh like any Linux host and serves the same GGUF files under
 the same model names, with the same flags. There is no separate macOS engine.
 Fleet compatibility comes from running the same llama.cpp release as the Linux
-nodes: the pin in `docker/Dockerfile.rocm`, which ggml-org also publishes as a
-macOS arm64 build.
+nodes: the pin in `docker/pins.env` (`LLAMA_CPP_VERSION`), which ggml-org also
+publishes as a macOS arm64 build.
 
 Supported: Apple Silicon (M1 and later). Not supported: Intel Macs and Docker
 on macOS, because Docker Desktop has no Metal. A Mac node always runs natively.
 
 ## Install
 
-The quickest way is `./viiwork init` (no sudo). It fetches llama.cpp at the
-pin, writes the config and the LaunchAgent below, and starts the node; see
-[setup.md](setup.md#on-a-mac). The manual steps follow.
+The quickest way is to download the `darwin_arm64` archive
+([setup.md](setup.md#download-and-verify)) and run `./viiwork init` from it,
+without sudo. It fetches llama.cpp at the pin, writes the config and the
+LaunchAgent below, and starts the node; see [setup.md](setup.md#on-a-mac). The
+manual steps follow.
 
 ```sh
 # 1. The node and its acceptance checker. Build them natively on the Mac,
@@ -92,8 +94,9 @@ The config is a normal v2 file. Only a few values are specific to the Mac:
 Unified memory is shared by every model and by everything else on the Mac.
 Metal lets the GPU wire about 75% of RAM by default: `sysctl
 iogpu.wired_limit_mb` reads 0, which means that default. On a 36 GB machine
-that is about 28 GB, which is the figure `--list-devices` prints. viiwork has
-no memory budget, so size the config yourself. An overcommitted config shows up
+that is about 28 GB, which is the figure `--list-devices` prints. The wizard
+plans against that budget; the node itself enforces none, so a config you edit
+by hand is yours to size. An overcommitted config shows up
 as a failed load, or as swapping. The health ladder reports both.
 
 ## Models from viiwork-parrot
@@ -129,8 +132,11 @@ changes for a laptop:
 
   ```sh
   #!/bin/sh
-  exec /Applications/Tailscale.app/Contents/MacOS/Tailscale "$@"
+  # The app binary acts as the CLI only when TERM is set; a LaunchAgent has none.
+  exec env TERM="${TERM:-dumb}" /Applications/Tailscale.app/Contents/MacOS/Tailscale "$@"
   ```
+
+  (The viiwork node needs no wrapper: it sets `TERM` for that binary itself.)
 
 While parrot downloads, the backend shows phase `fetching` with parrot's
 progress, and the time does not count against `startup_timeout`. Parrot
@@ -195,7 +201,8 @@ These are absent rather than zero, as on any host that cannot measure them:
 ## Acceptance
 
 `viiwork-accept` runs on the Mac as on any host. It is read-only: it never
-starts, stops or configures the node.
+starts, stops or configures the node. The wizard does not install it: run it
+from the unpacked release archive.
 
 ## Uninstall
 

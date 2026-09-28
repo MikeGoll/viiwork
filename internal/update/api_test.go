@@ -138,3 +138,19 @@ func TestRollback(t *testing.T) {
 		t.Errorf("state: %+v", st)
 	}
 }
+
+// A host activated while a model is still loading would take a baseline
+// without that model, confirm at once, and never roll back a release that
+// cannot load it. Activation waits for the host to settle instead.
+func TestActivateRefusesWhileAModelIsLoading(t *testing.T) {
+	s, restarts := service(t, true, allow(true))
+	s.Backends = backends(map[string]string{"m/0": meshapi.StatusHealthy, "m/1": meshapi.StatusStarting}, "loading")
+	call(s, http.MethodPost, meshapi.PathUpdateStage, `{"version":"v2.6.0"}`)
+	code, body := call(s, http.MethodPost, meshapi.PathUpdateActivate, `{"version":"v2.6.0"}`)
+	if code != 409 || !strings.Contains(body, "loading") {
+		t.Errorf("activate while loading: %d %s", code, body)
+	}
+	if restarts.Load() != 0 {
+		t.Error("restarted while a model was loading")
+	}
+}

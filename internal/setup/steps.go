@@ -181,7 +181,7 @@ func chooseModels(_ context.Context, h Host, p prompt.Prompter, s *state) error 
 		}
 		opts := make([]string, len(found))
 		for i, w := range found {
-			opts[i] = fmt.Sprintf("%-48s %-10s %s", w.file, w.info.Arch, mib((w.info.Size+(1<<20)-1)>>20))
+			opts[i] = w.describe()
 		}
 		picked, err := p.Select("Models to serve", opts)
 		if err != nil {
@@ -191,7 +191,7 @@ func chooseModels(_ context.Context, h Host, p prompt.Prompter, s *state) error 
 		for _, i := range picked {
 			w := found[i]
 			for {
-				name, err := p.Ask("Name for "+w.file, defaultName(w.file))
+				name, err := p.Ask("Name for "+clean(w.file), clean(defaultName(w.file)))
 				if err != nil {
 					return err
 				}
@@ -267,12 +267,18 @@ var modelNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 // out: it would be planned, then missing.
 func scan(p prompt.Prompter, root string, container bool) []weights {
 	var out []weights
-	realRoot, _ := filepath.EvalSymlinks(root)
-	filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		rel, _ := filepath.Rel(root, path)
+	seen := map[string]bool{}
+	// Walk the resolved directory: WalkDir does not descend into a root that
+	// is itself a symlink (/models -> a big disk).
+	realRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		realRoot = root
+	}
+	filepath.WalkDir(realRoot, func(path string, d fs.DirEntry, err error) error {
+		rel, _ := filepath.Rel(realRoot, path)
 		if err != nil {
 			if rel != "." {
-				p.Say("  skipped %s: %v", rel, err)
+				p.Say("  skipped %s: %s", clean(rel), clean(err.Error()))
 			}
 			return nil
 		}
@@ -288,25 +294,44 @@ func scan(p prompt.Prompter, root string, container bool) []weights {
 		if m := shardRe.FindStringSubmatch(d.Name()); m != nil && m[1] != "00001" {
 			return nil
 		}
+		// Only regular files: opening a FIFO named *.gguf would block forever.
+		if fi, err := os.Stat(path); err != nil || !fi.Mode().IsRegular() {
+			return nil
+		}
 		if container && d.Type()&fs.ModeSymlink != 0 {
 			target, err := filepath.EvalSymlinks(path)
 			if err != nil || !strings.HasPrefix(target, realRoot+string(filepath.Separator)) {
-				p.Say("  skipped %s: it links outside the models directory, which is all the container sees", rel)
+				p.Say("  skipped %s: it links outside the models directory, which is all the container sees", clean(rel))
 				return nil
 			}
+			// An absolute link names a host path, which the container does not
+			// have: use the file it points at, as the container sees it.
+			if dest, err := os.Readlink(path); err == nil && filepath.IsAbs(dest) {
+				rel, _ = filepath.Rel(realRoot, target)
+			}
+		}
+		if seen[rel] {
+			return nil
 		}
 		info, err := gguf.Read(path)
 		if err != nil {
-			p.Say("  skipped %s: %v", rel, err)
+			p.Say("  skipped %s: %s", clean(rel), clean(err.Error()))
 			return nil
 		}
 		if info.Arch == "clip" {
 			return nil
 		}
+		seen[rel] = true
 		out = append(out, weights{file: rel, info: info})
 		return nil
 	})
 	return out
+}
+
+// describe is the model's line in the listing. A file name and a GGUF
+// header's architecture are someone else's text on a root terminal.
+func (w weights) describe() string {
+	return fmt.Sprintf("%-48s %-10s %s", clean(w.file), clean(w.info.Arch), mib((w.info.Size+(1<<20)-1)>>20))
 }
 
 func defaultName(file string) string {
@@ -508,7 +533,7 @@ func meshStep(ctx context.Context, h Host, p prompt.Prompter, s *state) error {
 
 func updates(_ context.Context, _ Host, p prompt.Prompter, s *state) error {
 	if s.open {
-		p.Say("Mesh-wide updates need a secured mesh: in an open mesh, update.enabled stays off and updates are local only.")
+		p.Say("Mesh-wide updates need a secured mesh, so update.enabled stays off. To update this machine by itself later, set update.enabled: true and run `viiwork update` on it.")
 		return nil
 	}
 	ok, err := p.Confirm("Accept mesh-wide updates (`viiwork update`) on this machine?", false)

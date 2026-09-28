@@ -1,21 +1,19 @@
 package joincode
 
 import (
-	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"encoding/xml"
 	"flag"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/janit/viiwork/v2/internal/config"
+	"github.com/janit/viiwork/v2/internal/plistenv"
 	"github.com/janit/viiwork/v2/meshapi"
 )
 
@@ -98,7 +96,7 @@ func Run(ctx context.Context, args []string, env Env) int {
 		v, ok := env.LookupEnv(envName)
 		if (!ok || v == "") && env.Plist != "" {
 			if data, err := env.ReadFile(env.Plist); err == nil {
-				v, ok = plistEnv(data, envName)
+				v, ok = plistenv.Value(data, envName)
 			}
 		}
 		if !ok || v == "" {
@@ -124,48 +122,4 @@ func Run(ctx context.Context, args []string, env Env) int {
 	}
 	fmt.Fprintf(env.Stdout, "%s\n", code)
 	return 0
-}
-
-// plistEnv is the value of name in a LaunchAgent's EnvironmentVariables.
-func plistEnv(data []byte, name string) (string, bool) {
-	dec := xml.NewDecoder(bytes.NewReader(data))
-	dec.Strict = false
-	var inEnv bool
-	var depth, envDepth int
-	var key, lastKey string
-	for {
-		tok, err := dec.Token()
-		if err != nil {
-			return "", false
-		}
-		switch t := tok.(type) {
-		case xml.StartElement:
-			depth++
-			switch t.Name.Local {
-			case "dict":
-				if lastKey == "EnvironmentVariables" && !inEnv {
-					inEnv, envDepth = true, depth
-				}
-			case "key", "string":
-				var text string
-				if err := dec.DecodeElement(&text, &t); err != nil {
-					return "", false
-				}
-				depth--
-				if t.Name.Local == "key" {
-					lastKey = strings.TrimSpace(text)
-					key = lastKey
-				} else if inEnv && depth == envDepth && key == name {
-					return strings.TrimSpace(text), true
-				}
-				continue
-			}
-			lastKey = ""
-		case xml.EndElement:
-			if inEnv && depth == envDepth && t.Name.Local == "dict" {
-				return "", false
-			}
-			depth--
-		}
-	}
 }

@@ -90,6 +90,7 @@ func run(args []string, env runEnv) int {
 		defer stop()
 		return updatecli.Run(ctx, args[1:], updatecli.Env{
 			Stdout: env.stdout, Stderr: env.stderr, LookupEnv: env.lookupEnv, Hostname: env.hostname,
+			Plist: launchAgentPlist(),
 		})
 	}
 	if len(args) > 0 && args[0] == "join-code" {
@@ -126,7 +127,7 @@ func run(args []string, env runEnv) int {
 	engineReqs := fs.Bool("engine-requirements", false, "print the minimum engine versions this binary needs, as JSON, and exit")
 	buildInfo := fs.Bool("build-info", false, "print the version and the llama.cpp pin as JSON, and exit")
 	fs.Usage = func() {
-		fmt.Fprintf(env.stderr, "usage: viiwork [--config path] [--version]\n       viiwork alias <command> ...\n       viiwork top [--node host:port] [--host name] [--once]\n       viiwork update [status|rollback] ...\n       viiwork join-code [--config path]\n       viiwork init [--config path]\n       viiwork uninstall [--yes] [--delete-models] [--keep-images]\n\n")
+		fmt.Fprintf(env.stderr, "usage: viiwork [--config path] [--version]\n       viiwork alias <command> ...\n       viiwork top [--node host:port] [--host name] [--once]\n       viiwork update [status|rollback] ...\n       viiwork join-code [--open] [--config path]\n       viiwork init\n       viiwork uninstall [--yes] [--delete-models] [--keep-images] [--from-config]\n\n")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -155,6 +156,12 @@ func run(args []string, env runEnv) int {
 		fmt.Fprintln(env.stdout, string(b))
 		return 0
 	}
+
+	// Catch SIGHUP before anything slow: its default action ends the process,
+	// which systemd's Restart=on-failure treats as a clean stop. A HUP during
+	// startup waits here and reloads once the node is up.
+	hup := catchHUP()
+	defer signal.Stop(hup)
 
 	if _, err := os.Stat(*configPath); os.IsNotExist(err) && env.interactive != nil && env.interactive() {
 		fmt.Fprintf(env.stderr, "No config at %s: starting setup (viiwork init).\n\n", *configPath)
@@ -186,9 +193,6 @@ func run(args []string, env runEnv) int {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	hup := make(chan os.Signal, 1)
-	signal.Notify(hup, syscall.SIGHUP)
-	defer signal.Stop(hup)
 	go func() {
 		for {
 			select {
@@ -293,4 +297,11 @@ func launchAgentPlist() string {
 	}
 	home, _ := os.UserHomeDir()
 	return install.MacLayout(home).Plist
+}
+
+// catchHUP holds SIGHUP for the node's reload loop.
+func catchHUP() chan os.Signal {
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+	return hup
 }
