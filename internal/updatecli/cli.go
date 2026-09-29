@@ -1,6 +1,6 @@
 // Package updatecli is `viiwork update`: rolling a signed release across the
 // mesh one host at a time, reading every member's /v1/update, and sending one
-// host back to its last good release. Like `viiwork alias` it talks only to
+// host back a release. Like `viiwork alias` it talks only to
 // nodes' HTTP APIs, and it verifies nothing itself: the signature, the
 // engines and the confirmation are each node's job.
 package updatecli
@@ -44,6 +44,9 @@ const Usage = `usage: viiwork update [--to vX.Y.Z] [--hosts a,b] [--allow-downgr
 A rollout stages the release on every chosen host first, then activates them one
 at a time — the node you talk to last — and waits for each to confirm itself
 before the next. A host that rolls itself back stops the rollout.
+
+A rollback sends one host to its last good release, or, when it is already on
+it, to the release that was last good before it (PREVIOUS in status).
 
 flags:
   --node host:port    the node to read the mesh from (default 127.0.0.1:<api.port> from --config, else 127.0.0.1:8086)
@@ -323,7 +326,8 @@ func (c *cli) canWrite(v view) error {
 }
 
 // post sends one signed write and returns the node's refusal as an error.
-func (c *cli) post(ctx context.Context, addr, path string, in any, timeout time.Duration) error {
+// A reply the caller wants is decoded into out, when out is not nil.
+func (c *cli) post(ctx context.Context, addr, path string, in, out any, timeout time.Duration) error {
 	body, err := json.Marshal(in)
 	if err != nil {
 		return err
@@ -354,6 +358,10 @@ func (c *cli) post(ctx context.Context, addr, path string, in any, timeout time.
 		}
 		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, msg)
 	}
+	if out != nil {
+		// The write took effect; a reply it cannot read does not undo that.
+		json.Unmarshal(b, out)
+	}
 	return nil
 }
 
@@ -378,14 +386,17 @@ func (c *cli) status(ctx context.Context, asJSON bool) int {
 		return 0
 	}
 	tw := tabwriter.NewWriter(c.env.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "HOST\tRUNNING\tCURRENT\tLAST GOOD\tPENDING\tUPDATES\tENGINES")
+	fmt.Fprintln(tw, "HOST\tRUNNING\tCURRENT\tLAST GOOD\tPREVIOUS\tPENDING\tUPDATES\tENGINES")
 	for _, h := range hosts {
 		if h.err != nil {
-			fmt.Fprintf(tw, "%s\t—\t—\t—\t—\t%s\t\n", h.name, h.err)
+			fmt.Fprintf(tw, "%s\t—\t—\t—\t—\t—\t%s\t\n", h.name, h.err)
 			continue
 		}
 		s := h.status
-		pending, enabled := "—", "off"
+		pending, enabled, previous := "—", "off", "—"
+		if s.Previous != "" {
+			previous = s.Previous
+		}
 		if s.Pending != nil {
 			pending = fmt.Sprintf("%s (start %d)", s.Pending.Version, s.Pending.Attempts)
 		}
@@ -397,7 +408,7 @@ func (c *cli) status(ctx context.Context, asJSON bool) int {
 			engines = append(engines, e+" "+v)
 		}
 		sort.Strings(engines)
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", h.name, s.Running, s.Current, s.LastGood, pending, enabled, strings.Join(engines, ", "))
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", h.name, s.Running, s.Current, s.LastGood, previous, pending, enabled, strings.Join(engines, ", "))
 	}
 	tw.Flush()
 	return 0
@@ -425,11 +436,19 @@ func (c *cli) rollback(ctx context.Context, name string) int {
 			fmt.Fprintf(c.env.Stderr, "%s: %v\n", name, h.err)
 			return 1
 		}
-		if err := c.post(ctx, h.addr, meshapi.PathUpdateRollback, struct{}{}, writeTimeout); err != nil {
+		// The node decides where it goes: its last good release, or the one
+		// before that when it is already on its last good release.
+		var reply struct {
+			To string `json:"rolling_back_to"`
+		}
+		if err := c.post(ctx, h.addr, meshapi.PathUpdateRollback, struct{}{}, &reply, writeTimeout); err != nil {
 			fmt.Fprintf(c.env.Stderr, "%s: %v\n", name, err)
 			return 1
 		}
-		fmt.Fprintf(c.env.Stdout, "%s: rolling back to its last good release\n", name)
+		if reply.To == "" {
+			reply.To = "its last good release"
+		}
+		fmt.Fprintf(c.env.Stdout, "%s: rolling back to %s\n", name, reply.To)
 		return 0
 	}
 	fmt.Fprintf(c.env.Stderr, "%s is not a member of this mesh\n", name)
@@ -576,7 +595,7 @@ func (c *cli) rollout(ctx context.Context, o rolloutOpts) int {
 	failed := false
 	for _, h := range targets {
 		fmt.Fprintf(c.env.Stdout, "staging %s on %s…\n", to, h.name)
-		if err := c.post(ctx, h.addr, meshapi.PathUpdateStage, meshapi.UpdateRequest{Version: to}, stageTimeout); err != nil {
+		if err := c.post(ctx, h.addr, meshapi.PathUpdateStage, meshapi.UpdateRequest{Version: to}, nil, stageTimeout); err != nil {
 			fmt.Fprintf(c.env.Stderr, "%s: stage failed: %v\n", h.name, err)
 			failed = true
 		}
@@ -593,7 +612,7 @@ func (c *cli) rollout(ctx context.Context, o rolloutOpts) int {
 	for _, h := range targets {
 		fmt.Fprintf(c.env.Stdout, "activating %s on %s…\n", to, h.name)
 		req := meshapi.UpdateRequest{Version: to, AllowDowngrade: o.allowDowngrade}
-		if err := c.post(ctx, h.addr, meshapi.PathUpdateActivate, req, writeTimeout); err != nil {
+		if err := c.post(ctx, h.addr, meshapi.PathUpdateActivate, req, nil, writeTimeout); err != nil {
 			fmt.Fprintf(c.env.Stderr, "%s: activate failed: %v; later hosts untouched\n", h.name, err)
 			return 1
 		}

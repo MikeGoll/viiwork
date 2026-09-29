@@ -62,3 +62,28 @@ func InstalledEngines(ctx context.Context, models []config.Model) map[string]str
 	}
 	return out
 }
+
+// CheckEngineVersions is CheckEngines against versions already known, by
+// engine name — an image's, which the host's engine helper read from it —
+// rather than the engines installed here. A missing version fails.
+func CheckEngineVersions(models []config.Model, required, versions map[string]string) error {
+	for _, m := range models {
+		min := required[m.Engine]
+		if min == "" {
+			continue
+		}
+		e, ok := engine.Lookup(m.Engine)
+		if !ok {
+			continue
+		}
+		v, ok := e.(engine.Versioner)
+		installed := versions[m.Engine]
+		if !ok || installed == "" {
+			return fmt.Errorf("%w: model %s: the release needs %s %s, and the release's image does not say which %s it carries", ErrEngineTooOld, m.Name, m.Engine, min, m.Engine)
+		}
+		if ok, err := v.AtLeast(installed, min); err != nil || !ok {
+			return fmt.Errorf("%w: model %s: the release needs %s %s, its image carries %s", ErrEngineTooOld, m.Name, m.Engine, min, installed)
+		}
+	}
+	return nil
+}

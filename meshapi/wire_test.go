@@ -86,7 +86,7 @@ func TestV2WireFields(t *testing.T) {
 	assertFields(t, FleetCapacityResponse{}, []string{"view", "ver", "stale_after_s", "models", "resolved_from"})
 	assertFields(t, FleetModel{}, []string{"name", "engine", "slots", "busy", "free", "queued", "ctx", "hosts"})
 	assertFields(t, FleetHost{}, []string{"node", "api", "slots", "busy", "free", "ctx", "age_ms", "stale"})
-	assertFields(t, UpdateStatus{}, []string{"enabled", "running", "current", "last_good", "pending", "staged", "engines"})
+	assertFields(t, UpdateStatus{}, []string{"enabled", "running", "current", "last_good", "previous", "pending", "staged", "engines"})
 	assertFields(t, UpdatePending{}, []string{"version", "attempts", "deadline"})
 	assertFields(t, UpdateRequest{}, []string{"version", "allow_downgrade"})
 }
@@ -108,7 +108,7 @@ func TestV2UnmeasurableFieldsAreOmitempty(t *testing.T) {
 		{ModelEntry{}, []string{"target", "max_model_len", "context_length"}},
 		{FleetModel{}, []string{"ctx"}},
 		{FleetHost{}, []string{"slots", "busy", "free", "ctx"}},
-		{UpdateStatus{}, []string{"pending", "engines"}},
+		{UpdateStatus{}, []string{"previous", "pending", "engines"}},
 		{UpdatePending{}, []string{"deadline"}},
 	}
 	for _, c := range cases {

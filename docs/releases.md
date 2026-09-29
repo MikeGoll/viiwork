@@ -106,7 +106,10 @@ git clone --branch vX.Y.Z https://github.com/janit/viiwork viiwork-src
 
 A node takes part only with `update.enabled: true`. Everything lives under
 `<state_dir>/releases/`: `state.json` (`current`, `last_good`, `pending`, the
-recorded launcher) and one directory per staged version.
+recorded launcher), `previous` (the release that was last good before
+`last_good`) and one directory per staged version. `previous` is a file of its
+own because a launcher from v2.6.0-beta4 refuses any field in `state.json` it
+does not know.
 
 - **Stage** (`POST /v1/update/stage {"version": "vX.Y.Z"}`): the node downloads
   `SHA256SUMS`, its signature and this host's archive from
@@ -115,6 +118,22 @@ recorded launcher) and one directory per staged version.
   `viiwork-accept`, runs the new binary with `--version` (it must run here and
   report that version) and `--engine-requirements` (this host's engines must be
   new enough). Anything that fails leaves nothing behind.
+
+  On a Mac set up by `viiwork init` (its `install.json` names a llama root),
+  staging first reads the new binary's `--build-info`. When it carries a
+  llama.cpp pin with its macOS digest, the node fetches that build into the
+  llama root from the release's fixed URL, with no GitHub API call, and
+  requires the digest to match; the engine requirement is then checked
+  against that build, which is the one the release will run.
+- **The Mac's engine follows the binary.** A model whose `llamacpp.binary` is
+  exactly `<llama root>/<tag>/llama-<tag>/llama-server` runs the build of the
+  pin the *running* viiwork carries, when that build is present, and the
+  configured one otherwise. Activating a release therefore moves the engine
+  with it, and a rollback moves it back, with nothing recorded. A binary
+  anywhere else is used as written. When a release confirms, builds under the
+  llama root that no kept release runs (current, last good, previous, the
+  floor, this process, and any tag the config names) are removed; if any of
+  those cannot be read, nothing is.
 - **Activate** (`POST /v1/update/activate`): refused while any model is still
   loading. Otherwise it records the backends healthy right now as the
   baseline, marks the version pending, answers 202, shuts down in
@@ -126,21 +145,102 @@ recorded launcher) and one directory per staged version.
   10 minutes, fetching time excluded), rolls it back. A release that crashes
   before it can confirm is started twice; the third start runs last good.
   Every start counts, a routine restart during the window included.
-- **Rollback** (`POST /v1/update/rollback`): back to last good at once.
+- **Rollback** (`POST /v1/update/rollback`): back to last good at once. On a
+  host already on its last good release, back to the release that was last
+  good before it (`previous` in `GET /v1/update`), which becomes last good
+  again; refused when there is none, or its binary no longer verifies. It is
+  remembered for that one last good release only, so after a newer image
+  resets the node to its builtin binary there is nothing to go back to.
 - A newer image or binary installed out of band always wins over an older
-  staged release.
+  staged release. A floor that *is* the pending release (the same version,
+  exactly) runs it and keeps it pending, so it is still confirmed, not
+  forgotten.
 
 Writes need a meshauth signature in a secured mesh and come only from loopback
 in an open one, exactly like alias writes. `GET /v1/update` reports the state,
 the staged versions and the installed engine versions.
 
+## On a Docker install: the image follows the release
+
+A container cannot replace its own image, so on a Docker install made by
+`viiwork init` a small helper on the host does it: `viiwork engine-sync`, run
+as root from `/usr/local/bin/viiwork` by `viiwork-engine.path` (when the
+node's `state.json` or image request changes) and `viiwork-engine.timer`
+(every five minutes). Its one rule: the compose file's image tag is the
+node's `current` release, or for `builtin` the tag the install had when the
+helper first ran, which it records in its own root-only directory,
+`/var/lib/viiwork-engine/sync.json`. There the release *is* the image, engine
+included:
+
+- **Stage** also asks the helper, through `releases/engine-request.json`
+  (a version and a request id, nothing else), to verify and pull the
+  release's image. The helper answers in `releases/engine-result.json`, with
+  the engine version the image carries, which the release's engine
+  requirement is checked against. A bad image fails the stage, before any
+  host restarts, and activation never waits on a pull.
+- **Activate** is refused (409) until the helper has prepared that exact
+  version's image: stage it first. Activate and rollback then save the state
+  and answer 202, and never
+  exec a staged binary: the helper swaps the image and `docker compose up -d`
+  restarts the node through its ordinary shutdown. The new container counts
+  its starts of the pending release and the confirmer decides it as usual; a
+  rollback, the confirmer's included, sets `current` back and the helper
+  swaps the previous image in (still local, so nothing is pulled). If the
+  node is still running two minutes after an activate or rollback — no
+  helper, or a broken one — it restores the state it had and logs why.
+- **Swap.** The helper verifies the release itself, with the keys compiled
+  into the host binary and the same staging code a node uses, into
+  `/var/lib/viiwork-engine/releases/`; pulls `<repo>:<version>`; reads the
+  image's `/usr/local/bin/viiwork` out of a container it creates and never
+  starts; and swaps only when that file is byte for byte the signed
+  archive's. It then rewrites the compose file's `image:` line (the file as
+  it was is kept as `docker-compose.yaml.bak`) and runs `docker compose up -d`.
+  The engine layers under viiwork are trusted as at install time: by registry
+  and tag.
+- **Only forward, or back to what ran here.** The helper moves to a version
+  older than the running tag only when it is the install's own tag or one of
+  the last eight it swapped to itself (kept in `sync.json`); anything else is
+  refused and logged, pre-pulls included. So a node that writes an older
+  release into `state.json` cannot skip `/v1/update`'s consent for a
+  downgrade; a rollback goes back to a release this host has run.
+- **Disk.** An image already on the host is used, not pulled again. The
+  helper removes every image it pulled itself once nothing needs it, keeping
+  the running tag, the install's own, the last two it ran and the one
+  prepared for the latest stage; an image it did not pull is never removed.
+- **Itself.** Once the node has confirmed the release its image carries, the
+  helper installs its own verified copy of that release's binary as
+  `/usr/local/bin/viiwork` (the old one is kept as `viiwork.bak`), so the
+  host's CLI and the helper's own rules move with the release. Only ever
+  forward.
+
+**What it trusts.** The helper runs as root, and the node's releases
+directory is the container's to write. From it the helper takes `state.json`'s
+version names and an image request's version and id, each validated as
+exactly that, and nothing else: never a path, a repository or a URL. It reads
+them through an `os.Root` on the state directory, refuses a link anywhere
+there, reads only small regular files without blocking, and replaces its
+result file by rename, so a planted link can make it neither read nor write
+elsewhere. The repository comes from the host's compose file (and must be one
+of the published `ghcr.io/janit/viiwork-*` images), the download root from the
+host's `viiwork.yaml` (`update.source`), and where things are from the host's
+`install.json`. A compromised node can still ask for any *signed* release,
+newer than the running one, or one this host has already run.
+
+A node knows it is on such an install from the `engine_helper` entry in the
+`install.json` its container sees in `/etc/viiwork`. Anything else — a
+hand-built node, or an install from before v2.6.1 until `sudo viiwork init`
+adds the helper — updates its viiwork binary only, as before: the engine
+stays as installed, and staging refuses a release whose engine requirement
+the host does not meet. `journalctl -u viiwork-engine.service` shows what the
+helper did and why.
+
 ## Rolling a release across the mesh
 
 ```sh
-viiwork update status                        # every member: running, current, last good, pending, engines
+viiwork update status                        # every member: running, current, last good, previous, pending, engines
 viiwork update                               # the latest signed release, everywhere it is enabled
 viiwork update --to v2.6.0 --hosts node-a,node-b   # one version, some hosts
-viiwork update rollback --host node-b              # one host back to its last good release
+viiwork update rollback --host node-b              # one host back a release
 ```
 
 After a host confirms, the rollout also waits until the node it talks to sees

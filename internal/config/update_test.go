@@ -1,6 +1,8 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -70,5 +72,30 @@ func TestConfirmWindow(t *testing.T) {
 	empty := Defaults()
 	if got := empty.ConfirmWindow(); got != 10*time.Minute {
 		t.Errorf("no models = %v, want 10m", got)
+	}
+}
+
+// The engine helper reads update.source from the host's config as root: the
+// default when absent, and only what Validate would accept.
+func TestPeekSource(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "viiwork.yaml")
+	for body, want := range map[string]string{
+		"node: {name: n}\n": DefaultUpdateSource,
+		"update: {source: 'https://example.org/r'}\nfuture: 1\n": "https://example.org/r",
+		"update: {source: 'http://evil.example/r'}\n":            "",
+		"update: {source: 'file:///etc'}\n":                      "",
+	} {
+		os.WriteFile(p, []byte(body), 0o644)
+		got, err := PeekSource(p)
+		if want == "" {
+			if err == nil {
+				t.Errorf("%q: accepted %q", body, got)
+			}
+			continue
+		}
+		if err != nil || got != want {
+			t.Errorf("%q: %q, %v", body, got, err)
+		}
 	}
 }

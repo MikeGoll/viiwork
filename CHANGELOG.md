@@ -1,5 +1,53 @@
 # Changelog
 
+## v2.6.1
+
+**The engine follows the release, and the four issues v2.6.0 shipped as
+known are fixed.**
+
+**The engine follows the release.** In v2.6.0 a wizard install's
+self-update moved the viiwork binary only.
+
+- **Docker:** the wizard installs a host helper, `viiwork engine-sync`, run as
+  root by the systemd units `viiwork-engine.path` and `viiwork-engine.timer`.
+  It keeps the compose file's image on the release the node runs: it pulls
+  and checks a release's image at stage time, swaps it in on activation, and
+  swaps it back on a rollback. It verifies every release's signature itself
+  and requires the image's viiwork to be byte-identical to the signed one.
+  From the state directory, which the container can write, it takes only a
+  version name. Once a release confirms, it also updates
+  `/usr/local/bin/viiwork`, so the host's CLI moves with the fleet.
+- **A machine installed by v2.6.0 or a beta has no helper.** Its updates move
+  the binary only until `sudo ./viiwork init` from v2.6.1 adds it. On an
+  existing install that is all init does: the config, the compose file and the
+  running node are left alone.
+- **The helper goes back only to an image this host has run.** A container
+  that wrote an older signed version into `state.json` would otherwise pick
+  the release its host runs, past `/v1/update`'s downgrade gate. Rollbacks are
+  unaffected; `--allow-downgrade` to a version the host never ran is refused
+  there. The helper removes the images it pulled once nothing needs them, and
+  activation waits until the release's image is pulled and verified.
+- **Mac:** the llama.cpp build is pinned in the signed binary with its
+  sha256. Staging fetches the release's build beside the running one, and a
+  model running the wizard's llama-server always runs the build of its own
+  viiwork's pin, so a rollback takes the engine back too.
+
+**Also fixed:**
+
+- **`viiwork update rollback` works after a host confirms.** It goes to the
+  release that was last good before, remembered in `releases/previous`, not
+  in `state.json`, so a beta4 or v2.6.0 launcher still reads the state.
+  `viiwork update status` shows it.
+- **`viiwork top` and `/mesh` drop an in-flight row when its node restarted**
+  under the same name. `/mesh` used to keep such a row until the page
+  reconnected, even when the member was gone for good.
+- **The pinned llama.cpp download makes no GitHub API call,** so it cannot hit
+  the API's rate limit. A lookup for any other tag sends `GITHUB_TOKEN` when
+  it is set.
+
+**Known:** `viiwork uninstall` on a Mac leaves llama.cpp builds that updates
+fetched later under the llama root.
+
 ## v2.6.0
 
 **Set up a machine with one command, add the next with one code, update the

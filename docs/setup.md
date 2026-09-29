@@ -106,6 +106,8 @@ Pressing Ctrl-C or Ctrl-D at any question leaves nothing behind.
 | `/etc/viiwork/install.json` | 0644 | The manifest: exactly what `viiwork uninstall` removes. |
 | `/usr/local/bin/viiwork` | 0755 | A copy of the binary. |
 | `/var/lib/viiwork/` | — | Node state: the alias table and staged releases. |
+| `/etc/systemd/system/viiwork-engine.{service,path,timer}` | 0644 | The engine helper, which makes the image follow the release ([below](#updating)). |
+| `/var/lib/viiwork-engine/` | 0700 | The helper's own directory: the image tag the install started with, and the releases it verified. |
 
 Model weights are never copied or moved.
 
@@ -209,13 +211,42 @@ sudo sh -c 'set -a; . /etc/viiwork/mesh.env; /usr/local/bin/viiwork update'     
 It stages the newest signed release on every node, then activates them one at
 a time, and stops if a node rolls itself back or does not rejoin the mesh.
 
-An update moves the viiwork binary only. The engine stays as installed: the
-Docker image the wizard chose on Linux, and the llama.cpp build on a Mac. If a
-release ever needs a newer engine, staging on that machine is refused with the
-reason. To move the engine, run `viiwork uninstall` (model weights are kept)
-and then the new release's wizard, which picks its own engine.
-[releases.md](releases.md#how-a-node-updates-itself) explains what each node
-checks. To opt in later, add this to the config and restart the node (a reload
+On a Mac the llama.cpp build moves with the release: staging fetches the
+build the release is pinned to, checked against the sha256 signed into that
+release, beside the one running now, and the node always runs the build of
+its own binary's pin, so a rollback takes the engine back too. Builds no kept
+release runs are removed once a release confirms. A `llamacpp.binary` you
+pointed anywhere else is left exactly as written.
+
+On Linux the engine moves with the release. The node cannot swap its own
+Docker image, so the wizard installs a small helper on the host,
+`viiwork engine-sync`, run as root by the systemd units
+`viiwork-engine.path` and `viiwork-engine.timer`. When a release is staged
+the helper pulls and checks its image, so a bad image fails before any
+machine restarts; when it is activated the helper points the compose file at
+it and restarts the node, and on a rollback it points it back. It verifies
+every release's signature itself, with the keys in the host's own binary, and
+requires the image's viiwork to be exactly the signed release's; from the
+node's state directory, which the container can write, it takes nothing but
+a version name. Once the node confirms a release, the helper also updates
+`/usr/local/bin/viiwork`. `journalctl -u viiwork-engine.service` shows what
+it did. [releases.md](releases.md#on-a-docker-install-the-image-follows-the-release)
+has the details, and what each node checks.
+
+**A machine set up by an earlier release** (v2.6.0 or a beta) has no helper, and
+its updates move the viiwork binary only. To add it, run init from the new
+release's binary (downloaded and checked as [above](#download-and-verify)):
+
+```sh
+sudo ./viiwork init
+```
+
+On an existing Docker install init offers only this: it writes the three
+units, installs itself as `/usr/local/bin/viiwork`, records both in
+`install.json` so that uninstall removes them, and starts the helper. The
+config, the compose file and the running node are left alone. Until then, if
+a release ever needs a newer engine, staging on that machine is refused with
+the reason. To opt in later, add this to the config and restart the node (a reload
 does not apply it):
 
 ```yaml
@@ -240,8 +271,10 @@ secret, go with it. After you confirm, it:
 2. on Linux, runs `docker compose down` for its own project only, and removes
    the engine image unless you pass `--keep-images` (or another container
    still uses it);
-3. removes the files and the binary, and the state directory if the install
-   created it (a state directory that was there before is left alone).
+3. removes the files and the binary, the engine helper's units (stopped
+   before the node, so it cannot start it again) and directory, and the state
+   directory if the install created it (a state directory that was there
+   before is left alone).
 
 It never prunes, never touches another compose project, and leaves any file
 you added to `/etc/viiwork`.
@@ -265,14 +298,15 @@ the same questions, with two differences:
   (`iogpu.wired_limit_mb`, about 75% of RAM by default), minus headroom. A
   model that does not fit is shown with the reason.
 - **What gets installed.** No Docker. Instead the wizard fetches llama.cpp at
-  the release this binary was built against. It checks the download against
-  the sha256 that GitHub publishes for it, then installs a LaunchAgent.
+  the release this binary was built against. It downloads it from the
+  release's fixed URL, without GitHub's API, and checks it against the sha256
+  signed into this binary, then installs a LaunchAgent.
 
 | Path | Mode | What |
 |---|---|---|
 | `~/.config/viiwork/viiwork.yaml` | 0644 | The config: absolute paths, `gpu.vendor: apple`, each model's `llamacpp.binary`. |
 | `~/Library/LaunchAgents/fi.viiwork.node.plist` | 0600 | The agent, with the mesh secret in its environment. |
-| `~/.local/share/viiwork/llama.cpp/<tag>/` | — | The llama.cpp build, quarantine attribute cleared. A build already there (from `scripts/macos/fetch-llama.sh`) is reused and left alone by uninstall. |
+| `~/.local/share/viiwork/llama.cpp/<tag>/` | — | The llama.cpp build, quarantine attribute cleared. A build already there (from `scripts/macos/fetch-llama.sh`) is reused and left alone by uninstall. The manifest records the directory above it (`llama_root`), where updates fetch their builds. |
 | `~/.local/bin/viiwork` | 0755 | A copy of the binary. |
 | `~/.local/state/viiwork/`, `~/Library/Logs/viiwork/` | — | Node state, and the log. |
 | `~/.config/viiwork/install.json` | 0644 | The manifest. |

@@ -22,8 +22,10 @@ import (
 	"github.com/janit/viiwork/v2/internal/config"
 	"github.com/janit/viiwork/v2/internal/cost"
 	"github.com/janit/viiwork/v2/internal/engine"
+	"github.com/janit/viiwork/v2/internal/enginesync"
 	"github.com/janit/viiwork/v2/internal/joincode"
 	"github.com/janit/viiwork/v2/internal/node"
+	"github.com/janit/viiwork/v2/internal/release"
 	"github.com/janit/viiwork/v2/internal/setup"
 	"github.com/janit/viiwork/v2/internal/setup/install"
 	"github.com/janit/viiwork/v2/internal/setup/prompt"
@@ -41,6 +43,11 @@ var version = "dev"
 // (docker/pins.env), stamped by scripts/gobuild.sh. Empty when unstamped.
 var llamaCppPin = ""
 
+// llamaCppMacSHA256 is the sha256 of the pin's macOS arm64 asset, stamped
+// beside it. The release signature covers this binary, so it covers the
+// engine a Mac downloads by it too.
+var llamaCppMacSHA256 = ""
+
 type runEnv struct {
 	stdout, stderr io.Writer
 	lookupEnv      func(string) (string, bool)
@@ -50,6 +57,7 @@ type runEnv struct {
 	// interactive reports whether stdin is a terminal: only then does a
 	// missing config start the setup wizard. nil means no.
 	interactive func() bool
+	euid        func() int // nil = os.Geteuid
 }
 
 func main() {
@@ -100,6 +108,9 @@ func run(args []string, env runEnv) int {
 		})
 	}
 
+	if len(args) > 0 && args[0] == "engine-sync" {
+		return engineSync(args[1:], env)
+	}
 	if len(args) > 0 && args[0] == "uninstall" {
 		in := env.stdin
 		if in == nil {
@@ -125,9 +136,9 @@ func run(args []string, env runEnv) int {
 	configPath := fs.String("config", osConfigPath(), "path to viiwork.yaml")
 	showVersion := fs.Bool("version", false, "print the version and exit")
 	engineReqs := fs.Bool("engine-requirements", false, "print the minimum engine versions this binary needs, as JSON, and exit")
-	buildInfo := fs.Bool("build-info", false, "print the version and the llama.cpp pin as JSON, and exit")
+	buildInfo := fs.Bool("build-info", false, "print the version, the llama.cpp pin and its macOS digest as JSON, and exit")
 	fs.Usage = func() {
-		fmt.Fprintf(env.stderr, "usage: viiwork [--config path] [--version]\n       viiwork alias <command> ...\n       viiwork top [--node host:port] [--host name] [--once]\n       viiwork update [status|rollback] ...\n       viiwork join-code [--open] [--config path]\n       viiwork init\n       viiwork uninstall [--yes] [--delete-models] [--keep-images] [--from-config]\n\n")
+		fmt.Fprintf(env.stderr, "usage: viiwork [--config path] [--version]\n       viiwork alias <command> ...\n       viiwork top [--node host:port] [--host name] [--once]\n       viiwork update [status|rollback] ...\n       viiwork join-code [--open] [--config path]\n       viiwork init\n       viiwork uninstall [--yes] [--delete-models] [--keep-images] [--from-config]\n       viiwork engine-sync   (run by systemd on a Docker install; see docs/releases.md)\n\n")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -152,6 +163,9 @@ func run(args []string, env runEnv) int {
 		if llamaCppPin != "" {
 			info["llama_cpp"] = llamaCppPin
 		}
+		if llamaCppMacSHA256 != "" {
+			info["llama_cpp_macos_sha256"] = llamaCppMacSHA256
+		}
 		b, _ := json.Marshal(info)
 		fmt.Fprintln(env.stdout, string(b))
 		return 0
@@ -170,8 +184,9 @@ func run(args []string, env runEnv) int {
 
 	// The handover comes before the strict load: the release this launcher
 	// hands over to may understand config keys this binary does not.
+	managed := managedInstall(*configPath)
 	if stateDir, enabled, err := config.PeekUpdate(*configPath); err == nil && enabled {
-		if code, done := handover(stateDir, args, env); done {
+		if code, done := handover(stateDir, managed, args, env); done {
 			return code
 		}
 	}
@@ -184,7 +199,8 @@ func run(args []string, env runEnv) int {
 	}
 	n, err := node.New(cfg, node.Options{
 		ConfigPath: *configPath, Version: version, Log: env.stdout,
-		LookupEnv: env.lookupEnv, Hostname: env.hostname,
+		LookupEnv: env.lookupEnv, Hostname: env.hostname, Managed: managed,
+		LlamaPin: llamaCppPin, InstallManifest: macManifest(),
 	})
 	if err != nil {
 		fmt.Fprintf(env.stderr, "viiwork: %v\n", err)
@@ -237,13 +253,13 @@ func restart(ctx context.Context, stateDir string, args []string, env runEnv) in
 // handover is the update launcher. Before the node is built, a node that takes
 // part in updates runs the release its state names, exec'ing it in place so
 // Docker, launchd and pid: host see one process.
-func handover(stateDir string, args []string, env runEnv) (int, bool) {
+func handover(stateDir string, managed bool, args []string, env runEnv) (int, bool) {
 	_, handedOver := env.lookupEnv(update.HandoverEnv)
 	// A later restart must start at the launcher again, so the variable does
 	// not outlive this check.
 	os.Unsetenv(update.HandoverEnv)
 	target, logs, err := update.Startup(update.StartupEnv{
-		StateDir: stateDir, Running: version, HandedOver: handedOver, Self: update.SelfLauncher,
+		StateDir: stateDir, Running: version, HandedOver: handedOver, Managed: managed, Self: update.SelfLauncher,
 	})
 	for _, l := range logs {
 		fmt.Fprintf(env.stderr, "viiwork: update: %s\n", l)
@@ -260,6 +276,52 @@ func handover(stateDir string, args []string, env runEnv) (int, bool) {
 	return 1, true
 }
 
+// managedInstall reports whether this node is a Docker install whose image
+// the host's engine helper swaps: the install's manifest, which the container
+// sees in the /etc/viiwork it mounts read-only, records the helper. Only for
+// the install's own config path, so a node started any other way behaves as
+// a hand-built one.
+func managedInstall(configPath string) bool {
+	return runtime.GOOS == "linux" && configPath == install.ConfigFile && install.ManagedInstall(install.ManifestFile)
+}
+
+// engineSync is the engine helper, run as root on a Docker install's host by
+// viiwork-engine.service.
+func engineSync(args []string, env runEnv) int {
+	if len(args) > 0 {
+		fmt.Fprint(env.stderr, "usage: viiwork engine-sync\n\nRun by systemd (viiwork-engine.service) on a Docker install: makes the compose file's image follow the node's release. docs/releases.md\n")
+		return 2
+	}
+	euid := os.Geteuid
+	if env.euid != nil {
+		euid = env.euid
+	}
+	if runtime.GOOS != "linux" || euid() != 0 {
+		fmt.Fprintln(env.stderr, "viiwork engine-sync: runs as root on a Linux Docker install (systemctl start viiwork-engine.service)")
+		return 1
+	}
+	keys, err := release.Keys()
+	if err != nil {
+		fmt.Fprintf(env.stderr, "viiwork engine-sync: %v\n", err)
+		return 1
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.ResponseHeaderTimeout = time.Minute
+	h := &enginesync.Helper{
+		Paths: enginesync.DefaultPaths(), Version: version,
+		Target: release.Target{OS: runtime.GOOS, Arch: runtime.GOARCH}, Keys: keys,
+		Client: &http.Client{Transport: tr}, Run: enginesync.Command(env.stderr),
+		Log: func(format string, a ...any) { fmt.Fprintf(env.stderr, format+"\n", a...) },
+	}
+	if err := h.Sync(ctx); err != nil {
+		fmt.Fprintf(env.stderr, "viiwork engine-sync: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
 // runInit is the setup wizard. Its prompts read stdin, and nothing is written
 // before its last confirmation.
 func runInit(configPath string, env runEnv) int {
@@ -267,7 +329,7 @@ func runInit(configPath string, env runEnv) int {
 	if in == nil {
 		in = os.Stdin
 	}
-	err := setup.Run(context.Background(), setup.DefaultHost(version, llamaCppPin, env.stdout), prompt.NewLine(in, env.stdout), configPath)
+	err := setup.Run(context.Background(), setup.DefaultHost(version, llamaCppPin, llamaCppMacSHA256, env.stdout), prompt.NewLine(in, env.stdout), configPath)
 	switch {
 	case err == nil:
 		return 0
@@ -297,6 +359,17 @@ func launchAgentPlist() string {
 	}
 	home, _ := os.UserHomeDir()
 	return install.MacLayout(home).Plist
+}
+
+// macManifest is a Mac install's install.json, whose llama root the node's
+// managed llama.cpp builds live under; "" elsewhere, where the engine stays
+// with the image or install it came with.
+func macManifest() string {
+	if runtime.GOOS != "darwin" {
+		return ""
+	}
+	home, _ := os.UserHomeDir()
+	return install.MacLayout(home).ManifestFile
 }
 
 // catchHUP holds SIGHUP for the node's reload loop.

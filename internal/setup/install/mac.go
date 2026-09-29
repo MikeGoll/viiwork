@@ -56,6 +56,7 @@ func (m Mac) target() string { return "gui/" + strconv.Itoa(m.UID) + "/" + Launc
 // Write writes the install manifest-first (see writer.write).
 func (m Mac) Write(ctx context.Context, dirs []string, files []File, man Manifest) (Manifest, error) {
 	man.LaunchAgent = LaunchAgent
+	man.LlamaRoot = m.P.LlamaRoot
 	w := writer{root: m.Root, os: "darwin", manifest: m.P.ManifestFile, binary: m.P.BinaryPath, executable: m.Executable}
 	return w.write(ctx, dirs, files, man)
 }

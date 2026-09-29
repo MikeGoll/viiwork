@@ -39,8 +39,41 @@ type Stager struct {
 	Keys   []ed25519.PublicKey
 	Target release.Target
 	// Engines checks the release's engine requirements; nil checks nothing.
-	Engines    func(ctx context.Context, required map[string]string) error
-	MaxArchive int64 // 0 = 512 MiB
+	Engines func(ctx context.Context, required map[string]string) error
+	// PrepareLlama makes the llama.cpp build the staged release is pinned to
+	// available before anything is checked against it: a Mac install fetches
+	// it beside the running one. It receives the staged binary's build
+	// information (zero pin fields when the binary predates --build-info) and
+	// may return the engine check to run in place of Engines, judged against
+	// the build the release will run rather than the one running now. nil
+	// prepares nothing.
+	PrepareLlama func(ctx context.Context, info BuildInfo) (engines func(ctx context.Context, required map[string]string) error, err error)
+	// PrepareImage, on a Docker install whose host helper swaps the image,
+	// has the helper pull and verify version's image and checks the
+	// requirements against the engine that image carries, in place of
+	// Engines: there the release is the image, engine included.
+	PrepareImage func(ctx context.Context, version string, required map[string]string) error
+	MaxArchive   int64 // 0 = 512 MiB
+}
+
+// BuildInfo is what `viiwork --build-info` prints.
+type BuildInfo struct {
+	Version           string `json:"version"`
+	LlamaCpp          string `json:"llama_cpp,omitempty"`
+	LlamaCppMacSHA256 string `json:"llama_cpp_macos_sha256,omitempty"`
+}
+
+// ReadBuildInfo runs bin --build-info.
+func ReadBuildInfo(ctx context.Context, bin string) (BuildInfo, error) {
+	out, err := runStaged(ctx, bin, "--build-info")
+	if err != nil {
+		return BuildInfo{}, fmt.Errorf("%s --build-info: %v", bin, err)
+	}
+	var info BuildInfo
+	if err := json.Unmarshal([]byte(out), &info); err != nil {
+		return BuildInfo{}, fmt.Errorf("%s --build-info: %v", bin, err)
+	}
+	return info, nil
 }
 
 // Stage makes version runnable from Dir/<version>, replacing an earlier stage
@@ -94,9 +127,14 @@ func (st *Stager) Stage(ctx context.Context, version string) error {
 	// A signed version has fixed bytes: when they are already staged and
 	// intact, there is nothing to do — and nothing to replace, so a retry can
 	// never open a window in which the version has no directory.
+	// The image is still prepared: it may never have been, when the release
+	// was staged before the install had a helper.
 	if p, err := Binary(st.Dir, version); err == nil {
 		if got, err := FileSHA256(p); err == nil && got == hex.EncodeToString(sum[:]) {
-			return nil
+			if st.PrepareImage == nil {
+				return nil
+			}
+			return st.checkEngines(ctx, version, p, st.Engines)
 		}
 	}
 
@@ -129,18 +167,24 @@ func (st *Stager) Stage(ctx context.Context, version string) error {
 	if got := strings.TrimSpace(out); got != version {
 		return fmt.Errorf("%w: the %s binary reports version %q", ErrUnverified, version, got)
 	}
-	if st.Engines != nil {
-		out, err := runStaged(ctx, filepath.Join(tmp, binName), "--engine-requirements")
+	engines := st.Engines
+	if st.PrepareLlama != nil {
+		// A binary without --build-info predates the pin following it, so
+		// it runs the engine as configured and there is nothing to prepare.
+		info, err := ReadBuildInfo(ctx, filepath.Join(tmp, binName))
 		if err != nil {
-			return fmt.Errorf("staged %s --engine-requirements: %v", version, err)
+			info = BuildInfo{Version: version}
 		}
-		var req map[string]string
-		if err := json.Unmarshal([]byte(out), &req); err != nil {
-			return fmt.Errorf("%w: %s --engine-requirements: %v", ErrUnverified, version, err)
+		check, err := st.PrepareLlama(ctx, info)
+		if err != nil {
+			return fmt.Errorf("preparing llama.cpp for %s: %w", version, err)
 		}
-		if err := st.Engines(ctx, req); err != nil {
-			return err
+		if check != nil {
+			engines = check
 		}
+	}
+	if err := st.checkEngines(ctx, version, filepath.Join(tmp, binName), engines); err != nil {
+		return err
 	}
 
 	final := filepath.Join(st.Dir, version)
@@ -165,6 +209,27 @@ func (st *Stager) Stage(ctx context.Context, version string) error {
 		os.RemoveAll(aside)
 	}
 	return nil
+}
+
+// checkEngines reads the requirements of the staged binary bin and checks
+// them: against the image's engine when there is a helper, else against the
+// engines installed here.
+func (st *Stager) checkEngines(ctx context.Context, version, bin string, engines func(context.Context, map[string]string) error) error {
+	if engines == nil && st.PrepareImage == nil {
+		return nil
+	}
+	out, err := runStaged(ctx, bin, "--engine-requirements")
+	if err != nil {
+		return fmt.Errorf("staged %s --engine-requirements: %v", version, err)
+	}
+	var req map[string]string
+	if err := json.Unmarshal([]byte(out), &req); err != nil {
+		return fmt.Errorf("%w: %s --engine-requirements: %v", ErrUnverified, version, err)
+	}
+	if st.PrepareImage != nil {
+		return st.PrepareImage(ctx, version, req)
+	}
+	return engines(ctx, req)
 }
 
 func (st *Stager) get(ctx context.Context, version, asset string, max int64) ([]byte, error) {

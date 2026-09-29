@@ -24,7 +24,7 @@ import (
 )
 
 // DefaultHost is the machine this process runs on.
-func DefaultHost(version, llamaPin string, out io.Writer) Host {
+func DefaultHost(version, llamaPin, llamaSHA256 string, out io.Writer) Host {
 	exe, _ := os.Executable()
 	home, _ := os.UserHomeDir()
 	if name := os.Getenv("SUDO_USER"); name != "" {
@@ -50,7 +50,9 @@ func DefaultHost(version, llamaPin string, out io.Writer) Host {
 		},
 		Rand: rand.Reader, Executable: exe, HTTP: env.HTTP, Accept: env,
 		NodeAPI: "127.0.0.1:8086", PeerAPIPort: 8086, Out: out, ReadyTimeout: 45 * time.Minute, UpTimeout: 2 * time.Minute, Poll: 2 * time.Second,
-		UID: os.Getuid(), LlamaPin: llamaPin, LlamaAPI: install.LlamaReleaseAPI,
+		UID: os.Getuid(), LlamaPin: llamaPin, LlamaSHA256: llamaSHA256,
+		LlamaAPI: install.LlamaReleaseAPI, LlamaRelease: install.LlamaReleases,
+		GitHubToken: func() string { return os.Getenv("GITHUB_TOKEN") },
 		// Downloads from GitHub honour HTTPS_PROXY; the node-facing client
 		// above never uses a proxy.
 		Download: downloadClient(),

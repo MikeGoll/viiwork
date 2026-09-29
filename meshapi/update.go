@@ -10,9 +10,14 @@ type UpdateStatus struct {
 	// Running is the version of the process answering. Current names what
 	// the node starts (UpdateBuiltin or a staged version) and LastGood what
 	// it returns to.
-	Running  string         `json:"running"`
-	Current  string         `json:"current"`
-	LastGood string         `json:"last_good"`
+	Running  string `json:"running"`
+	Current  string `json:"current"`
+	LastGood string `json:"last_good"`
+	// Previous is the release that was last good before LastGood confirmed,
+	// still staged here: where a rollback goes once nothing is pending and
+	// the node is on its last good release. Absent when there is none, and
+	// from a node that predates it.
+	Previous string         `json:"previous,omitempty"`
 	Pending  *UpdatePending `json:"pending,omitempty"`
 	Staged   []string       `json:"staged"`
 	// Engines is the installed version of each engine the node's models use,

@@ -49,7 +49,10 @@ type Host struct {
 	Poll         time.Duration // between status polls
 	UID          int           // for launchctl's gui/<uid> domain (macOS)
 	LlamaPin     string        // the llama.cpp release this build was cut against
+	LlamaSHA256  string        // the pin's macOS asset sha256, signed with the binary; "" asks the API
 	LlamaAPI     string        // install.LlamaReleaseAPI in production
+	LlamaRelease string        // install.LlamaReleases in production
+	GitHubToken  func() string // $GITHUB_TOKEN for the API lookup; nil sends none
 	Download     *http.Client  // for GitHub downloads; honours HTTPS_PROXY
 	Path         string        // the invoking shell's PATH (the Mac hint for ~/.local/bin)
 	// Signals wraps the write step so that Ctrl-C stops after the current
@@ -98,6 +101,11 @@ func Run(ctx context.Context, h Host, p prompt.Prompter, configPath string) erro
 	write := writeAndStart
 	switch h.GOOS {
 	case "linux":
+		// A Docker install made before the engine helper: add it, and nothing
+		// else. Any other earlier install is refused by preflight.
+		if m, err := install.ReadManifest(h.path(install.ManifestFile)); configPath == install.ConfigFile && err == nil && m.Compose != nil && m.EngineHelper == nil {
+			return addEngineHelper(ctx, h, p, m)
+		}
 		pre = preflight
 	case "darwin":
 		pre, write = preflightMac, writeAndStartMac

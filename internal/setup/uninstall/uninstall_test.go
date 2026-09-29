@@ -402,3 +402,58 @@ func TestASymlinkedModelIsSkipped(t *testing.T) {
 		t.Error("the other model was not deleted")
 	}
 }
+
+// The engine helper is stopped before the node: left running, it could bring
+// the compose project back up while the uninstall removes it.
+func TestRemovesTheEngineHelper(t *testing.T) {
+	f := newLinux(t, 2)
+	var units []string
+	for _, u := range install.EngineUnits {
+		units = append(units, filepath.Join(install.SystemdDir, u))
+		f.write(filepath.Join(install.SystemdDir, u), "[Unit]\n")
+	}
+	f.write(install.EngineDir+"/releases/v2.6.0/viiwork", "verified")
+	f.write("/etc/systemd/system/other.service", "[Unit]\n")
+	f.write(install.ComposeFile+".bak", "name: viiwork\n")
+	f.write(install.BinaryPath+".bak", "#!old")
+	m := install.Manifest{
+		Version: 1, OS: "linux", InstalledBy: "v2.6.0",
+		Files:        append([]string{install.ConfigFile, install.EnvFile, install.ComposeFile}, append(units, "/etc/systemd/system/other.service")...),
+		Dirs:         []string{install.ConfigDir, install.StateDir, install.EngineDir},
+		Compose:      &install.Compose{File: install.ComposeFile, Project: "viiwork", Volumes: []string{}},
+		Binary:       install.BinaryPath,
+		EngineHelper: &install.EngineHelper{Units: install.EngineUnits, Dir: install.EngineDir},
+	}
+	data, _ := json.Marshal(m)
+	f.write(install.ManifestFile, string(data))
+
+	if err := f.run(Options{}, "uninstall"); err != nil {
+		t.Fatalf("%v\n%s", err, f.out)
+	}
+	for _, p := range append(units, install.EngineDir, install.ComposeFile+".bak", install.BinaryPath+".bak") {
+		if f.exists(p) {
+			t.Errorf("%s survived", p)
+		}
+	}
+	if !f.exists("/etc/systemd/system/other.service") {
+		t.Error("a unit the install did not write was removed")
+	}
+	disable := "systemctl disable --now viiwork-engine.path viiwork-engine.timer viiwork-engine.service"
+	i := slices.Index(*f.calls, disable)
+	j := slices.IndexFunc(*f.calls, func(c string) bool { return strings.HasPrefix(c, "docker compose") })
+	if i < 0 || j < 0 || i > j || (*f.calls)[len(*f.calls)-1] != "systemctl daemon-reload" {
+		t.Errorf("calls %q", *f.calls)
+	}
+
+	// A helper that cannot be stopped stops the uninstall, with nothing removed.
+	f = newLinux(t, 2)
+	for _, u := range install.EngineUnits {
+		f.write(filepath.Join(install.SystemdDir, u), "[Unit]\n")
+	}
+	data, _ = json.Marshal(m)
+	f.write(install.ManifestFile, string(data))
+	f.fail[disable] = true
+	if err := f.run(Options{}, "uninstall"); err == nil || !f.exists(install.ConfigFile) || slices.ContainsFunc(*f.calls, func(c string) bool { return strings.HasPrefix(c, "docker") }) {
+		t.Errorf("helper not stopped: %v, calls %q", err, *f.calls)
+	}
+}

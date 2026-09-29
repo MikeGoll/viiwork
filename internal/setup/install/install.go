@@ -42,6 +42,15 @@ type Manifest struct {
 	LaunchAgent string   `json:"launch_agent"`
 	Binary      string   `json:"binary"`
 	ModelDirs   []string `json:"model_dirs"`
+	// LlamaRoot is where a Mac install keeps its llama.cpp builds, one
+	// directory per tag. A running node reads it to fetch the build a staged
+	// release is pinned to and to run the build of its own pin. Absent from a
+	// manifest written before v2.6.0, and on Linux.
+	LlamaRoot string `json:"llama_root,omitempty"`
+	// EngineHelper is absent on an install made before v2.6.0 until
+	// `viiwork init` adds it. Unknown fields are ignored by every reader, so
+	// an older binary still reads a manifest that has it.
+	EngineHelper *EngineHelper `json:"engine_helper,omitempty"`
 }
 
 // Compose is the compose project the install started.

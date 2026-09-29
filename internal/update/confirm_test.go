@@ -103,3 +103,30 @@ func TestNothingToConfirm(t *testing.T) {
 		t.Error("changed a state it does not own")
 	}
 }
+
+// Once a release confirms, the engine builds no kept release is pinned to
+// may go: PruneEngines sees the state as confirmed, and only then.
+func TestConfirmPrunesEngines(t *testing.T) {
+	_, c, _, _ := pendingState(t, "m/0")
+	var kept []State
+	c.PruneEngines = func(s State) { kept = append(kept, s) }
+	c.Backends = backends(map[string]string{"m/0": meshapi.StatusStarting}, "")
+	c.Step()
+	if len(kept) != 0 {
+		t.Fatal("pruned before confirming")
+	}
+	c.Backends = backends(map[string]string{"m/0": meshapi.StatusHealthy}, "")
+	if !c.Step() {
+		t.Fatal("did not confirm")
+	}
+	if len(kept) != 1 || kept[0].Current != "v2.6.0" || kept[0].LastGood != "v2.6.0" || kept[0].Previous != "v2.5.0" {
+		t.Errorf("pruned with %+v", kept)
+	}
+}
+
+func TestRollbackDoesNotPruneEngines(t *testing.T) {
+	_, c, _, _ := pendingState(t, "m/0")
+	c.PruneEngines = func(State) { t.Error("pruned on a rollback") }
+	c.Backends = backends(map[string]string{"m/0": meshapi.StatusDead}, "")
+	c.Step()
+}

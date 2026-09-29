@@ -99,7 +99,7 @@ func TestMacEditSkipsTheGPUQuestion(t *testing.T) {
 
 // llamaRelease stands in for GitHub: the b1 release's asset list and a
 // tarball holding llama-b1/llama-server.
-func llamaRelease(t *testing.T) (*httptest.Server, *atomic.Int32) {
+func llamaRelease(t *testing.T) (*httptest.Server, *atomic.Int32, string) {
 	var buf bytes.Buffer
 	gz := gzip.NewWriter(&buf)
 	tw := tar.NewWriter(gz)
@@ -119,14 +119,14 @@ func llamaRelease(t *testing.T) (*httptest.Server, *atomic.Int32) {
 			json.NewEncoder(w).Encode(map[string]any{"assets": []any{map[string]string{
 				"name": "llama-b1-bin-macos-arm64.tar.gz", "browser_download_url": srv.URL + "/asset",
 				"digest": "sha256:" + hex.EncodeToString(sum[:])}}})
-		case "/asset":
+		case "/asset", "/download/b1/llama-b1-bin-macos-arm64.tar.gz":
 			w.Write(archive)
 		default:
 			http.NotFound(w, r)
 		}
 	}))
 	t.Cleanup(srv.Close)
-	return srv, &hits
+	return srv, &hits, hex.EncodeToString(sum[:])
 }
 
 type macInstall struct {
@@ -134,6 +134,7 @@ type macInstall struct {
 	home     string
 	p        install.MacPaths
 	hits     *atomic.Int32
+	digest   string // the release asset's sha256, for a pinned build
 	loaded   bool
 	headless bool // no GUI session: an SSH login with nobody at the console
 }
@@ -147,9 +148,9 @@ func newMac(t *testing.T) *macInstall {
 	m.p = install.MacLayout(m.home)
 	f.host.Root, f.host.Home = "", m.home
 	writeGGUF(t, filepath.Join(m.home, "models", "alpha-8b.gguf"), "llama", 7<<30)
-	srv, hits := llamaRelease(t)
-	m.hits = hits
-	f.host.LlamaAPI, f.host.Download = srv.URL+"/tags/", srv.Client()
+	srv, hits, digest := llamaRelease(t)
+	m.hits, m.digest = hits, digest
+	f.host.LlamaAPI, f.host.LlamaRelease, f.host.Download = srv.URL+"/tags/", srv.URL+"/download/", srv.Client()
 	f.host.Exec = func(_ context.Context, _ io.Writer, name string, args ...string) error {
 		c := name + " " + strings.Join(args, " ")
 		if strings.HasPrefix(c, "launchctl print gui/501/") {
@@ -414,5 +415,23 @@ func TestMacFinishSaysHowToReachTheBinary(t *testing.T) {
 	}
 	if strings.Contains(m.out.String(), "export PATH=") {
 		t.Error("a PATH hint although ~/.local/bin is on PATH")
+	}
+}
+
+// A build carrying the pin's digest downloads from the asset's fixed URL and
+// never asks GitHub's API, whose rate limit a shared address can exhaust.
+func TestMacPinnedDigestSkipsTheAPI(t *testing.T) {
+	m := newMac(t)
+	m.host.LlamaSHA256 = m.digest
+	m.host.LlamaAPI += "unused/" // any API lookup would 404 and fail the install
+	if err := m.run(macAnswers...); err != nil {
+		t.Fatalf("%v\n%s", err, m.out)
+	}
+	if !install.Fetched(m.p.LlamaRoot, "b1") || strings.Contains(m.out.String(), "unverified") {
+		t.Errorf("output:\n%s", m.out)
+	}
+	man, err := install.ReadManifest(m.p.ManifestFile)
+	if err != nil || man.LlamaRoot != m.p.LlamaRoot {
+		t.Errorf("manifest %+v %v", man, err)
 	}
 }

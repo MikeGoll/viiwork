@@ -151,3 +151,45 @@ func TestFlightsOfDeadOriginsAreDropped(t *testing.T) {
 		t.Fatalf("after node-a left: %+v", fl)
 	}
 }
+
+// A member that crashes and comes back under the same name may never show as
+// anything but alive: the restart can fall between two snapshots. Its old
+// requests will never see a terminal event, so a new process on the origin
+// drops them — whether the snapshot shows it as a new node_id or, when the
+// events carried none, as uptime going backwards.
+func TestFlightsOfARestartedOriginAreDropped(t *testing.T) {
+	withID := func(node, id string, uptime int64) meshapi.Member {
+		m := member(node, uptime, 0, 0)
+		m.Status.NodeID = id
+		return m
+	}
+	s := NewState()
+	s.Apply(snap(withID("node-a", "id-node-a", 100), member("node-b", 100, 0, 0)), t0)
+	s.ApplyEvent(ev("node-a", 1, meshapi.RequestStarted("m", "m/0"), 100))
+	noID := ev("node-b", 2, meshapi.RequestStarted("m", "m/0"), 100)
+	noID.NodeID = ""
+	s.ApplyEvent(noID)
+	s.Apply(snap(withID("node-a", "id-node-a", 101), member("node-b", 101, 0, 0)), t0.Add(time.Second))
+	if fl := s.Flights(); len(fl) != 2 {
+		t.Fatalf("before the restarts: %+v", fl)
+	}
+
+	// node-a restarts: a new node_id, and its fresh counter reuses rid 1.
+	s.Apply(snap(withID("node-a", "id-node-a-2", 3), member("node-b", 102, 0, 0)), t0.Add(2*time.Second))
+	if fl := s.Flights(); len(fl) != 1 || fl[0].Origin != "node-b" {
+		t.Fatalf("after node-a restarted: %+v", fl)
+	}
+	again := ev("node-a", 1, meshapi.RequestStarted("m", "m/1"), 103)
+	again.NodeID = "id-node-a-2"
+	s.ApplyEvent(again)
+	s.Apply(snap(withID("node-a", "id-node-a-2", 4), member("node-b", 103, 0, 0)), t0.Add(3*time.Second))
+	if fl := s.Flights(); len(fl) != 2 {
+		t.Fatalf("the new process's request was dropped: %+v", fl)
+	}
+
+	// node-b restarts with no node_id to compare: uptime went backwards.
+	s.Apply(snap(withID("node-a", "id-node-a-2", 5), member("node-b", 2, 0, 0)), t0.Add(4*time.Second))
+	if fl := s.Flights(); len(fl) != 1 || fl[0].Origin != "node-a" || fl[0].RID != 1 {
+		t.Fatalf("after node-b restarted: %+v", fl)
+	}
+}

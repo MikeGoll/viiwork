@@ -53,8 +53,41 @@ type UpdateConfig struct {
 	ConfirmTimeout Duration `yaml:"confirm_timeout"`
 }
 
+// PeekSource reads update.source from a config file as leniently as
+// PeekUpdate, the default when it is absent, and refuses one Validate would
+// refuse. The host's engine helper reads it: it verifies releases itself,
+// from the same source as the node.
+func PeekSource(path string) (string, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	var peek struct {
+		Update struct {
+			Source string `yaml:"source"`
+		} `yaml:"update"`
+	}
+	if err := yaml.Unmarshal(b, &peek); err != nil {
+		return "", err
+	}
+	src := peek.Update.Source
+	if src == "" {
+		src = DefaultUpdateSource
+	}
+	return src, validateSource(src)
+}
+
 func (c *Config) validateUpdate() error {
-	src := c.Update.Source
+	if err := validateSource(c.Update.Source); err != nil {
+		return err
+	}
+	if c.Update.ConfirmTimeout.Duration < 0 {
+		return fmt.Errorf("update.confirm_timeout must be >= 0")
+	}
+	return nil
+}
+
+func validateSource(src string) error {
 	u, err := url.Parse(src)
 	if err != nil || u.Host == "" || u.RawQuery != "" || u.Fragment != "" {
 		return fmt.Errorf("update.source %q must be an https URL with no query", src)
@@ -70,9 +103,6 @@ func (c *Config) validateUpdate() error {
 		}
 	default:
 		return fmt.Errorf("update.source %q must be an https URL", src)
-	}
-	if c.Update.ConfirmTimeout.Duration < 0 {
-		return fmt.Errorf("update.confirm_timeout must be >= 0")
 	}
 	return nil
 }

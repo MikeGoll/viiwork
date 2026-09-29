@@ -94,7 +94,12 @@ func (n *fakeNode) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusAccepted)
 		case meshapi.PathUpdateRollback:
 			n.calls = append(n.calls, "rollback")
+			to := n.st.LastGood
+			if n.st.Pending == nil && n.st.Current == n.st.LastGood && n.st.Previous != "" {
+				to = n.st.Previous
+			}
 			w.WriteHeader(http.StatusAccepted)
+			json.NewEncoder(w).Encode(map[string]string{"rolling_back_to": to})
 		}
 	default:
 		http.NotFound(w, r)
@@ -213,11 +218,12 @@ func TestStatus(t *testing.T) {
 	m := newFakeMesh(t, "node-a", "node-b", "node-c")
 	m.node("node-b").gone = true
 	m.node("node-a").st.Engines = map[string]string{"llamacpp": "b10437"}
+	m.node("node-c").st.Previous = "v2.4.1"
 	code, out, errOut := run(t, m, "", "status")
 	if code != 0 {
 		t.Fatalf("exit %d: %s", code, errOut)
 	}
-	for _, want := range []string{"node-a", "v2.5.0", "llamacpp b10437", "node-b", "no /v1/update", "node-c"} {
+	for _, want := range []string{"node-a", "v2.5.0", "llamacpp b10437", "node-b", "no /v1/update", "node-c", "PREVIOUS", "v2.4.1"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q in\n%s", want, out)
 		}
@@ -250,6 +256,17 @@ func TestRollbackOneHost(t *testing.T) {
 	}
 	if code, _, _ := run(t, m, "", "rollback"); code != 2 {
 		t.Errorf("rollback without --host: %d", code)
+	}
+}
+
+// A host on a release it confirmed goes back to the one before it, and the
+// CLI says where the node said it is going.
+func TestRollbackPastAConfirmedRelease(t *testing.T) {
+	m := newFakeMesh(t, "node-a")
+	m.node("node-a").st.Previous = "v2.4.1"
+	code, out, errOut := run(t, m, "", "rollback", "--host", "node-a")
+	if code != 0 || !strings.Contains(out, "rolling back to v2.4.1") {
+		t.Fatalf("exit %d: %s %s", code, out, errOut)
 	}
 }
 

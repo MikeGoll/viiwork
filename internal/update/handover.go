@@ -26,6 +26,28 @@ func Decide(s State, running string, staged func(version string) (string, error)
 	if s.Current == Builtin {
 		return d
 	}
+	// The floor is the pending release itself: an image swapped in by a
+	// Docker install's helper, or the same version laid over by hand. Run it
+	// and keep it pending, so the confirmer decides it; forgetting it here
+	// would skip confirmation. Only the exact version counts: a private build
+	// of it is not the signed release. Whatever the confirmer or the start
+	// count then decides, a hand-built node can at worst end up where the
+	// rule below would have put it at once — on its floor.
+	if p := s.Pending; p != nil && p.Version == s.Current && running == s.Current {
+		next := *p
+		next.Attempts++
+		d.Changed = true
+		if next.Attempts < maxAttempts {
+			d.State.Pending = &next
+			return d
+		}
+		s.Current, s.Pending = s.LastGood, nil
+		d.State = s
+		d.Logs = append(d.Logs, fmt.Sprintf("%s did not confirm in %d starts: back to %s", p.Version, maxAttempts, s.LastGood))
+		if s.Current == Builtin {
+			return d
+		}
+	}
 	// A newer floor wins. The fleet is also upgraded out of band (a new image
 	// laid over the old one, a rebuilt binary); without this the new floor
 	// would hand over to the older staged release.
@@ -64,12 +86,40 @@ func Decide(s State, running string, staged func(version string) (string, error)
 	return d
 }
 
+// DecideManaged is Decide for a Docker install whose host helper makes the
+// image follow current (docs/releases.md): the release is the image, so the
+// image's own viiwork always runs. It never execs a staged binary, and never
+// resets the state for a newer floor — the helper, not this binary, decides
+// which image runs. It only counts the starts of a pending release the
+// helper has swapped in, so that one that cannot confirm still goes back to
+// last good, which the helper then swaps back.
+func DecideManaged(s State, running string) Decision {
+	d := Decision{State: s}
+	p := s.Pending
+	if s.Current == Builtin || p == nil || p.Version != s.Current || running != s.Current {
+		return d
+	}
+	next := *p
+	next.Attempts++
+	d.Changed = true
+	if next.Attempts < maxAttempts {
+		d.State.Pending = &next
+		return d
+	}
+	d.State.Current, d.State.Pending = s.LastGood, nil
+	d.Logs = append(d.Logs, fmt.Sprintf("%s did not confirm in %d starts: back to %s, which the host's engine helper swaps in", p.Version, maxAttempts, s.LastGood))
+	return d
+}
+
 // StartupEnv is what the handover needs from main.
 type StartupEnv struct {
 	StateDir   string
 	Running    string
 	HandedOver bool // HandoverEnv was set: this is the staged binary its launcher chose
-	Self       func() (Launcher, error)
+	// Managed is a Docker install whose host helper swaps the image
+	// (ManagedInstall): DecideManaged instead of Decide.
+	Managed bool
+	Self    func() (Launcher, error)
 }
 
 // Startup is the handover, run by main before the node is built. It records
@@ -92,7 +142,12 @@ func Startup(e StartupEnv) (exec string, logs []string, err error) {
 	if s.Launcher == nil || *s.Launcher != self {
 		s.Launcher, changed = &self, true
 	}
-	d := Decide(s, e.Running, func(v string) (string, error) { return Binary(dir, v) })
+	var d Decision
+	if e.Managed {
+		d = DecideManaged(s, e.Running)
+	} else {
+		d = Decide(s, e.Running, func(v string) (string, error) { return Binary(dir, v) })
+	}
 	if d.Changed || changed {
 		if err := SaveState(dir, d.State); err != nil {
 			return "", d.Logs, err

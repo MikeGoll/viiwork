@@ -50,7 +50,7 @@ func (n *Node) Reload() error {
 	if reflect.DeepEqual(current.Models, next.Models) {
 		return nil
 	}
-	if err := n.sup.Apply(next.Models); err != nil {
+	if err := n.applyModels(next.Models); err != nil {
 		n.logf("reload: applying models: %v", err)
 		return err
 	}

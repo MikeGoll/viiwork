@@ -29,6 +29,7 @@ import (
 	"github.com/janit/viiwork/v2/internal/setup/probe"
 	"github.com/janit/viiwork/v2/internal/setup/prompt"
 	"github.com/janit/viiwork/v2/internal/setup/render"
+	"github.com/janit/viiwork/v2/internal/update"
 	"gopkg.in/yaml.v3"
 )
 
@@ -628,6 +629,7 @@ func writeAndStart(ctx context.Context, h Host, p prompt.Prompter, s *state) err
 		files = append(files, install.File{Path: install.EnvFile, Mode: 0o640, Data: render.MeshEnv(s.secret)})
 	}
 	m := install.Manifest{InstalledBy: h.Version, ModelDirs: []string{s.modelsDir}}
+	dirs := []string{install.ConfigDir, install.StateDir}
 	if s.image != "" {
 		compose, err := render.ComposeFile(render.Compose{Image: s.image, ModelsDir: s.modelsDir, ConfigDir: install.ConfigDir,
 			EnvFile: envFile, StateDir: install.StateDir, Tailscale: s.network == config.NetworkTailnet, CDI: s.cdi})
@@ -637,6 +639,13 @@ func writeAndStart(ctx context.Context, h Host, p prompt.Prompter, s *state) err
 		files = append(files, install.File{Path: install.ComposeFile, Mode: 0o644, Data: compose})
 		m.Compose = &install.Compose{File: install.ComposeFile, Project: install.Project, Volumes: []string{}}
 		m.Images = []string{s.image}
+		units, err := engineUnitFiles()
+		if err != nil {
+			return err
+		}
+		files = append(files, units...)
+		dirs = append(dirs, install.EngineDir)
+		m.EngineHelper = &install.EngineHelper{Units: install.EngineUnits, Dir: install.EngineDir}
 	}
 
 	p.Say("\nThese files will be written:")
@@ -668,8 +677,13 @@ func writeAndStart(ctx context.Context, h Host, p prompt.Prompter, s *state) err
 		defer stop()
 	}
 	l := install.Linux{Root: h.Root, Exec: h.Exec, Out: h.Out, Executable: h.Executable, HTTP: h.HTTP, NodeAPI: h.NodeAPI}
-	if _, err := l.Write(ctx, []string{install.ConfigDir, install.StateDir}, files, m); err != nil {
+	if _, err := l.Write(ctx, dirs, files, m); err != nil {
 		return err
+	}
+	if s.image != "" {
+		if err := l.EnableEngineHelper(ctx); err != nil {
+			return failed(ctx, p, l, err)
+		}
 	}
 	if s.image == "" {
 		p.Say("\nThe config is written. Nothing was started: %s.", s.why)
@@ -701,6 +715,58 @@ func writeAndStart(ctx context.Context, h Host, p prompt.Prompter, s *state) err
 		"Restart: docker " + strings.Join(l.ComposeArgs("restart"), " "),
 		fmt.Sprintf("Files: %s, %s; node state in %s", install.ConfigDir, install.BinaryPath, install.StateDir),
 	})
+}
+
+// engineUnitFiles are the engine helper's systemd units, as files to write.
+func engineUnitFiles() ([]install.File, error) {
+	units, err := render.EngineUnits(install.BinaryPath, update.ReleasesDir(install.StateDir))
+	if err != nil {
+		return nil, err
+	}
+	var out []install.File
+	for _, u := range units {
+		out = append(out, install.File{Path: filepath.Join(install.SystemdDir, u.Name), Mode: 0o644, Data: u.Data})
+	}
+	return out, nil
+}
+
+// addEngineHelper is init on a Docker install made before the engine helper
+// existed: it adds the helper and this binary, and leaves the config, the
+// compose file and the running node alone. Until then such a host updates
+// its viiwork binary only, and its image stays the one it was installed with.
+func addEngineHelper(ctx context.Context, h Host, p prompt.Prompter, m install.Manifest) error {
+	if h.Euid != 0 {
+		return errors.New("run as root (sudo viiwork init): adding the engine helper writes /etc/systemd/system and /usr/local/bin")
+	}
+	units, err := engineUnitFiles()
+	if err != nil {
+		return err
+	}
+	p.Say("This machine was set up by viiwork init %s, before the engine helper.", clean(m.InstalledBy))
+	p.Say("The helper runs on the host as root and makes the compose file's image follow the release the node runs,")
+	p.Say("so a `viiwork update` moves the engine image with viiwork. It verifies each release's signature itself.")
+	p.Say("\nThese files will be written:")
+	for _, u := range units {
+		p.Say("\n── %s (mode %04o)", u.Path, u.Mode)
+		p.Say("%s", strings.TrimRight(string(u.Data), "\n"))
+	}
+	p.Say("\n── %s (the helper's own directory, root only)", install.EngineDir)
+	p.Say("── %s (replaced with this binary, %s, which has the helper)", install.BinaryPath, clean(h.Version))
+	p.Say("── %s (records the helper, so uninstall removes it)", install.ManifestFile)
+	p.Say("The config, the compose file and the running node are left as they are.")
+	ok, err := p.Confirm("Add the engine helper?", true)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return prompt.ErrAbort
+	}
+	l := install.Linux{Root: h.Root, Exec: h.Exec, Out: h.Out, Executable: h.Executable}
+	if _, err := l.AddEngineHelper(ctx, m, units); err != nil {
+		return err
+	}
+	p.Say("\nThe engine helper is enabled: systemctl status %s %s", install.EnginePath, install.EngineTimer)
+	return nil
 }
 
 func failed(ctx context.Context, p prompt.Prompter, l install.Linux, err error) error {

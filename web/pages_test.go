@@ -86,3 +86,27 @@ func jsFunc(src, name string) (string, bool) {
 	}
 	return "", false
 }
+
+// The mesh page rebuilds in-flight requests from start and terminal events, so
+// a request whose origin died, left or restarted under the same name would age
+// there forever: its terminal event never comes. Every snapshot prunes them,
+// by the same rule as viiwork top's State.Apply.
+func TestMeshPrunesInflightOnEverySnapshot(t *testing.T) {
+	src := string(MeshHTML)
+	body, ok := jsFunc(src, "applyCluster")
+	if !ok {
+		t.Fatal("mesh.html: function applyCluster not found")
+	}
+	if !strings.Contains(body, "pruneInflight(c)") {
+		t.Error("mesh.html: applyCluster does not call pruneInflight")
+	}
+	prune, ok := jsFunc(src, "pruneInflight")
+	if !ok {
+		t.Fatal("mesh.html: function pruneInflight not found")
+	}
+	for _, want := range []string{`"alive"`, "node_id", "uptime_s"} {
+		if !strings.Contains(prune, want) {
+			t.Errorf("mesh.html: pruneInflight does not read %s", want)
+		}
+	}
+}

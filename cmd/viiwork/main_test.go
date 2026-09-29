@@ -29,6 +29,13 @@ func runWith(args ...string) (int, string, string) {
 	return code, stdout.String(), stderr.String()
 }
 
+func runWithEuid(euid int, args ...string) (int, string, string) {
+	var stdout, stderr bytes.Buffer
+	code := run(args, runEnv{stdout: &stdout, stderr: &stderr, euid: func() int { return euid },
+		lookupEnv: func(string) (string, bool) { return "", false }})
+	return code, stdout.String(), stderr.String()
+}
+
 func TestRun(t *testing.T) {
 	version = "v2-test"
 	if code, out, _ := runWith("--version"); code != 0 || strings.TrimSpace(out) != "v2-test" {
@@ -59,13 +66,19 @@ func TestRun(t *testing.T) {
 	if code, out, _ := runWith("--build-info"); code != 0 || strings.Contains(out, "llama_cpp") || !strings.Contains(out, `"version":"v2-test"`) {
 		t.Errorf("E9 unstamped: exit %d, stdout %q", code, out)
 	}
-	llamaCppPin = "b10437"
-	if code, out, _ := runWith("--build-info"); code != 0 || !strings.Contains(out, `"llama_cpp":"b10437"`) {
+	llamaCppPin, llamaCppMacSHA256 = "b10437", "40e8"
+	if code, out, _ := runWith("--build-info"); code != 0 || !strings.Contains(out, `"llama_cpp":"b10437"`) || !strings.Contains(out, `"llama_cpp_macos_sha256":"40e8"`) {
 		t.Errorf("E9 stamped: exit %d, stdout %q", code, out)
 	}
-	llamaCppPin = ""
+	llamaCppPin, llamaCppMacSHA256 = "", ""
 	if code, _, errOut := runWith("join-code", "--frobnicate"); code != 2 || !strings.Contains(errOut, "usage: viiwork join-code") {
 		t.Errorf("E10: exit %d, stderr %q", code, errOut)
+	}
+	if code, _, errOut := runWithEuid(1000, "engine-sync"); code != 1 || !strings.Contains(errOut, "root") {
+		t.Errorf("engine-sync not as root: exit %d, stderr %q", code, errOut)
+	}
+	if code, _, errOut := runWithEuid(1000, "engine-sync", "--now"); code != 2 || !strings.Contains(errOut, "usage: viiwork engine-sync") {
+		t.Errorf("engine-sync with an argument: exit %d, stderr %q", code, errOut)
 	}
 	if code, _, errOut := runWith("serve"); code != 2 || !strings.Contains(errOut, "serve") {
 		t.Errorf("a stray argument: exit %d, stderr %q", code, errOut)

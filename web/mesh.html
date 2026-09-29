@@ -309,7 +309,8 @@ let groupMode = "model";          // "model" | "host"
 let modelFilter = null;           // null = all
 let cluster = null;               // last cluster snapshot (meshapi ClusterResponse)
 let aliases = [];                 // last aliases event (meshapi AliasInfo list)
-const inflight = new Map();       // rid -> {startMs, model, dest, task, host}
+const inflight = new Map();       // node#rid -> {startMs, model, dest, task, host, proc}
+const uptimes = new Map();        // host -> uptime_s in its last status, to see a restart
 const activityRows = [];          // newest-first, capped
 const MAX_ACTIVITY = 60;
 // Streams replay their ring when they open, so the same event can arrive twice:
@@ -1470,6 +1471,7 @@ function wirePowerChart() {
 function applyCluster(c) {
   cluster = c;
   syncPromptCap(c);
+  pruneInflight(c);
   const members = hostsOf(c);
   const alive = members.filter(h => h.state === "alive").length;
   const view = members.find(h => h.isView);
@@ -1488,6 +1490,34 @@ function applyCluster(c) {
   recordMem(c);
   renderMemStrip();
   renderTotals();
+}
+
+// pruneInflight drops the requests that can never see their terminal event:
+// those whose origin is no longer alive, and those whose origin is alive but is
+// a different process. A member that crashed and came back under the same name
+// can do so between two snapshots and never be seen as anything but alive; a
+// new node_id says so, or, for a row whose event carried none, uptime going
+// backwards. A request the new process started before this snapshot arrived
+// may go too, which under-reports for a moment rather than inventing work.
+// viiwork top applies the same rule (internal/top State.Apply).
+function pruneInflight(c) {
+  const members = new Map(hostsOf(c).map(h => [h.host, h]));
+  const restarted = new Set();
+  for (const h of members.values()) {
+    if (!h.status) continue;
+    const up = h.status.uptime_s || 0;
+    if (uptimes.has(h.host) && up < uptimes.get(h.host)) restarted.add(h.host);
+    uptimes.set(h.host, up);
+  }
+  for (const host of uptimes.keys()) {
+    if (!members.has(host)) uptimes.delete(host);
+  }
+  for (const [key, r] of inflight) {
+    const h = members.get(r.host);
+    const id = (h && h.status && h.status.node_id) || "";
+    const replaced = id !== "" && r.proc !== "" && id !== r.proc;
+    if (!h || h.state !== "alive" || restarted.has(r.host) || replaced) inflight.delete(key);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1574,7 +1604,8 @@ function applyActivity(e) {
           model: (parts[0] || msg).trim(),
           dest: (parts[1] || "?").trim(),
           task: e.task_id || "",
-          host
+          host,
+          proc: e.node_id || ""
         });
       }
       recordPrompt(e, host);

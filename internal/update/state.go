@@ -19,9 +19,10 @@ import (
 )
 
 const (
-	stateFile = "state.json"
-	binName   = "viiwork"
-	sumName   = "viiwork.sha256"
+	stateFile    = "state.json"
+	previousFile = "previous"
+	binName      = "viiwork"
+	sumName      = "viiwork.sha256"
 )
 
 // Launcher is the floor binary: the one a restart always execs first, so a
@@ -40,12 +41,30 @@ type Pending struct {
 	Baseline []string `json:"baseline"` // backends healthy at activation
 }
 
-// State is <state_dir>/releases/state.json.
+// State is <state_dir>/releases/state.json, plus Previous.
 type State struct {
 	Current  string    `json:"current"`
 	LastGood string    `json:"last_good"`
 	Pending  *Pending  `json:"pending,omitempty"`
 	Launcher *Launcher `json:"launcher,omitempty"`
+
+	// Previous is the release that was last good before LastGood confirmed:
+	// where a rollback goes once there is nothing newer to leave. It is kept
+	// in a file of its own, never in state.json, because the fleet's
+	// launchers are v2.6.0-beta4, whose state.json reader refuses a field it
+	// does not know, and a launcher that cannot read state.json cannot start
+	// the node. "" is none.
+	Previous string `json:"-"`
+}
+
+// previousRecord is the previous file: the release before last good, and the
+// last good release it came before. It holds only while that is still the
+// last good release, so a last good changed without it — a newer floor's
+// reset, a crash between the two writes, a release that predates the file —
+// leaves nothing to roll back to rather than somewhere wrong.
+type previousRecord struct {
+	Version string `json:"version"`
+	Before  string `json:"before"`
 }
 
 // NewState is a node that has never staged anything.
@@ -56,9 +75,11 @@ func ReleasesDir(stateDir string) string { return filepath.Join(stateDir, "relea
 
 func validName(v string) bool { return v == Builtin || release.ValidVersion(v) }
 
-// LoadState reads state.json. A missing file is a fresh node; a file that
-// cannot be read, or names anything but builtin or a version, is an error:
-// the node refuses to start rather than guess what to run.
+// LoadState reads state.json and the previous file. A missing state.json is
+// a fresh node; one that cannot be read, or names anything but builtin or a
+// version, is an error: the node refuses to start rather than guess what to
+// run. The previous file only ever offers a rollback, so whatever is wrong
+// with it means there is none.
 func LoadState(dir string) (State, error) {
 	b, err := os.ReadFile(filepath.Join(dir, stateFile))
 	if errors.Is(err, fs.ErrNotExist) {
@@ -78,12 +99,39 @@ func LoadState(dir string) (State, error) {
 	if !validName(s.Current) || !validName(s.LastGood) || s.Pending != nil && !release.ValidVersion(s.Pending.Version) {
 		return State{}, fmt.Errorf("%s: names something that is neither %q nor a release version", filepath.Join(dir, stateFile), Builtin)
 	}
+	s.Previous = loadPrevious(dir, s.LastGood)
 	return s, nil
 }
 
-// SaveState writes state.json durably.
+func loadPrevious(dir, lastGood string) string {
+	b, err := os.ReadFile(filepath.Join(dir, previousFile))
+	if err != nil || len(b) == 0 {
+		return ""
+	}
+	var p previousRecord
+	if json.Unmarshal(b, &p) != nil || !validName(p.Version) || p.Before != lastGood || p.Version == lastGood {
+		return ""
+	}
+	return p.Version
+}
+
+// SaveState writes the previous file, then state.json, each durably. In that
+// order a crash between the two can only lose the way back: the previous
+// file names the last good release it belongs to, so it never applies to the
+// state.json left behind.
 func SaveState(dir string, s State) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	var prev []byte
+	if s.Previous != "" {
+		b, err := json.Marshal(previousRecord{Version: s.Previous, Before: s.LastGood})
+		if err != nil {
+			return err
+		}
+		prev = append(b, '\n')
+	}
+	if err := durable.WriteFile(dir, previousFile, prev); err != nil {
 		return err
 	}
 	b, err := json.MarshalIndent(s, "", "  ")
@@ -148,10 +196,10 @@ func Staged(dir string) []string {
 	return out
 }
 
-// Prune keeps the current and last good releases and the newest other one,
-// and deletes the rest.
+// Prune keeps the current, last good and previous releases and the newest
+// other one, and deletes the rest.
 func Prune(dir string, s State) error {
-	keep := map[string]bool{s.Current: true, s.LastGood: true}
+	keep := map[string]bool{s.Current: true, s.LastGood: true, s.Previous: true}
 	extra := false
 	for _, v := range Staged(dir) {
 		if keep[v] {

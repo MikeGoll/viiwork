@@ -1,6 +1,6 @@
 #!/usr/bin/env sh
 # The engine pins live in docker/pins.env; the Dockerfiles' ARG defaults and
-# the stamp in every binary must agree with it.
+# the stamps in every binary must agree with it.
 #
 #	sh scripts/pins_test.sh
 set -eu
@@ -21,4 +21,9 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 ./scripts/gobuild.sh ./cmd/viiwork "$tmp/viiwork" v0.0.0-pins
 check "viiwork --build-info llama_cpp" "$("$tmp/viiwork" --build-info | sed -n 's/.*"llama_cpp":"\([^"]*\)".*/\1/p')" "$LLAMA_CPP_VERSION"
+check "viiwork --build-info llama_cpp_macos_sha256" "$("$tmp/viiwork" --build-info | sed -n 's/.*"llama_cpp_macos_sha256":"\([^"]*\)".*/\1/p')" "$LLAMA_CPP_MACOS_SHA256"
+case "$LLAMA_CPP_MACOS_SHA256" in
+*[!0-9a-f]*) check "LLAMA_CPP_MACOS_SHA256 is lowercase hex" "no" "yes" ;;
+esac
+check "LLAMA_CPP_MACOS_SHA256 length" "${#LLAMA_CPP_MACOS_SHA256}" 64
 exit $fail

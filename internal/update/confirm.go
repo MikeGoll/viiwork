@@ -24,6 +24,13 @@ type Confirmer struct {
 	Restart  func()
 	Now      func() time.Time
 	Log      func(format string, args ...any)
+	// PruneEngines removes engine builds no release kept in the confirmed
+	// state is pinned to; nil removes none. It runs after the releases are
+	// pruned, and only on a confirm: a rollback must find its engine there.
+	PruneEngines func(confirmed State)
+	// Managed: a rollback saves the state and leaves the restart to the
+	// host's engine helper, which swaps the last good image back in.
+	Managed bool
 
 	mu       sync.Mutex
 	deadline time.Time
@@ -82,6 +89,10 @@ func (c *Confirmer) Step() bool {
 			if !c.owns(st) {
 				return false, errNotOwned
 			}
+			// The release it replaces as last good becomes the way back.
+			if st.LastGood != st.Current {
+				st.Previous = st.LastGood
+			}
 			st.LastGood, st.Pending = st.Current, nil
 			confirmed = *st
 			return false, nil
@@ -95,6 +106,9 @@ func (c *Confirmer) Step() bool {
 		}
 		if err := Prune(c.Store.Dir, confirmed); err != nil {
 			c.Log("update: pruning staged releases: %v", err)
+		}
+		if c.PruneEngines != nil {
+			c.PruneEngines(confirmed)
 		}
 		c.Log("update: %s confirmed: every backend healthy before the update is healthy again", c.Running)
 		return true
@@ -126,13 +140,17 @@ func (c *Confirmer) rollback(why string) {
 		}
 		st.Current, st.Pending = st.LastGood, nil
 		to = st.Current
-		return true, nil
+		return !c.Managed, nil
 	})
 	switch {
 	case errors.Is(err, errNotOwned), errors.Is(err, ErrRestarting):
 		return
 	case err != nil:
 		c.Log("update: rolling back %s: %v", c.Running, err)
+		return
+	}
+	if c.Managed {
+		c.Log("update: rolling %s back to %s: %s; the host's engine helper swaps its image in", c.Running, to, why)
 		return
 	}
 	c.Log("update: rolling %s back to %s: %s", c.Running, to, why)

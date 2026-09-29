@@ -65,6 +65,19 @@ type Options struct {
 	SupervisorTiming supervisor.Timing // test seam; zero fields take the defaults
 	// ReleaseKeys verifies staged releases. Test seam; nil = release.Keys().
 	ReleaseKeys []ed25519.PublicKey
+	// LlamaPin is the llama.cpp release this binary carries (--build-info).
+	LlamaPin string
+	// InstallManifest is the setup wizard's install.json on a host where it
+	// installs natively (a Mac); "" on any other. Its llama root is where a
+	// model's managed llama-server follows LlamaPin.
+	InstallManifest string
+	// Managed is a Docker install whose host helper makes the image follow
+	// the release (install.ManagedInstall): the release is the image, and
+	// activate and rollback leave the restart to the helper.
+	Managed bool
+	// ImageHelperWait bounds a stage's wait for the helper's image. Test
+	// seam; 0 = update.ImageHelper's default.
+	ImageHelperWait time.Duration
 }
 
 // Node is one viiwork 2 node: its models, its mesh membership, its router and
@@ -111,6 +124,10 @@ type Node struct {
 	restart      chan struct{}
 	restartOnce  sync.Once
 	confirmer    *update.Confirmer
+	llama        llamaFollow
+	updateSvc    *update.Service
+	stopping     chan struct{} // closed when Run starts shutting down
+	stoppingOnce sync.Once
 }
 
 // members is the mesh's member list once it has started, else empty. The
@@ -153,6 +170,7 @@ func New(cfg *config.Config, o Options) (*Node, error) {
 	running := *cfg
 	n := &Node{o: o, logger: log.New(o.Log, "", log.LstdFlags), cfg: &running, started: time.Now(), ready: make(chan struct{})}
 	n.streamCtx, n.streamCancel = context.WithCancel(context.Background())
+	n.llama = newLlamaFollow(o, cfg.Models, n.logf)
 	n.apiAddr.Store("")
 	n.selfAddr.Store("")
 
@@ -281,11 +299,12 @@ func New(cfg *config.Config, o Options) (*Node, error) {
 		return nil, err
 	}
 	n.restart = make(chan struct{})
+	n.stopping = make(chan struct{})
 	updateSvc, confirmer, err := n.buildUpdate(cfg, aliasAuth)
 	if err != nil {
 		return nil, err
 	}
-	n.confirmer = confirmer
+	n.confirmer, n.updateSvc = confirmer, updateSvc
 	var executor *pipeline.Executor
 	if len(pipelines) > 0 {
 		// Steps call back into this node's own API. The host in the base URL
@@ -548,9 +567,12 @@ func (n *Node) Run(ctx context.Context) error {
 	if n.confirmer != nil {
 		goLoop(func(ctx context.Context) { n.confirmer.Run(ctx, confirmEvery) })
 	}
+	if cfg.Update.Enabled {
+		n.updateSvc.WatchPending()
+	}
 
 	var runErr error
-	if err := n.sup.Apply(cfg.Models); err != nil {
+	if err := n.applyModels(cfg.Models); err != nil {
 		runErr = fmt.Errorf("applying models: %w", err)
 	} else {
 		select {
@@ -560,6 +582,9 @@ func (n *Node) Run(ctx context.Context) error {
 			runErr = ErrRestart
 		}
 	}
+	// On a managed install this is the helper's compose up at work: an
+	// update's wait for it stands down.
+	n.stoppingOnce.Do(func() { close(n.stopping) })
 	n.shutdown(srv, m, cfg)
 	stopLoops()
 	loops.Wait()

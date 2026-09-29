@@ -30,6 +30,8 @@ type Flight struct {
 	Exec    string // the node executing it: Origin, or the peer it went to
 	Forward bool
 	Start   time.Time
+
+	proc string // the origin's node_id when the event carried one: its process
 }
 
 type gpuKey struct {
@@ -66,6 +68,7 @@ type State struct {
 	lastGPUs  map[string]string
 	rates     map[rateKey]*rate
 	lastAlive map[string]time.Time
+	uptimes   map[string]int64
 	flights   map[flightKey]Flight
 }
 
@@ -75,6 +78,7 @@ func NewState() *State {
 		lastGPUs:  map[string]string{},
 		rates:     map[rateKey]*rate{},
 		lastAlive: map[string]time.Time{},
+		uptimes:   map[string]int64{},
 		flights:   map[flightKey]Flight{},
 	}
 }
@@ -83,6 +87,7 @@ func NewState() *State {
 func (s *State) Apply(c meshapi.ClusterResponse, now time.Time) {
 	s.Cluster = &c
 	present, alive := map[string]bool{}, map[string]bool{}
+	procs, restarted := map[string]string{}, map[string]bool{}
 	for _, m := range c.Members {
 		present[m.Node] = true
 		if m.State == meshapi.MemberAlive {
@@ -92,6 +97,11 @@ func (s *State) Apply(c meshapi.ClusterResponse, now time.Time) {
 		if m.Status == nil {
 			continue
 		}
+		procs[m.Node] = m.Status.NodeID
+		if up, ok := s.uptimes[m.Node]; ok && m.Status.UptimeS < up {
+			restarted[m.Node] = true
+		}
+		s.uptimes[m.Node] = m.Status.UptimeS
 		s.recordGPUs(m.Node, m.Status.GPUs)
 		for _, ms := range m.Status.Models {
 			s.recordTokens(rateKey{m.Node, ms.Name}, ms.TokensTotal, m.Status.UptimeS, now)
@@ -112,10 +122,23 @@ func (s *State) Apply(c meshapi.ClusterResponse, now time.Time) {
 			delete(s.rates, k)
 		}
 	}
+	for n := range s.uptimes {
+		if !present[n] {
+			delete(s.uptimes, n)
+		}
+	}
 	// A request whose origin is no longer alive will never see its terminal
-	// event; keeping it would show work that is not happening.
+	// event; keeping it would show work that is not happening. Neither will
+	// one whose origin is alive but is a different process: a member that
+	// crashed and came back under the same name can do so between two
+	// snapshots and never be seen as anything but alive. A new node_id says
+	// so, or, for a request whose event carried none, uptime going backwards.
+	// A request the new process started before this snapshot arrived may go
+	// too, which under-reports for a moment rather than inventing work.
 	for k, f := range s.flights {
-		if !alive[f.Origin] {
+		id := procs[f.Origin]
+		replaced := id != "" && f.proc != "" && id != f.proc
+		if !alive[f.Origin] || restarted[f.Origin] || replaced {
 			delete(s.flights, k)
 		}
 	}
@@ -229,7 +252,7 @@ func (s *State) ApplyEvent(e meshapi.MeshEvent) {
 	if origin == "" {
 		origin = e.NodeID
 	}
-	f := Flight{Origin: origin, RID: e.RequestID, Model: model, Exec: origin, Start: time.Unix(e.Time, 0)}
+	f := Flight{Origin: origin, RID: e.RequestID, Model: model, Exec: origin, Start: time.Unix(e.Time, 0), proc: e.NodeID}
 	if peer, fwd := strings.CutPrefix(dest, "peer "); fwd {
 		f.Exec, f.Forward = peer, true
 	}

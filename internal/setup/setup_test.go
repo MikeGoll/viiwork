@@ -194,12 +194,19 @@ func TestNewSecuredMesh(t *testing.T) {
 	if !strings.Contains(string(mustRead(t, f.path(install.ManifestFile))), `"volumes": []`) {
 		t.Error(`the manifest's compose volumes are not [] (beta2 wrote null)`)
 	}
-	if !slices.Equal(m.Files, []string{install.ConfigFile, install.EnvFile, install.ComposeFile}) ||
+	units := []string{"/etc/systemd/system/viiwork-engine.service", "/etc/systemd/system/viiwork-engine.path", "/etc/systemd/system/viiwork-engine.timer"}
+	if !slices.Equal(m.Files, append([]string{install.ConfigFile, install.EnvFile, install.ComposeFile}, units...)) ||
 		m.Binary != install.BinaryPath || !slices.Equal(m.Images, []string{"ghcr.io/janit/viiwork-llamacpp-cuda:v2.6.0"}) ||
-		!slices.Equal(m.ModelDirs, []string{"/models"}) || m.Compose == nil {
+		!slices.Equal(m.ModelDirs, []string{"/models"}) || m.Compose == nil ||
+		m.EngineHelper == nil || !slices.Contains(m.Dirs, install.EngineDir) {
 		t.Errorf("manifest %+v", m)
 	}
+	if fi, err := os.Stat(f.path(install.EngineDir)); err != nil || fi.Mode().Perm() != 0o700 {
+		t.Errorf("the helper's directory: %v %v", fi, err)
+	}
 	want := []string{
+		"systemctl daemon-reload",
+		"systemctl enable --now viiwork-engine.path viiwork-engine.timer",
 		"docker pull ghcr.io/janit/viiwork-llamacpp-cuda:v2.6.0",
 		"docker compose -f " + f.path(install.ComposeFile) + " -p viiwork up -d",
 	}
@@ -426,6 +433,46 @@ func TestPreflightRefusals(t *testing.T) {
 	f := newFake(t)
 	if err := Run(context.Background(), f.host, prompt.Script(io.Discard), "/tmp/elsewhere.yaml"); err == nil || !strings.Contains(err.Error(), "--config") {
 		t.Errorf("--config elsewhere: %v", err)
+	}
+}
+
+// A Docker install made before the engine helper gets it from a later init,
+// and nothing else changes.
+func TestInitAddsTheEngineHelperToAnEarlierInstall(t *testing.T) {
+	f := newFake(t)
+	before := install.Manifest{Version: 1, OS: "linux", InstalledBy: "v2.6.0-beta4",
+		Files: []string{install.ConfigFile, install.ComposeFile}, Dirs: []string{install.ConfigDir},
+		Compose: &install.Compose{File: install.ComposeFile, Project: install.Project, Volumes: []string{}}}
+	os.MkdirAll(f.path(install.ConfigDir), 0o755)
+	b, _ := json.Marshal(before)
+	os.WriteFile(f.path(install.ManifestFile), b, 0o644)
+	os.WriteFile(f.path(install.ConfigFile), []byte("node: {name: kept}\n"), 0o644)
+
+	if err := f.run("n"); !errors.Is(err, prompt.ErrAbort) {
+		t.Fatalf("declined: %v", err)
+	}
+	if _, err := os.Stat(f.path(install.EngineDir)); err == nil || len(*f.calls) != 0 {
+		t.Fatalf("declined, yet written: %q", *f.calls)
+	}
+	if err := f.run(""); err != nil {
+		t.Fatalf("%v\n%s", err, f.out)
+	}
+	m, err := install.ReadManifest(f.path(install.ManifestFile))
+	if err != nil || m.EngineHelper == nil || m.InstalledBy != "v2.6.0-beta4" || len(m.Files) != 5 {
+		t.Errorf("manifest %+v, %v", m, err)
+	}
+	if b, _ := os.ReadFile(f.path(install.ConfigFile)); string(b) != "node: {name: kept}\n" {
+		t.Errorf("the config changed: %q", b)
+	}
+	if b, _ := os.ReadFile(f.path(install.BinaryPath)); string(b) != "#!binary" {
+		t.Errorf("this binary was not installed: %q", b)
+	}
+	if !slices.Equal(*f.calls, []string{"systemctl daemon-reload", "systemctl enable --now viiwork-engine.path viiwork-engine.timer"}) {
+		t.Errorf("calls %q", *f.calls)
+	}
+	// With the helper recorded, init refuses as it does for any earlier install.
+	if err := f.run(); err == nil || !strings.Contains(err.Error(), "uninstall") {
+		t.Errorf("second run: %v", err)
 	}
 }
 

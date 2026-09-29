@@ -29,6 +29,7 @@ type releaseOpts struct {
 	otherKey bool   // sign with a key the node does not trust
 	tamper   bool   // change the archive after SHA256SUMS is written
 	unsigned bool   // no SHA256SUMS.sig
+	info     string // JSON printed for --build-info; "" = an older binary without the flag
 }
 
 // fakeRelease serves a signed release of a shell-script "viiwork" for this
@@ -50,7 +51,11 @@ func fakeRelease(t *testing.T, version string, o releaseOpts) (string, ed25519.P
 	if shebang == "" {
 		shebang = "#!/bin/sh"
 	}
-	script := fmt.Sprintf("%s\ncase \"$1\" in\n--version) echo %s ;;\n--engine-requirements) echo '%s' ;;\nesac\n", shebang, reports, requires)
+	info := "exit 2"
+	if o.info != "" {
+		info = "echo '" + o.info + "'"
+	}
+	script := fmt.Sprintf("%s\ncase \"$1\" in\n--version) echo %s ;;\n--engine-requirements) echo '%s' ;;\n--build-info) %s ;;\nesac\n", shebang, reports, requires, info)
 	target := release.Target{OS: runtime.GOOS, Arch: runtime.GOARCH}
 	name := release.ArchiveName(version, target)
 	top := strings.TrimSuffix(name, ".tar.gz")
@@ -192,5 +197,68 @@ func TestStageRefuses(t *testing.T) {
 	}
 	if err := stager(t.TempDir(), src, pub).Stage(ctx, "v2.7.0"); err == nil || !strings.Contains(err.Error(), "404") {
 		t.Errorf("missing release: %v", err)
+	}
+}
+
+// PrepareLlama sees the staged binary's pin after it proved it runs and
+// before the engine check, and the check it returns judges the requirement
+// against the build the release will run, in place of Engines.
+func TestStagePreparesTheReleasesLlama(t *testing.T) {
+	src, pub := fakeRelease(t, "v2.6.1", releaseOpts{requires: `{"llamacpp":"b200"}`,
+		info: `{"version":"v2.6.1","llama_cpp":"b200","llama_cpp_macos_sha256":"abc"}`})
+	st := stager(t.TempDir(), src, pub)
+	var order []string
+	var got BuildInfo
+	st.Engines = func(context.Context, map[string]string) error { order = append(order, "engines"); return nil }
+	st.PrepareLlama = func(_ context.Context, info BuildInfo) (func(context.Context, map[string]string) error, error) {
+		order, got = append(order, "prepare"), info
+		return func(_ context.Context, req map[string]string) error {
+			order = append(order, "check "+req["llamacpp"])
+			return nil
+		}, nil
+	}
+	if err := st.Stage(context.Background(), "v2.6.1"); err != nil {
+		t.Fatal(err)
+	}
+	if got != (BuildInfo{Version: "v2.6.1", LlamaCpp: "b200", LlamaCppMacSHA256: "abc"}) {
+		t.Errorf("build info %+v", got)
+	}
+	if strings.Join(order, ",") != "prepare,check b200" {
+		t.Errorf("order %q", order)
+	}
+}
+
+func TestStageFailsWhenTheLlamaCannotBePrepared(t *testing.T) {
+	src, pub := fakeRelease(t, "v2.6.1", releaseOpts{info: `{"version":"v2.6.1","llama_cpp":"b200"}`})
+	dir := t.TempDir()
+	st := stager(dir, src, pub)
+	st.PrepareLlama = func(context.Context, BuildInfo) (func(context.Context, map[string]string) error, error) {
+		return nil, errors.New("download failed")
+	}
+	if err := st.Stage(context.Background(), "v2.6.1"); err == nil || !strings.Contains(err.Error(), "download failed") {
+		t.Fatalf("err %v", err)
+	}
+	if staged := Staged(dir); len(staged) != 0 {
+		t.Errorf("staged %q", staged)
+	}
+}
+
+// A release built before --build-info carries no pin: nothing to prepare,
+// and Engines checks the engine as configured, which is what it will run.
+func TestStageWithoutBuildInfoPassesNoPin(t *testing.T) {
+	src, pub := fakeRelease(t, "v2.6.1", releaseOpts{})
+	st := stager(t.TempDir(), src, pub)
+	engines := false
+	st.Engines = func(context.Context, map[string]string) error { engines = true; return nil }
+	var got *BuildInfo
+	st.PrepareLlama = func(_ context.Context, info BuildInfo) (func(context.Context, map[string]string) error, error) {
+		got = &info
+		return nil, nil
+	}
+	if err := st.Stage(context.Background(), "v2.6.1"); err != nil {
+		t.Fatal(err)
+	}
+	if got == nil || got.LlamaCpp != "" || !engines {
+		t.Errorf("info %+v, engines checked %v", got, engines)
 	}
 }

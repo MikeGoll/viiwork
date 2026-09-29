@@ -11,6 +11,9 @@
 # pin never overwrites the build a running node uses. Not Homebrew: its formula
 # moves daily and is not pinned to the fleet's release.
 #
+# The pin's download is checked against LLAMA_CPP_MACOS_SHA256 in
+# docker/pins.env; another tag is not checked.
+#
 # Re-running with a tag already present prints its path and downloads nothing.
 set -eu
 
@@ -42,6 +45,15 @@ trap 'rm -rf "$tmp"' EXIT
 
 echo "fetching $url" >&2
 curl -fL --proto '=https' --retry 3 -o "$tmp/$asset" "$url"
+pins=$here/docker/pins.env
+if [ -f "$pins" ] && [ "$(sed -n 's/^LLAMA_CPP_VERSION=//p' "$pins")" = "$tag" ]; then
+	want=$(sed -n 's/^LLAMA_CPP_MACOS_SHA256=//p' "$pins")
+	got=$(shasum -a 256 "$tmp/$asset" | cut -d' ' -f1)
+	if [ "$got" != "$want" ]; then
+		echo "$asset: sha256 $got, but docker/pins.env pins $want" >&2
+		exit 1
+	fi
+fi
 mkdir -p "$tmp/unpack"
 tar -xzf "$tmp/$asset" -C "$tmp/unpack"
 # A downloaded binary carries the quarantine attribute, and Gatekeeper refuses

@@ -66,12 +66,17 @@ func (h Host) allowed(p string) bool {
 	if h.GOOS == "darwin" {
 		return h.Home != "" && h.Home != "/" && strings.HasPrefix(p, h.Home+"/")
 	}
-	for _, dir := range []string{install.ConfigDir, install.StateDir} {
+	for _, dir := range []string{install.ConfigDir, install.StateDir, install.EngineDir} {
 		if p == dir || strings.HasPrefix(p, dir+"/") {
 			return true
 		}
 	}
-	return p == install.BinaryPath
+	for _, u := range install.EngineUnits {
+		if p == filepath.Join(install.SystemdDir, u) {
+			return true
+		}
+	}
+	return p == install.BinaryPath || p == install.BinaryPath+".bak"
 }
 
 // throughLink reports whether a directory on p's way down is a symlink.
@@ -96,6 +101,7 @@ type removal struct {
 	volumes []string
 	compose bool
 	agent   bool
+	helper  bool // the engine helper's units
 	models  []string
 	skipped []string
 }
@@ -206,6 +212,23 @@ func (h Host) plan(m install.Manifest, o Options) removal {
 			}
 		}
 	}
+	r.helper = h.GOOS == "linux" && m.EngineHelper != nil
+	if r.helper {
+		// The backups the helper keeps when it swaps the image and updates
+		// the binary: its own files, though no manifest lists them.
+		var backups []string
+		if m.Compose != nil {
+			backups = append(backups, m.Compose.File+".bak")
+		}
+		if m.Binary != "" {
+			backups = append(backups, m.Binary+".bak")
+		}
+		for _, b := range backups {
+			if _, err := os.Lstat(h.path(b)); err == nil && safe(b) {
+				r.files = append(r.files, b)
+			}
+		}
+	}
 	r.agent = m.LaunchAgent == launchAgent
 	if m.LaunchAgent != "" && !r.agent {
 		skip("launch agent " + m.LaunchAgent)
@@ -302,6 +325,9 @@ func (h Host) show(p prompt.Prompter, r removal) {
 	if r.agent {
 		p.Say("  the launch agent %s (stopped first, so the node leaves the mesh)", launchAgent)
 	}
+	if r.helper {
+		p.Say("  the engine helper %s (stopped before the node)", strings.Join(install.EngineUnits, ", "))
+	}
 	for _, v := range r.volumes {
 		p.Say("  volume %s", v)
 	}
@@ -373,6 +399,20 @@ func (h Host) execute(ctx context.Context, p prompt.Prompter, r removal) error {
 			}
 		}
 	}
+	// The engine helper goes before the node: it runs `docker compose up`,
+	// and left running it could start the node again mid-uninstall. Units
+	// that were never written have nothing to stop.
+	helperUnits := false
+	for _, u := range install.EngineUnits {
+		if _, err := os.Stat(h.path(filepath.Join(install.SystemdDir, u))); err == nil {
+			helperUnits = true
+		}
+	}
+	if r.helper && helperUnits {
+		if err := run("systemctl", append([]string{"disable", "--now"}, install.EnginePath, install.EngineTimer, install.EngineService)...); err != nil {
+			return fmt.Errorf("could not stop the engine helper (%v): nothing was removed", err)
+		}
+	}
 	if r.compose {
 		// The installer writes its manifest before the compose file; without
 		// the file, nothing was ever started.
@@ -428,6 +468,11 @@ func (h Host) execute(ctx context.Context, p prompt.Prompter, r removal) error {
 	if len(failed) > 0 {
 		// The manifest stays, so that a rerun can finish the job.
 		return fmt.Errorf("could not remove %s; the manifest is kept, so run uninstall again once that is fixed", strings.Join(failed, ", "))
+	}
+	if r.helper && helperUnits {
+		if err := run("systemctl", "daemon-reload"); err != nil {
+			p.Say("systemctl daemon-reload: %v", err)
+		}
 	}
 	remove(h.manifestPath(), false)  // last: until here a rerun can finish
 	os.Remove(h.path(h.configDir())) // only when empty: an operator's files stay

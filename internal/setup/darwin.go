@@ -93,7 +93,11 @@ func writeAndStartMac(ctx context.Context, h Host, p prompt.Prompter, s *state) 
 	if install.Fetched(h.path(m.P.LlamaRoot), h.LlamaPin) {
 		p.Say("\n── %s (llama.cpp %s, already here: reused as found, and not claimed by the install)", llamaDir, h.LlamaPin)
 	} else {
-		p.Say("\n── %s (llama.cpp %s from github.com/ggml-org/llama.cpp, checked against the release's sha256)", llamaDir, h.LlamaPin)
+		check := "the release's sha256"
+		if h.LlamaSHA256 != "" {
+			check = "the sha256 this build is pinned to"
+		}
+		p.Say("\n── %s (llama.cpp %s from github.com/ggml-org/llama.cpp, checked against %s)", llamaDir, h.LlamaPin, check)
 	}
 	p.Say("── %s (a copy of this binary)", m.P.BinaryPath)
 	p.Say("── %s and %s (node state and its log)", m.P.StateDir, m.P.LogDir)
@@ -116,9 +120,9 @@ func writeAndStartMac(ctx context.Context, h Host, p prompt.Prompter, s *state) 
 		return err
 	}
 	p.Say("Fetching llama.cpp %s …", h.LlamaPin)
-	f := install.Fetch{HTTP: h.Download, API: h.LlamaAPI, Exec: h.Exec, Out: h.Out}
+	f := install.Fetch{HTTP: h.Download, API: h.LlamaAPI, Releases: h.LlamaRelease, Token: h.GitHubToken, Exec: h.Exec, Out: h.Out}
 	reused := install.Fetched(h.path(m.P.LlamaRoot), h.LlamaPin)
-	server, verified, err := f.Llama(ctx, h.LlamaPin, h.path(m.P.LlamaRoot))
+	server, verified, err := f.Llama(ctx, h.LlamaPin, h.path(m.P.LlamaRoot), h.LlamaSHA256)
 	if err != nil {
 		return notStarted(p, h, m, err)
 	}

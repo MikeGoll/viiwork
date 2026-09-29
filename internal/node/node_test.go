@@ -104,6 +104,12 @@ func startNode(t *testing.T, net *meshtest.Network, name string, models []fakeMo
 // can start a node serving several engines at once.
 func startNodeYAML(t *testing.T, net *meshtest.Network, name string, models []string, extra string, tune func(*testNode) func(*mesh.Options)) *testNode {
 	t.Helper()
+	return startNodeOpts(t, net, name, models, extra, tune, nil)
+}
+
+// startNodeOpts is startNodeYAML with a last word on the node's Options.
+func startNodeOpts(t *testing.T, net *meshtest.Network, name string, models []string, extra string, tune func(*testNode) func(*mesh.Options), opts func(*Options)) *testNode {
+	t.Helper()
 	dir := t.TempDir()
 	tn := &testNode{cfgPath: filepath.Join(dir, "viiwork.yaml"), stateDir: filepath.Join(dir, "state"), log: &syncBuffer{}}
 	if err := os.MkdirAll(tn.stateDir, 0o755); err != nil {
@@ -121,6 +127,9 @@ func startNodeYAML(t *testing.T, net *meshtest.Network, name string, models []st
 		o.MeshTune = tune(tn)
 	} else {
 		o.MeshTune = meshTune(net, name, &tn.gossip)
+	}
+	if opts != nil {
+		opts(&o)
 	}
 	n, err := New(cfg, o)
 	if err != nil {

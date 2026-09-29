@@ -23,13 +23,22 @@ import (
 // LlamaReleaseAPI is where a release's assets and their digests are listed.
 const LlamaReleaseAPI = "https://api.github.com/repos/ggml-org/llama.cpp/releases/tags/"
 
+// LlamaReleases is where a release's assets download from, by tag and name.
+const LlamaReleases = "https://github.com/ggml-org/llama.cpp/releases/download/"
+
 // Fetch downloads llama.cpp's macOS build, as scripts/macos/fetch-llama.sh
 // does by hand.
 type Fetch struct {
 	HTTP *http.Client
 	API  string // LlamaReleaseAPI in production
-	Exec Exec
-	Out  io.Writer
+	// Releases is LlamaReleases in production: with a pinned digest the
+	// asset's URL is fixed and the API is never asked.
+	Releases string
+	// Token returns a GitHub token for the API lookup, or ""; nil sends none.
+	// Only the API is rate limited per address, so only it gets the token.
+	Token func() string
+	Exec  Exec
+	Out   io.Writer
 	// Stall abandons a request that receives nothing for this long; 0 means
 	// defaultStall. A slow download is fine; a silent one is not.
 	Stall time.Duration
@@ -57,19 +66,27 @@ func asset(tag string) string { return "llama-" + tag + "-bin-macos-arm64.tar.gz
 
 // Llama makes llama-server for tag available under root/tag and returns its
 // path. A build already there is used as it is. Otherwise the release asset
-// is downloaded, checked against the digest the release publishes (verified
-// is false when it publishes none), unpacked into a temporary directory,
-// cleared of the quarantine attribute and renamed into place. On any failure
-// nothing is left at root/tag beyond what was there.
-func (f Fetch) Llama(ctx context.Context, tag, root string) (server string, verified bool, err error) {
+// is downloaded, checked against a digest, unpacked into a temporary
+// directory, cleared of the quarantine attribute and renamed into place. On
+// any failure nothing is left at root/tag beyond what was there.
+//
+// pinned is the asset's sha256 as this binary's signed build carries it.
+// With it, the asset downloads from its fixed URL and must match; without
+// it (a tag that is not the pin), the release's API listing supplies the
+// URL and whatever digest it publishes, and verified is false when it
+// publishes none.
+func (f Fetch) Llama(ctx context.Context, tag, root, pinned string) (server string, verified bool, err error) {
 	server = LlamaServerPath(root, tag)
 	if Fetched(root, tag) {
 		return server, false, nil // reused as found: nothing here checked it
 	}
 	name := asset(tag)
-	url, digest, err := f.find(ctx, tag, name)
-	if err != nil {
-		return "", false, err
+	url, digest, source := f.Releases+tag+"/"+name, pinned, "the pinned build is"
+	if pinned == "" {
+		if url, digest, err = f.find(ctx, tag, name); err != nil {
+			return "", false, err
+		}
+		source = "the release publishes"
 	}
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		return "", false, err
@@ -86,7 +103,7 @@ func (f Fetch) Llama(ctx context.Context, tag, root string) (server string, veri
 	}
 	if digest != "" {
 		if !strings.EqualFold(sum, strings.TrimPrefix(digest, "sha256:")) {
-			return "", false, fmt.Errorf("%s: sha256 %s, but the release publishes %s", url, sum, digest)
+			return "", false, fmt.Errorf("%s: sha256 %s, but %s %s", url, sum, source, digest)
 		}
 		verified = true
 	}
@@ -122,6 +139,11 @@ func (f Fetch) find(ctx context.Context, tag, name string) (url, digest string, 
 		return "", "", err
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
+	if f.Token != nil {
+		if tok := f.Token(); tok != "" {
+			req.Header.Set("Authorization", "Bearer "+tok)
+		}
+	}
 	resp, err := f.HTTP.Do(req)
 	if err != nil {
 		return "", "", fmt.Errorf("llama.cpp release %s (for %s): %w", tag, name, err)

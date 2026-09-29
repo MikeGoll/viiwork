@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"sync"
 	"time"
 
@@ -42,6 +43,17 @@ type Service struct {
 	Restart  func()
 	Log      func(format string, args ...any)
 
+	// Managed is a Docker install whose host helper makes the image follow
+	// current (ManagedInstall). There the release is the image: activate and
+	// rollback save the state and answer 202, and the helper's compose up
+	// restarts the node on the new image. If this process is still running
+	// HelperWait later, the helper did not act, and the state it had is
+	// restored: a host without a working helper must not sit with a pending
+	// release it will never start.
+	Managed    bool
+	HelperWait time.Duration   // 0 = 2 minutes
+	Stopping   <-chan struct{} // closed when the node shuts down: the helper acted
+
 	// staging is held for a whole stage, which can take minutes. It is
 	// separate from the state transitions so a rollback is always answered
 	// at once; a second stage meanwhile gets 409.
@@ -73,6 +85,12 @@ func (s *Service) status(w http.ResponseWriter) {
 		return
 	}
 	out := meshapi.UpdateStatus{Enabled: s.Enabled, Running: s.Running, Current: st.Current, LastGood: st.LastGood, Staged: Staged(s.Store.Dir)}
+	// Reported only while it is there to go back to. Staged is enough here:
+	// the rollback itself re-verifies the binary, and a status poll should
+	// not hash one.
+	if st.Previous == Builtin || slices.Contains(out.Staged, st.Previous) {
+		out.Previous = st.Previous
+	}
 	if s.Engines != nil {
 		if e := s.Engines(); len(e) > 0 {
 			out.Engines = e
@@ -158,6 +176,11 @@ func (s *Service) activate(_ context.Context, req meshapi.UpdateRequest) (int, a
 	if _, err := Binary(s.Store.Dir, req.Version); err != nil {
 		return http.StatusConflict, fmt.Errorf("%s is not staged here: %v", req.Version, err)
 	}
+	if s.Managed {
+		if err := ImagePrepared(s.Store.Dir, req.Version); err != nil {
+			return http.StatusConflict, err
+		}
+	}
 	if c, ok := Compare(req.Version, s.Running); ok {
 		if c == 0 {
 			return http.StatusConflict, fmt.Errorf("%s is already running", req.Version)
@@ -180,35 +203,127 @@ func (s *Service) activate(_ context.Context, req meshapi.UpdateRequest) (int, a
 			}
 		}
 	}
+	var prior, next State
 	err := s.Store.Update(func(st *State) (bool, error) {
+		prior = *st
 		st.Current = req.Version
 		st.Pending = &Pending{Version: req.Version, Baseline: baseline}
-		return true, nil
+		next = *st
+		return !s.Managed, nil
 	})
 	if code, e := transitionError(err); e != nil {
 		return code, e
 	}
 	s.Log("update: activating %s (baseline: %d healthy backends)", req.Version, len(baseline))
-	go s.Restart()
+	s.restart(prior, next, "activating "+req.Version)
 	return http.StatusAccepted, map[string]string{"activating": req.Version}
 }
 
+// rollback leaves a release that has not confirmed for the last good one.
+// With nothing pending and the node on its last good release, it goes one
+// further, to the release that was last good before it, which becomes last
+// good again: it already confirmed on this host once. Both are decided under
+// the store's lock, so a confirmation landing meanwhile is either wholly
+// before the decision or refused after it.
 func (s *Service) rollback(context.Context, meshapi.UpdateRequest) (int, any) {
 	var to string
+	var prior, next State
 	err := s.Store.Update(func(st *State) (bool, error) {
-		if st.Pending == nil && st.Current == st.LastGood {
-			return false, fmt.Errorf("%w (%s)", errNothingToRollBack, st.LastGood)
+		prior = *st
+		defer func() { next = *st }()
+		if st.Pending != nil || st.Current != st.LastGood {
+			st.Current, st.Pending = st.LastGood, nil
+			to = st.Current
+			return !s.Managed, nil
 		}
-		st.Current, st.Pending = st.LastGood, nil
+		if st.Previous == "" {
+			return false, fmt.Errorf("%w (%s), and no earlier release is remembered here", errNothingToRollBack, st.LastGood)
+		}
+		if st.Previous != Builtin {
+			if _, err := Binary(s.Store.Dir, st.Previous); err != nil {
+				return false, fmt.Errorf("%w (%s), and the release before it cannot be run: %v", errNothingToRollBack, st.LastGood, err)
+			}
+		}
+		st.Current, st.LastGood, st.Previous = st.Previous, st.Previous, ""
 		to = st.Current
-		return true, nil
+		return !s.Managed, nil
 	})
 	if code, e := transitionError(err); e != nil {
 		return code, e
 	}
 	s.Log("update: rolling back to %s", to)
-	go s.Restart()
+	s.restart(prior, next, "rolling back to "+to)
 	return http.StatusAccepted, map[string]string{"rolling_back_to": to}
+}
+
+// restart follows a saved transition: the node's own restart, or on a
+// managed install the helper's, watched.
+func (s *Service) restart(prior, next State, what string) {
+	if !s.Managed {
+		go s.Restart()
+		return
+	}
+	go s.awaitHelper(prior, next, what)
+}
+
+// awaitHelper restores prior when this process is still running HelperWait
+// after it saved next — unless the state has moved on since, which is then
+// someone else's decision. It does not compare versions: the helper's swap
+// ends this process, so still being here is the evidence.
+func (s *Service) awaitHelper(prior, next State, what string) {
+	wait := s.HelperWait
+	if wait <= 0 {
+		wait = 2 * time.Minute
+	}
+	t := time.NewTimer(wait)
+	defer t.Stop()
+	select {
+	case <-s.Stopping:
+		return
+	case <-t.C:
+	}
+	err := s.Store.Update(func(st *State) (bool, error) {
+		if !sameTransition(*st, next) {
+			return false, errNotOwned
+		}
+		launcher := st.Launcher
+		*st = prior
+		st.Launcher = launcher
+		return false, nil
+	})
+	switch {
+	case errors.Is(err, errNotOwned), errors.Is(err, ErrRestarting):
+		return
+	case err != nil:
+		s.Log("update: restoring the state after %s: %v", what, err)
+		return
+	}
+	s.Log("update: the host's engine helper did not restart this node within %s of %s: back to current %s. "+
+		"Is viiwork-engine.path enabled on the host (systemctl status viiwork-engine.path; sudo viiwork init adds it)?", wait, what, prior.Current)
+}
+
+// WatchPending is awaitHelper for a node that starts, on a managed install,
+// with a pending release it is not running: it restarted before the helper
+// acted. Given the same time, it then goes back to last good.
+func (s *Service) WatchPending() {
+	if !s.Managed {
+		return
+	}
+	st, err := s.Store.Load()
+	if err != nil || st.Pending == nil || st.Pending.Version == s.Running {
+		return
+	}
+	prior := st
+	prior.Current, prior.Pending = st.LastGood, nil
+	go s.awaitHelper(prior, st, "starting with "+st.Pending.Version+" pending")
+}
+
+// sameTransition reports whether st is still the state a transition saved.
+func sameTransition(st, saved State) bool {
+	if st.Current != saved.Current || st.LastGood != saved.LastGood || (st.Pending == nil) != (saved.Pending == nil) {
+		return false
+	}
+	return st.Pending == nil || st.Pending.Version == saved.Pending.Version
 }
 
 var errNothingToRollBack = errors.New("already on the last good release")

@@ -174,6 +174,16 @@ grace that covers the node's ordered shutdown. Install, reload and restart
 commands are in the file's header comment. `SIGHUP` reloads the config as on
 Linux. Logs go to `~/Library/Logs/viiwork/viiwork.log`.
 
+## Updates
+
+A Mac set up by `viiwork init` with updates enabled moves its llama.cpp with
+each release: every release carries its llama.cpp pin and that build's
+sha256, staging fetches the build into `~/.local/share/viiwork/llama.cpp`
+beside the running one, and the node runs the build of its own binary's pin.
+A rollback therefore takes the engine back with the binary. A Mac set up by
+hand has no install manifest, and its `llamacpp.binary` is always used as
+written.
+
 ## Sleep
 
 A sleeping Mac stops answering gossip. Within a few seconds the fleet marks it

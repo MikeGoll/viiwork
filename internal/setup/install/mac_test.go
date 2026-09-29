@@ -60,7 +60,7 @@ func TestMacWriteRecordsWhatItWrote(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if read.OS != "darwin" || read.LaunchAgent != LaunchAgent || read.Binary != m.P.BinaryPath ||
+	if read.OS != "darwin" || read.LaunchAgent != LaunchAgent || read.Binary != m.P.BinaryPath || read.LlamaRoot != m.P.LlamaRoot ||
 		!slices.Equal(read.Files, []string{m.P.ConfigFile, m.P.Plist}) || !slices.Equal(read.Dirs, []string{m.P.ConfigDir, m.P.StateDir}) {
 		t.Errorf("manifest %+v", read)
 	}
