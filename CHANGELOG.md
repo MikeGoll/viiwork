@@ -1,5 +1,17 @@
 # Changelog
 
+## v2.7.0-beta2
+
+**Performance routing now measures llama.cpp models that answer through
+`reasoning_content`.** In beta1, a request without the `think` field (most
+clients) never produced a sample on such a model: granite-4.2-8b on gb1 and
+n100, for example. The fleet therefore showed no scores. Without `think`,
+viiwork renames `reasoning_content` to `content`, and it writes the new key and
+its value as separate pieces. The first-token check looked at each piece on its
+own and never saw one. It now also checks where consecutive writes meet. The
+extra check uses a small fixed buffer, so the per-token path still allocates
+nothing, and the bytes the client receives are unchanged.
+
 ## v2.7.0-beta1
 
 A pre-release, published so the fleet can measure performance routing before

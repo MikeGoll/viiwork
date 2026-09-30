@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"encoding/json"
+	"io"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -133,5 +134,71 @@ func TestCapturePromptUsage(t *testing.T) {
 	u, ok := c.PromptUsage()
 	if !ok || u.Prompt != 4000 || u.Cached != 1000 {
 		t.Fatalf("got %+v %v", u, ok)
+	}
+}
+
+// A key split across two writes still marks the first token. The think-off
+// stream's rename writes `"content"` and the value as separate pieces, and a
+// per-write scan never saw a token on llama.cpp models that answer through
+// reasoning_content (granite 4.2 on n100 and gb1, found on the fleet).
+func TestFirstTokenAcrossWrites(t *testing.T) {
+	cases := []struct {
+		name   string
+		writes []string
+		want   bool
+	}{
+		{"key then value", []string{`data: {"choices":[{"delta":{`, `"content"`, `:"Okay"}}]}`, "\n\n"}, true},
+		{"one byte at a time", strings.Split(`data: {"choices":[{"delta":{"content":"Okay"}}]}`, ""), true},
+		{"empty value split", []string{`data: {"choices":[{"delta":{"content"`, `:""}}]}`}, false},
+		{"tool call split", []string{`{"delta":{"tool_calls"`, `:[{"index":0}]}}`}, true},
+		{"empty tool calls split", []string{`{"delta":{"tool_calls"`, `:[]}}`}, false},
+	}
+	for _, tc := range cases {
+		w, m := newMeasureWriter(httptest.NewRecorder(), false, time.Now)
+		for _, s := range tc.writes {
+			w.Write([]byte(s))
+		}
+		if got := !m.firstAt.IsZero(); got != tc.want {
+			t.Errorf("%s: first token = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+type piecesReader struct{ parts []string }
+
+func (p *piecesReader) Read(b []byte) (int, error) {
+	if len(p.parts) == 0 {
+		return 0, io.EOF
+	}
+	n := copy(b, p.parts[0])
+	if p.parts[0] = p.parts[0][n:]; p.parts[0] == "" {
+		p.parts = p.parts[1:]
+	}
+	return n, nil
+}
+
+// The think-off stream renames reasoning_content to content; the measurement
+// behind it must still see the first token and the usage chunk.
+func TestThinkOffRenamedReasoningIsMeasured(t *testing.T) {
+	stream := []string{
+		`data: {"choices":[{"index":0,"delta":{"role":"assistant","content":null}}]}` + "\n\n",
+		`data: {"choices":[{"index":0,"delta":{"reasoning_content":"Okay"}}]}` + "\n\n",
+		`data: {"choices":[],"usage":{"completion_tokens":4,"prompt_tokens":1716,"prompt_tokens_details":{"cached_tokens":8}}}` + "\n\n",
+		"data: [DONE]\n\n",
+	}
+	rec := httptest.NewRecorder()
+	w, m := newMeasureWriter(rec, true, time.Now)
+	streamThinkDisabled(w, &piecesReader{parts: stream}, func() {})
+	if err := m.finish(); err != nil {
+		t.Fatal(err)
+	}
+	if m.firstAt.IsZero() {
+		t.Fatal("no first token: the renamed content chunk was not seen")
+	}
+	if u, ok := promptUsageFromEvent(m.stripped); !ok || u.Prompt-u.Cached != 1708 {
+		t.Fatalf("usage = %+v %v", u, ok)
+	}
+	if strings.Contains(rec.Body.String(), "usage") || !strings.Contains(rec.Body.String(), `"content":"Okay"`) {
+		t.Fatalf("client body %q", rec.Body.String())
 	}
 }

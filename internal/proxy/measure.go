@@ -71,7 +71,16 @@ type measureWriter struct {
 	carry    []byte    // strip mode: bytes of an event not yet complete
 	firstAt  time.Time // when the first content chunk was written; zero = never
 	stripped []byte    // the usage-only event removed for the client, if any
+	// edge holds the newest bytes written before the first token, so a key
+	// split across writes is still seen. The think-off stream writes a
+	// renamed `"content"` and its value as separate pieces.
+	edge  [edgeLen]byte
+	edgeN int
 }
+
+// edgeLen covers the longest token key plus the byte after it, with room
+// for whitespace before a tool call's first element.
+const edgeLen = 32
 
 type flushMeasureWriter struct {
 	*measureWriter
@@ -93,7 +102,7 @@ func newMeasureWriter(w http.ResponseWriter, strip bool, now func() time.Time) (
 func (m *measureWriter) Unwrap() http.ResponseWriter { return m.ResponseWriter }
 
 func (m *measureWriter) Write(p []byte) (int, error) {
-	if m.firstAt.IsZero() && hasTokenText(p) {
+	if m.firstAt.IsZero() && m.seesToken(p) {
 		m.firstAt = m.now()
 	}
 	if !m.strip {
@@ -118,6 +127,30 @@ func (m *measureWriter) Write(p []byte) (int, error) {
 	n := copy(m.carry, m.carry[start:])
 	m.carry = m.carry[:n]
 	return len(p), nil
+}
+
+// seesToken reports whether p, or p joined to the bytes written just before
+// it, carries generated text. Only the seam is re-scanned, in a stack buffer,
+// so nothing is allocated.
+func (m *measureWriter) seesToken(p []byte) bool {
+	if hasTokenText(p) {
+		return true
+	}
+	var seam [2 * edgeLen]byte
+	n := copy(seam[:], m.edge[:m.edgeN])
+	n += copy(seam[n:], p[:min(len(p), edgeLen)])
+	if hasTokenText(seam[:n]) {
+		return true
+	}
+	// Keep the newest edgeLen bytes of everything written so far.
+	if len(p) >= edgeLen {
+		m.edgeN = copy(m.edge[:], p[len(p)-edgeLen:])
+	} else {
+		keep := min(m.edgeN, edgeLen-len(p))
+		copy(m.edge[:], m.edge[m.edgeN-keep:m.edgeN])
+		m.edgeN = keep + copy(m.edge[keep:], p)
+	}
+	return false
 }
 
 // finish writes an incomplete final event, so stripping never loses bytes.
