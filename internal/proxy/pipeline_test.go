@@ -160,4 +160,14 @@ func TestHandlerPipeline(t *testing.T) {
 			t.Errorf("code=%d body=%q", rec.Code, rec.Body.String())
 		}
 	})
+
+	// A full queue is back-pressure, as for a direct request: 429 with
+	// Retry-After, not a 502 the client reads as a fault.
+	t.Run("step refused for capacity", func(t *testing.T) {
+		f := newFx(t, http.StatusTooManyRequests)
+		rec := f.do(http.MethodPost, "/v1/chat/completions", `{"model":"tr-fi","messages":[{"role":"user","content":"x"}]}`)
+		if rec.Code != 429 || rec.Header().Get("Retry-After") == "" {
+			t.Errorf("code=%d body=%q", rec.Code, rec.Body.String())
+		}
+	})
 }

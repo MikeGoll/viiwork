@@ -19,6 +19,10 @@ type ClusterSources struct {
 		Status(node string) (meshapi.NodeStatus, time.Time, bool)
 	}
 	PowerControl *power.Controller // nil = none
+	// StatusStaleAfter drops a member's status last received longer ago
+	// than this: a member alive in gossip whose API stopped answering is
+	// shown without one ("cannot say"), not frozen. 0 = never.
+	StatusStaleAfter time.Duration
 }
 
 // BuildCluster is the C4 cluster view: every member, its state, and the last
@@ -42,7 +46,8 @@ func BuildCluster(s ClusterSources) meshapi.ClusterResponse {
 			st := s.Local()
 			out.Status = &st
 		case m.State == meshapi.MemberAlive && m.Meta.Role == meshapi.RoleNode && s.Remote != nil:
-			if st, _, ok := s.Remote.Status(m.Name); ok {
+			if st, received, ok := s.Remote.Status(m.Name); ok &&
+				(s.StatusStaleAfter <= 0 || time.Since(received) <= s.StatusStaleAfter) {
 				out.Status = &st
 			}
 		}

@@ -94,3 +94,30 @@ func TestBuildClusterNotYetPolled(t *testing.T) {
 		t.Errorf("C5: gb2 status %v, models %v, power %v", c.Members[1].Status, c.Models, c.PowerControl)
 	}
 }
+
+// agedRemote answers every status as received at one fixed time.
+type agedRemote struct {
+	st  meshapi.NodeStatus
+	age time.Time
+}
+
+func (a agedRemote) Status(string) (meshapi.NodeStatus, time.Time, bool) { return a.st, a.age, true }
+
+// A member alive in gossip whose API has stopped answering keeps its last
+// status in the poller. Past StatusStaleAfter that status is dropped from
+// the view — absent, "cannot say" — rather than shown frozen, and its cost
+// no longer counts toward the cluster's.
+func TestBuildClusterDropsAStaleMemberStatus(t *testing.T) {
+	s := clusterFixture(nil)
+	s.Remote = agedRemote{st: gb2Status(), age: time.Now().Add(-time.Minute)}
+	s.StatusStaleAfter = 20 * time.Second
+	c := BuildCluster(s)
+	for _, m := range c.Members {
+		if m.Node == "gb2" && m.Status != nil {
+			t.Errorf("gb2's minute-old status is shown: %+v", m.Status)
+		}
+	}
+	if c.ClusterCostEURPerHour != 0.25 {
+		t.Errorf("cluster cost %v, want gb1's 0.25 only", c.ClusterCostEURPerHour)
+	}
+}

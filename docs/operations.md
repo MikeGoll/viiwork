@@ -115,6 +115,7 @@ assistant, letting coding tools delegate inference to your locally hosted models
 
 ```bash
 make mcp                                          # builds bin/viiwork-mcp
+make install-mcp                                  # and installs it to ~/.local/bin (PREFIX=...)
 viiwork-mcp --url http://your-viiwork-host:8086   # or set VIIWORK_URL
 ```
 
@@ -124,5 +125,11 @@ viiwork-mcp --url http://your-viiwork-host:8086   # or set VIIWORK_URL
 | `models` | List available models on the cluster |
 | `status` | Cluster health, per-GPU backend status, in-flight counts |
 
-Add it to your MCP client's configuration as a stdio transport server pointing at
-the `viiwork-mcp` binary.
+Add it to your MCP client's configuration as a stdio transport server. Name the
+binary on `PATH` rather than a path into a checkout, and leave the URL to the
+local node (the default) where the machine runs one — any node reaches the whole
+mesh. For Claude Code:
+
+```bash
+claude mcp add --scope user viiwork -- viiwork-mcp
+```

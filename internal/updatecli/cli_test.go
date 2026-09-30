@@ -22,20 +22,24 @@ import (
 // fakeNode is one member's /v1/update. behave scripts what a GET returns
 // after an activate: it is called with the number of GETs since then.
 type fakeNode struct {
-	name   string
-	srv    *httptest.Server
-	mesh   *fakeMesh
-	mu     sync.Mutex
-	st     meshapi.UpdateStatus
-	gone   bool // /v1/update answers 404: an older node
-	dead   bool // not alive in the cluster view
-	stage  int  // status code for stage; 0 = 200
-	drop   bool // the GET that set it, and every one while set, gets a closed connection
-	behave func(n *fakeNode, polls int)
-	splits bool // once on a new release, the entry node sees it dead: it lost the mesh
-	polls  int
-	calls  []string
-	auth   []string // X-Viiwork-Auth of every write
+	name  string
+	srv   *httptest.Server
+	mesh  *fakeMesh
+	mu    sync.Mutex
+	st    meshapi.UpdateStatus
+	gone  bool // /v1/update answers 404: an older node
+	dead  bool // not alive in the cluster view
+	stage int  // status code for stage; 0 = 200
+	// stageTook is how long a stage takes to answer.
+	stageTook time.Duration
+	activate  int      // status code for activate; 0 = 202
+	models    []string // what its status lists as served
+	drop      bool     // the GET that set it, and every one while set, gets a closed connection
+	behave    func(n *fakeNode, polls int)
+	splits    bool // once on a new release, the entry node sees it dead: it lost the mesh
+	polls     int
+	calls     []string
+	auth      []string // X-Viiwork-Auth of every write
 }
 
 type fakeMesh struct {
@@ -77,6 +81,7 @@ func (n *fakeNode) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case meshapi.PathUpdateStage:
 			n.calls = append(n.calls, "stage "+req.Version)
+			time.Sleep(n.stageTook)
 			if n.stage != 0 {
 				w.WriteHeader(n.stage)
 				json.NewEncoder(w).Encode(meshapi.ErrorResponse{Error: meshapi.ErrorBody{Message: "stage refused", Type: "update_error"}})
@@ -84,6 +89,11 @@ func (n *fakeNode) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			n.st.Staged = append(n.st.Staged, req.Version)
 		case meshapi.PathUpdateActivate:
+			if n.activate != 0 {
+				w.WriteHeader(n.activate)
+				json.NewEncoder(w).Encode(meshapi.ErrorResponse{Error: meshapi.ErrorBody{Message: "activate refused", Type: "update_error"}})
+				return
+			}
 			n.calls = append(n.calls, "activate "+req.Version)
 			n.mesh.mu.Lock()
 			n.mesh.order = append(n.mesh.order, n.name)
@@ -168,6 +178,11 @@ func (m *fakeMesh) cluster() meshapi.ClusterResponse {
 		c.Mesh = meshapi.MeshOpen
 	}
 	for _, n := range m.nodes {
+		// The entry node's own lock is held by the request being served;
+		// every other node may be answering a concurrent poll.
+		if n != m.entry {
+			n.mu.Lock()
+		}
 		addr := strings.TrimPrefix(n.srv.URL, "http://")
 		if n == m.entry && m.entryAdvertise != "" {
 			addr = m.entryAdvertise
@@ -176,8 +191,14 @@ func (m *fakeMesh) cluster() meshapi.ClusterResponse {
 		p, _ := strconv.Atoi(port)
 		mem := meshapi.Member{Node: n.name, Addr: host, Role: meshapi.RoleNode, State: meshapi.MemberAlive,
 			Status: &meshapi.NodeStatus{Node: n.name, Addr: host, APIPort: p, Ver: n.st.Running}}
+		for _, model := range n.models {
+			mem.Status.Models = append(mem.Status.Models, meshapi.ModelStatus{Name: model, Slots: 1})
+		}
 		if n.dead || n.splits && n.st.Running != "v2.5.0" {
 			mem.State, mem.Status = meshapi.MemberDead, nil
+		}
+		if n != m.entry {
+			n.mu.Unlock()
 		}
 		c.Members = append(c.Members, mem)
 	}
@@ -566,5 +587,194 @@ func TestRolloutStopsWhenAHostLeavesTheMesh(t *testing.T) {
 	}
 	if strings.Contains(strings.Join(m.order, ","), "node-b") {
 		t.Errorf("the next host was activated after one left the mesh: %v", m.order)
+	}
+}
+
+func TestBuildWaves(t *testing.T) {
+	for _, c := range []struct {
+		name     string
+		targets  []string
+		entry    string
+		parallel int
+		serves   map[string][]string
+		want     string // waves joined by " | ", hosts by ","
+	}{
+		{"one at a time is today's order", []string{"a", "b", "c"}, "c", 1, nil, "a | b | c"},
+		{"waves of two, entry alone last", []string{"a", "b", "c", "d", "e"}, "e", 2, nil, "a,b | c,d | e"},
+		{"entry alone even with room", []string{"a", "c", "b"}, "c", 8, nil, "a,b | c"},
+		{"only the entry", []string{"c"}, "c", 4, nil, "c"},
+		{"entry not in the rollout", []string{"a", "b", "c"}, "z", 2, nil, "a,b | c"},
+		{"a model's two hosts never share a wave", []string{"a", "b", "c", "d"}, "d", 3,
+			map[string][]string{"a": {"m"}, "b": {"m"}}, "a | b,c | d"},
+		{"a host outside the rollout keeps the model up", []string{"a", "b", "c", "d"}, "d", 3,
+			map[string][]string{"a": {"m"}, "b": {"m"}, "x": {"m"}}, "a,b,c | d"},
+		{"a single-host model constrains nothing", []string{"a", "b", "c"}, "c", 2,
+			map[string][]string{"a": {"m"}}, "a,b | c"},
+		{"three hosts of one model, waves of three", []string{"a", "b", "c", "d", "e"}, "e", 3,
+			map[string][]string{"a": {"m"}, "b": {"m"}, "c": {"m"}}, "a,b | c,d | e"},
+		{"two models", []string{"a", "b", "c", "d"}, "z", 4,
+			map[string][]string{"a": {"m", "n"}, "b": {"m"}, "c": {"n"}, "x": {"m"}}, "a,b | c,d"},
+		{"the entry's models count too", []string{"a", "b", "c"}, "c", 2,
+			map[string][]string{"a": {"m"}, "b": {"m"}, "c": {"m"}}, "a,b | c"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			var got []string
+			for _, w := range buildWaves(c.targets, c.entry, c.parallel, c.serves) {
+				got = append(got, strings.Join(w, ","))
+			}
+			if g := strings.Join(got, " | "); g != c.want {
+				t.Errorf("got %q, want %q", g, c.want)
+			}
+		})
+	}
+}
+
+// Staging changes nothing a host runs, so every host stages at once.
+func TestRolloutStagesInParallel(t *testing.T) {
+	m := newFakeMesh(t, "node-a", "node-b", "node-c", "node-d")
+	for _, n := range m.nodes {
+		n.stageTook = 300 * time.Millisecond
+	}
+	start := time.Now()
+	code, out, errOut := run(t, m, Phrase+"\n")
+	if code != 0 {
+		t.Fatalf("exit %d\n%s\n%s", code, out, errOut)
+	}
+	// Serially the stages alone would take 1.2 s.
+	if took := time.Since(start); took > 900*time.Millisecond {
+		t.Errorf("rollout took %v; the stages did not overlap", took)
+	}
+	for _, n := range m.nodes {
+		if !strings.Contains(out, n.name+": staged v2.6.0\n") {
+			t.Errorf("no staged line for %s:\n%s", n.name, out)
+		}
+	}
+}
+
+func TestRolloutStageFailuresAreSummarised(t *testing.T) {
+	m := newFakeMesh(t, "node-a", "node-b", "node-c")
+	m.node("node-a").stage = http.StatusConflict
+	m.node("node-c").stage = http.StatusConflict
+	code, _, errOut := run(t, m, Phrase+"\n", "--parallel", "3")
+	if code != 1 || !strings.Contains(errOut, "staging failed on node-a, node-c: nothing was activated") {
+		t.Fatalf("exit %d: %s", code, errOut)
+	}
+	if len(m.order) != 0 {
+		t.Errorf("activated %v although a stage failed", m.order)
+	}
+}
+
+func TestRolloutParallelRejectsBelowOne(t *testing.T) {
+	m := newFakeMesh(t, "node-a")
+	for _, p := range []string{"0", "-1"} {
+		if code, _, errOut := run(t, m, Phrase+"\n", "--parallel", p); code != 2 || !strings.Contains(errOut, "--parallel") {
+			t.Errorf("--parallel %s: exit %d %s", p, code, errOut)
+		}
+	}
+	if len(m.node("node-a").calls) != 0 {
+		t.Error("written to with a bad --parallel")
+	}
+}
+
+// pendsUntil stays pending, with no deadline, until the mesh has activated
+// want hosts, then confirms. Waiting on one host at a time would never see
+// the second activation and would give up after ComeBack.
+func pendsUntil(want int) func(*fakeNode, int) {
+	return func(n *fakeNode, polls int) {
+		if n.st.Pending == nil {
+			return
+		}
+		n.mesh.mu.Lock()
+		activated := len(n.mesh.order)
+		n.mesh.mu.Unlock()
+		n.st.Running = n.st.Pending.Version
+		if activated >= want {
+			n.st.LastGood, n.st.Pending = n.st.Running, nil
+		}
+	}
+}
+
+func TestRolloutInWaves(t *testing.T) {
+	m := newFakeMesh(t, "node-a", "node-b", "node-c", "node-d", "node-e") // node-e is the entry
+	m.node("node-a").behave = pendsUntil(2)
+	m.node("node-b").behave = pendsUntil(2)
+	code, out, errOut := run(t, m, Phrase+"\n", "--parallel", "2")
+	if code != 0 {
+		t.Fatalf("exit %d\n%s\n%s", code, out, errOut)
+	}
+	if got := strings.Join(m.order, ","); got != "node-a,node-b,node-c,node-d,node-e" {
+		t.Errorf("activation order %s", got)
+	}
+	for _, want := range []string{"wave 1: node-a, node-b", "wave 2: node-c, node-d", "wave 3: node-e", "wave 1/3", "rollout of v2.6.0 complete"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output lacks %q:\n%s", want, out)
+		}
+	}
+	// The plan, with its waves, comes before the phrase.
+	if i, j := strings.Index(out, "wave 3: node-e"), strings.Index(out, "Type "); i < 0 || j < 0 || i > j {
+		t.Errorf("the waves are not shown before the phrase:\n%s", out)
+	}
+}
+
+// The capacity guard reads the models each member's status lists, counting
+// members outside the rollout.
+func TestRolloutWavesKeepEveryModelUp(t *testing.T) {
+	m := newFakeMesh(t, "node-a", "node-b", "node-c", "node-d")
+	m.node("node-a").models = []string{"qwen"}
+	m.node("node-b").models = []string{"qwen"}
+	code, out, errOut := run(t, m, Phrase+"\n", "--parallel", "3")
+	if code != 0 {
+		t.Fatalf("exit %d\n%s\n%s", code, out, errOut)
+	}
+	if !strings.Contains(out, "wave 1: node-a\n") || !strings.Contains(out, "wave 2: node-b, node-c\n") {
+		t.Errorf("node-a and node-b share a wave:\n%s", out)
+	}
+	// With a third host serving it, outside the rollout, they may.
+	m2 := newFakeMesh(t, "node-a", "node-b", "node-c", "node-d", "node-x")
+	m2.entry = m2.node("node-d")
+	for _, n := range []string{"node-a", "node-b", "node-x"} {
+		m2.node(n).models = []string{"qwen"}
+	}
+	m2.node("node-x").st.Enabled = false
+	if code, out, errOut := run(t, m2, Phrase+"\n", "--parallel", "3"); code != 0 || !strings.Contains(out, "wave 1: node-a, node-b, node-c\n") {
+		t.Errorf("exit %d\n%s\n%s", code, out, errOut)
+	}
+}
+
+func TestRolloutStopsAfterTheFailedWave(t *testing.T) {
+	m := newFakeMesh(t, "node-a", "node-b", "node-c", "node-d", "node-e")
+	a := m.node("node-a")
+	a.behave, a.st.LastGood = rollsBack, "v2.5.0"
+	code, out, errOut := run(t, m, Phrase+"\n", "--parallel", "2")
+	if code != 1 {
+		t.Fatalf("exit %d\n%s\n%s", code, out, errOut)
+	}
+	// The whole wave is waited for and reported; no later wave starts.
+	if got := strings.Join(m.order, ","); got != "node-a,node-b" {
+		t.Errorf("activations %s", got)
+	}
+	for _, want := range []string{"rollout stopped after wave 1/3", "node-a: it rolled back", "node-b: on v2.6.0, confirmed", "later waves untouched"} {
+		if !strings.Contains(errOut, want) {
+			t.Errorf("stderr lacks %q:\n%s", want, errOut)
+		}
+	}
+}
+
+// An activate refused mid-wave leaves the rest of the wave alone, but the
+// hosts already restarting are still followed to the end.
+func TestRolloutActivateRefusedMidWave(t *testing.T) {
+	m := newFakeMesh(t, "node-a", "node-b", "node-c", "node-d")
+	m.node("node-b").activate = http.StatusConflict
+	code, out, errOut := run(t, m, Phrase+"\n", "--parallel", "3")
+	if code != 1 {
+		t.Fatalf("exit %d\n%s\n%s", code, out, errOut)
+	}
+	if got := strings.Join(m.order, ","); got != "node-a" {
+		t.Errorf("activations %s", got)
+	}
+	for _, want := range []string{"node-a: on v2.6.0, confirmed", "node-b: activate failed", "activate refused", "node-c: not activated"} {
+		if !strings.Contains(errOut, want) {
+			t.Errorf("stderr lacks %q:\n%s", want, errOut)
+		}
 	}
 }

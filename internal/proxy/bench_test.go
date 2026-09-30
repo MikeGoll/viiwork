@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Benchmarks for the per-request and per-token hot paths.
@@ -340,3 +341,20 @@ func (discardWriter) Header() http.Header         { return http.Header{} }
 func (discardWriter) Write(b []byte) (int, error) { return len(b), nil }
 func (discardWriter) WriteHeader(int)             {}
 func (discardWriter) Flush()                      {}
+
+// BenchmarkMeasureWriterPerChunk is the per-token cost of measurement once the
+// first token was seen, without and with stripping. Both must be 0 allocs/op.
+func BenchmarkMeasureWriterPerChunk(b *testing.B) {
+	chunk := []byte("data: {\"choices\":[{\"delta\":{\"content\":\"token\"}}]}\n\n")
+	for _, strip := range []bool{false, true} {
+		b.Run(fmt.Sprintf("strip=%v", strip), func(b *testing.B) {
+			w, _ := newMeasureWriter(discardWriter{}, strip, time.Now)
+			w.Write(chunk) // first token seen, carry buffer grown
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				w.Write(chunk)
+			}
+		})
+	}
+}

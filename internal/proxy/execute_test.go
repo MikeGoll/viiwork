@@ -116,7 +116,7 @@ func TestServeLocalX1ThinkDisabledJSON(t *testing.T) {
 		_, _ = io.WriteString(w, reasoningJSON)
 	})
 	rec := httptest.NewRecorder()
-	res := serveLocal(rec, chatRequest("/v1/chat/completions", `{"model":"m"}`), []byte(`{"model":"m"}`), backendFor("m/0", eng), "m", "self", true)
+	res := serveLocal(rec, chatRequest("/v1/chat/completions", `{"model":"m"}`), []byte(`{"model":"m"}`), backendFor("m/0", eng), "m", "self", true, false)
 	want := rewriteThinkResponse([]byte(reasoningJSON))
 	if res.Outcome != outcomeServed || res.Status != 200 || rec.Body.String() != string(want) {
 		t.Fatalf("res=%+v body=%q", res, rec.Body.String())
@@ -185,7 +185,7 @@ func TestServeLocalX2Unbuffered(t *testing.T) {
 	b := backendFor("m/0", eng)
 	r := streamingClient(t, func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
-		serveLocal(w, r, body, b, "m", "self", false)
+		serveLocal(w, r, body, b, "m", "self", false, false)
 	})
 	first := readEvent(t, r, 2*time.Second)
 	if !strings.Contains(first, "one") {
@@ -204,7 +204,7 @@ func TestServeLocalX3EngineGone(t *testing.T) {
 	b := backendFor("m/0", eng)
 	eng.Close()
 	w := &trackingWriter{ResponseRecorder: httptest.NewRecorder()}
-	res := serveLocal(w, chatRequest("/v1/chat/completions", "{}"), []byte("{}"), b, "m", "self", false)
+	res := serveLocal(w, chatRequest("/v1/chat/completions", "{}"), []byte("{}"), b, "m", "self", false, false)
 	if res.Outcome != outcomeRetryable || b.hard.Load() != 1 || w.wroteHeader || w.Body.Len() != 0 {
 		t.Errorf("res=%+v hard=%d wrote=%v", res, b.hard.Load(), w.wroteHeader)
 	}
@@ -214,7 +214,7 @@ func TestServeLocalX4X5Statuses(t *testing.T) {
 	busy := engineServer(t, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(503) })
 	b := backendFor("m/0", busy)
 	w := &trackingWriter{ResponseRecorder: httptest.NewRecorder()}
-	if res := serveLocal(w, chatRequest("/v1/chat/completions", "{}"), []byte("{}"), b, "m", "self", false); res.Outcome != outcomeRetryable || b.hard.Load() != 0 || w.wroteHeader {
+	if res := serveLocal(w, chatRequest("/v1/chat/completions", "{}"), []byte("{}"), b, "m", "self", false, false); res.Outcome != outcomeRetryable || b.hard.Load() != 0 || w.wroteHeader {
 		t.Errorf("X4: res=%+v hard=%d wrote=%v", res, b.hard.Load(), w.wroteHeader)
 	}
 
@@ -223,7 +223,7 @@ func TestServeLocalX4X5Statuses(t *testing.T) {
 		_, _ = io.WriteString(w, `{"error":"boom"}`)
 	})
 	rec := httptest.NewRecorder()
-	if res := serveLocal(rec, chatRequest("/v1/chat/completions", "{}"), []byte("{}"), backendFor("m/0", boom), "m", "self", false); res.Outcome != outcomeServed || rec.Code != 500 || rec.Body.String() != `{"error":"boom"}` {
+	if res := serveLocal(rec, chatRequest("/v1/chat/completions", "{}"), []byte("{}"), backendFor("m/0", boom), "m", "self", false, false); res.Outcome != outcomeServed || rec.Code != 500 || rec.Body.String() != `{"error":"boom"}` {
 		t.Errorf("X5: res=%+v code=%d body=%q", res, rec.Code, rec.Body.String())
 	}
 }
@@ -242,7 +242,7 @@ func TestServeLocalX14CutJSONLeavesNoHeaders(t *testing.T) {
 		}
 	})
 	w := &trackingWriter{ResponseRecorder: httptest.NewRecorder()}
-	res := serveLocal(w, chatRequest("/v1/chat/completions", "{}"), []byte("{}"), backendFor("m/0", eng), "m", "self", true)
+	res := serveLocal(w, chatRequest("/v1/chat/completions", "{}"), []byte("{}"), backendFor("m/0", eng), "m", "self", true, false)
 	if res.Outcome != outcomeRetryable || w.wroteHeader || len(w.Header()) != 0 {
 		t.Errorf("res=%+v wrote=%v headers=%v", res, w.wroteHeader, w.Header())
 	}
@@ -261,7 +261,7 @@ func TestServeLocalX6ClientGone(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	req := chatRequest("/v1/chat/completions", "{}").WithContext(ctx)
 	w := &firstWriteCanceller{ResponseRecorder: httptest.NewRecorder(), cancel: cancel}
-	res := serveLocal(w, req, []byte("{}"), b, "m", "self", false)
+	res := serveLocal(w, req, []byte("{}"), b, "m", "self", false, false)
 	if !res.Aborted {
 		t.Errorf("res = %+v, want aborted", res)
 	}

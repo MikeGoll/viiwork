@@ -85,3 +85,13 @@ func TestSnapshotS6NotRunningAndCPU(t *testing.T) {
 		t.Errorf("a CPU backend must omit gpus, got %s", raw)
 	}
 }
+
+// A node advertises the context every healthy backend can honour: the
+// smallest any of them reports, since the router may send a request to any.
+// One clamped by VRAM (a mixed-card host) must not be hidden by a larger one.
+func TestSnapshotS5bSmallestEngineContext(t *testing.T) {
+	views := []backendView{healthyView("Qwen3.8-27B/0", 2, 0, 0, 49152), healthyView("Qwen3.8-27B/1", 2, 0, 0, 32768)}
+	if c := modelCapacity(qwen, views); c.Ctx != 32768 {
+		t.Errorf("Ctx = %d, want 32768, the smallest a healthy backend honours", c.Ctx)
+	}
+}

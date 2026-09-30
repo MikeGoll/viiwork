@@ -87,6 +87,13 @@ type Helper struct {
 	Client  *http.Client
 	Run     Runner
 	Log     func(format string, args ...any)
+	// Source replaces update.source, which accepts only GitHub. Test seam:
+	// "" = the config's.
+	Source string
+	// Local asks the host's viiwork-parrot for a release, as the node's
+	// stager does: the archive from there, the signed files from GitHub
+	// unless GitHub is unreachable. nil = GitHub only.
+	Local func(ctx context.Context, version string) (dir string, err error)
 }
 
 const (
@@ -247,6 +254,9 @@ func (h *Helper) install() (composeInstall, error) {
 	src, err := config.PeekSource(h.Config)
 	if err != nil {
 		return composeInstall{}, fmt.Errorf("%s: %w", h.Config, err)
+	}
+	if h.Source != "" {
+		src = h.Source
 	}
 	return composeInstall{file: m.Compose.File, project: m.Compose.Project, source: src}, nil
 }
@@ -560,7 +570,8 @@ type prepared struct {
 // viiwork.
 func (h *Helper) verify(ctx context.Context, c composeInstall, version string) (string, error) {
 	dir := filepath.Join(h.Dir, "releases")
-	st := &update.Stager{Dir: dir, Source: c.source, Client: h.Client, Keys: h.Keys, Target: h.Target}
+	st := &update.Stager{Dir: dir, Source: c.source, Client: h.Client, Keys: h.Keys, Target: h.Target,
+		Local: h.Local, Log: h.Log}
 	if err := st.Stage(ctx, version); err != nil {
 		return "", err
 	}

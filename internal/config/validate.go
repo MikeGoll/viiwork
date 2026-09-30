@@ -232,8 +232,9 @@ func (c *Config) validateHealth() error {
 // validateParrot keeps viiwork_parrot.api on this machine. viiwork-parrot's API
 // is loopback only and has no authentication, and pointing viiwork at another
 // host's would make that host's disk and swarm this node's to command.
-func (c *Config) validateParrot() error {
-	api := c.ViiworkParrot.API
+func (c *Config) validateParrot() error { return validParrotAPI(c.ViiworkParrot.API) }
+
+func validParrotAPI(api string) error {
 	host, port, err := net.SplitHostPort(api)
 	if err != nil {
 		return fmt.Errorf("viiwork_parrot.api %q must be host:port: %w", api, err)

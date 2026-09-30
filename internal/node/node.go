@@ -29,6 +29,7 @@ import (
 	"github.com/janit/viiwork/v2/internal/gpu"
 	"github.com/janit/viiwork/v2/internal/modelinfo"
 	"github.com/janit/viiwork/v2/internal/parrot"
+	"github.com/janit/viiwork/v2/internal/perf"
 	"github.com/janit/viiwork/v2/internal/pipeline"
 	"github.com/janit/viiwork/v2/internal/power"
 	"github.com/janit/viiwork/v2/internal/proxy"
@@ -65,6 +66,8 @@ type Options struct {
 	SupervisorTiming supervisor.Timing // test seam; zero fields take the defaults
 	// ReleaseKeys verifies staged releases. Test seam; nil = release.Keys().
 	ReleaseKeys []ed25519.PublicKey
+	// UpdateSource replaces update.source (GitHub). Test seam; "" = the config's.
+	UpdateSource string
 	// LlamaPin is the llama.cpp release this binary carries (--build-info).
 	LlamaPin string
 	// InstallManifest is the setup wizard's install.json on a host where it
@@ -105,6 +108,7 @@ type Node struct {
 
 	sup          *supervisor.Supervisor
 	counters     *proxy.Counters
+	perf         *perf.Tracker // this node's measured speed per model; saved under state_dir
 	capPoller    *capacity.Poller
 	router       *route.Router
 	statusPoller *StatusPoller
@@ -274,10 +278,22 @@ func New(cfg *config.Config, o Options) (*Node, error) {
 		Self: n.name, Members: mem, Interval: cfg.Mesh.CapacityPoll.Duration,
 		OnReport: func(string) { n.router.Wake() }, Logf: n.logf,
 	})
+	// A corrupt perf.json or an unreadable state_dir costs minutes of
+	// learning, never a start.
+	n.perf = perf.New(time.Now)
+	if err := n.perf.Load(cfg.Node.StateDir); err != nil {
+		n.logf("%v; starting without saved performance baselines", err)
+	}
+	n.perf.SetKeys(perfKeys(cfg.Models))
 	n.router = route.New(route.Config{
 		Self: n.name, Local: route.SupervisorModels(n.sup), Remote: n.capPoller,
 		StaleAfter: cfg.Routing.StaleAfter.Duration, QueueMax: cfg.Routing.QueueMax,
 		QueueTimeout: cfg.Routing.QueueTimeout.Duration,
+		Performance:  cfg.Routing.PerformanceOn(),
+		LocalScore: func(model string) (int, int, bool) {
+			s, ok := n.perf.Score(model)
+			return s.OverheadMs, s.MsPer1k, ok
+		},
 	})
 	resolverPipelines, err := proxy.NewPipelineResolver(pipelines)
 	if err != nil {
@@ -318,6 +334,7 @@ func New(cfg *config.Config, o Options) (*Node, error) {
 		StaleAfter: cfg.Routing.StaleAfter.Duration,
 		Pipelines:  resolverPipelines, PipelineExec: executor,
 		Resolve: n.resolver.Resolve, ExtraModels: n.resolver.ModelEntries,
+		Perf: n.perf, PublishPerf: cfg.Routing.PerformanceOn(), Usage: n.usageReporting,
 	})
 
 	// 8. Member statuses and chassis power control.
@@ -449,6 +466,7 @@ func (n *Node) status() meshapi.NodeStatus {
 			return netip.Addr{}
 		},
 		Started: n.started, Models: n.sup.Status, QueueLen: n.router.QueueLen, Counters: n.counters.Get,
+		Perf: n.perf.Score,
 		GPUs: gpus, Inventory: n.inventory, Vendor: n.vendor, Power: n.power,
 		Energy: energyReader, Cost: costReader, PromptHistory: n.activity.PromptHistoryMax(),
 	})
@@ -471,6 +489,8 @@ func (n *Node) cluster() meshapi.ClusterResponse {
 			return ""
 		},
 		Members: members{n}.Members, Local: n.status, Remote: n.statusPoller, PowerControl: n.powerCtl,
+		// Four missed polls: a member alive in gossip whose API is wedged.
+		StatusStaleAfter: 4 * statusPollInterval,
 	})
 }
 
@@ -552,6 +572,7 @@ func (n *Node) Run(ctx context.Context) error {
 	goLoop(n.router.Run)
 	goLoop(n.aliasService.Run)
 	goLoop(n.sampleLoop)
+	goLoop(n.perfSaveLoop)
 	if n.energyStore != nil {
 		ids := n.history.GPUIDs()
 		if len(ids) == 0 {

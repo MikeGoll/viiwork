@@ -5,6 +5,7 @@ package node
 
 import (
 	"github.com/janit/viiwork/v2/internal/gpu"
+	"sync"
 )
 
 // NodePower is the machine's power reading (P6 Decision 3).
@@ -30,6 +31,9 @@ type nodePower struct {
 	gpus              gpuLatest
 	vendor            gpu.Vendor
 	gpuPowerAvailable bool
+
+	mu   sync.Mutex
+	seen map[int]bool // every card that has reported power
 }
 
 // NewNodePower reads IPMI when the sampler has a source, and otherwise the sum
@@ -46,11 +50,32 @@ func (p *nodePower) gpuSum() (float64, bool) {
 	if !p.gpuPowerAvailable || p.gpus == nil {
 		return 0, false
 	}
-	sum := 0.0
-	for _, s := range p.gpus.Latest() {
-		sum += s.PowerW
+	// A card that went stale, or answers without a wattage, is not drawing
+	// 0 W: the sum is the node's draw only while every card that has
+	// reported still does ("absent is not zero").
+	samples := p.gpus.Latest()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.seen == nil {
+		p.seen = map[int]bool{}
 	}
-	return sum, sum > 0
+	sum, present := 0.0, map[int]bool{}
+	complete := true
+	for _, s := range samples {
+		if s.PowerW <= 0 {
+			complete = false
+			continue
+		}
+		sum += s.PowerW
+		present[s.GPUID] = true
+		p.seen[s.GPUID] = true
+	}
+	for id := range p.seen {
+		if !present[id] {
+			complete = false
+		}
+	}
+	return sum, complete && sum > 0
 }
 
 func (p *nodePower) Watts() float64 {

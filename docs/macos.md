@@ -174,6 +174,11 @@ grace that covers the node's ordered shutdown. Install, reload and restart
 commands are in the file's header comment. `SIGHUP` reloads the config as on
 Linux. Logs go to `~/Library/Logs/viiwork/viiwork.log`.
 
+On a Mac set up by `viiwork init`, `viiwork stop` boots the agent out, which
+stops the node and its llama.cpp backends and frees the GPU until
+`viiwork start` or the next login. Killing the process does not: KeepAlive
+starts it again.
+
 ## Updates
 
 A Mac set up by `viiwork init` with updates enabled moves its llama.cpp with

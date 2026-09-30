@@ -183,7 +183,40 @@ type TokenProgressReader interface {
 type GPUBindingReader interface {
     BoundGPU(ctx context.Context, addr string) (uuid string, ok bool, err error)
 }
+
+// Versioner is an engine that can say which version of itself is installed
+// and which version this viiwork needs. MinVersion "" means no requirement;
+// Version runs the binary the Spec's options name; AtLeast compares in the
+// engine's own order. Without it nothing is checked.
+type Versioner interface {
+    MinVersion() string
+    Version(ctx context.Context, s Spec) (string, error)
+    AtLeast(installed, min string) (bool, error)
+}
+
+// UsageReporter declares how the engine's streamed chat responses report
+// token usage, which is what performance routing measures with:
+//   Unasked      - a streamed response ends with a usage chunk even when the
+//                  client did not set stream_options.include_usage;
+//   CachedTokens - usage.prompt_tokens_details.cached_tokens is present
+//                  whenever any prompt token came from cache, so its absence
+//                  means zero rather than "unknown".
+type UsageReporter interface {
+    UsageReporting() UsageReporting
+}
 ```
+
+`UsageReporter` is what lets a host earn a performance score. A sample needs
+the prompt's uncached token count, so viiwork asks the engine for usage
+(injecting `include_usage` and stripping the chunk again for a client that did
+not ask) only when it declares `CachedTokens`. An engine without the capability
+is **never asked for usage**: it yields no time-to-first-token samples, so it
+publishes no score, and with `routing.performance` on the router treats it as
+a learning host — priced at the fleet median and given the 5% trickle — for as
+long as it serves. Declare only what the engine really does; a
+`CachedTokens: true` on an engine that omits the field for a cache hit records
+every cached prompt as fully prefilled and makes the host look faster than it
+is.
 
 ### `internal/gpu`
 

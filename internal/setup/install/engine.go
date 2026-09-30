@@ -77,7 +77,10 @@ func (l Linux) AddEngineHelper(ctx context.Context, m Manifest, units []File) (M
 	if _, err := os.Stat(l.host(EngineDir)); err != nil && !slices.Contains(m.Dirs, EngineDir) {
 		m.Dirs = append(m.Dirs, EngineDir)
 	}
-	m.EngineHelper = &EngineHelper{Units: EngineUnits, Dir: EngineDir}
+	// The files are recorded before they are written, so an uninstall finds
+	// them whatever happens next; the helper itself only once it runs, so a
+	// failed enable neither makes the node wait on a helper that never acts
+	// nor stops the next `sudo viiwork init` from adding it again.
 	if err := w.writeManifest(m); err != nil {
 		return m, err
 	}
@@ -96,5 +99,9 @@ func (l Linux) AddEngineHelper(ctx context.Context, m Manifest, units []File) (M
 	if err := w.copyBinary(); err != nil {
 		return m, err
 	}
-	return m, l.EnableEngineHelper(ctx)
+	if err := l.EnableEngineHelper(ctx); err != nil {
+		return m, err
+	}
+	m.EngineHelper = &EngineHelper{Units: EngineUnits, Dir: EngineDir}
+	return m, w.writeManifest(m)
 }

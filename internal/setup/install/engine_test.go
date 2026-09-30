@@ -3,6 +3,8 @@ package install
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -94,5 +96,47 @@ func TestAddEngineHelperToAnExistingInstall(t *testing.T) {
 	want := []string{"systemctl daemon-reload", "systemctl enable --now viiwork-engine.path viiwork-engine.timer"}
 	if !slices.Equal(*calls, want) {
 		t.Errorf("calls %q", *calls)
+	}
+}
+
+// A helper whose units fail to enable is not recorded: the node does not go
+// managed and wait on a helper that never acts, and the next sudo viiwork
+// init takes the add-helper path again. Its files are recorded all along, so
+// an uninstall still removes them.
+func TestAFailedEngineHelperAddCanBeRetried(t *testing.T) {
+	l, _ := linux(t)
+	before := Manifest{Version: 1, OS: "linux", InstalledBy: "v2.6.0", Files: []string{ConfigFile, ComposeFile},
+		Dirs: []string{ConfigDir}, Compose: &Compose{File: ComposeFile, Project: Project, Volumes: []string{}}, Binary: BinaryPath}
+	path := filepath.Join(l.Root, ManifestFile)
+	writeManifest(t, path, before)
+	os.MkdirAll(filepath.Join(l.Root, filepath.Dir(BinaryPath)), 0o755)
+	ok := l.Exec
+	l.Exec = func(ctx context.Context, w io.Writer, name string, args ...string) error {
+		if name == "systemctl" && len(args) > 0 && args[0] == "enable" {
+			return errors.New("unit masked")
+		}
+		return ok(ctx, w, name, args...)
+	}
+	if _, err := l.AddEngineHelper(context.Background(), before, unitFiles()); err == nil {
+		t.Fatal("no error from a failed enable")
+	}
+	got, err := ReadManifest(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.EngineHelper != nil || ManagedInstall(path) {
+		t.Errorf("a helper that never started is recorded: %+v", got.EngineHelper)
+	}
+	for _, f := range unitFiles() {
+		if !slices.Contains(got.Files, f.Path) {
+			t.Errorf("%s not recorded for uninstall", f.Path)
+		}
+	}
+	l.Exec = ok
+	if _, err := l.AddEngineHelper(context.Background(), got, unitFiles()); err != nil {
+		t.Fatal(err)
+	}
+	if !ManagedInstall(path) {
+		t.Error("the retry did not record the helper")
 	}
 }

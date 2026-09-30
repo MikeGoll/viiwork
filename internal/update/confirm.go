@@ -35,15 +35,23 @@ type Confirmer struct {
 	mu       sync.Mutex
 	deadline time.Time
 	last     time.Time
+	lastErr  string // the last state read error logged
 }
 
 // Step checks once and reports whether the confirmer is finished.
 func (c *Confirmer) Step() bool {
 	st, err := c.Store.Load()
 	if err != nil {
-		c.Log("update: %v", err)
-		return true
+		// Keep polling: a hand edit or a transient read error must not
+		// leave a pending release neither confirmed nor rolled back for the
+		// rest of the run. Each distinct error is logged once.
+		if msg := err.Error(); msg != c.lastErr {
+			c.Log("update: %v", err)
+			c.lastErr = msg
+		}
+		return false
 	}
+	c.lastErr = ""
 	p := st.Pending
 	if p == nil || p.Version != st.Current || p.Version != c.Running {
 		return true

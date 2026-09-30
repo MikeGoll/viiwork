@@ -113,11 +113,28 @@ does not know.
 
 - **Stage** (`POST /v1/update/stage {"version": "vX.Y.Z"}`): the node downloads
   `SHA256SUMS`, its signature and this host's archive from
-  `<update.source>/vX.Y.Z/`, verifies the signature for that version against
+  `https://github.com/janit/viiwork/releases/download/vX.Y.Z/` (the only
+  `update.source` a node accepts; a redirect is followed only to GitHub's
+  asset hosts), verifies the signature for that version against
   the compiled-in keys, checks the archive, unpacks `viiwork` and
   `viiwork-accept`, runs the new binary with `--version` (it must run here and
   report that version) and `--engine-requirements` (this host's engines must be
   new enough). Anything that fails leaves nothing behind.
+
+  `SHA256SUMS` and its signature always come from GitHub when GitHub
+  answers. The archive comes from the node's viiwork-parrot
+  (`viiwork_parrot.api`, `POST /ensure-release` with the other mesh members
+  as peer hints), checked against GitHub's sums; when parrot is absent,
+  refuses, shows no progress for 2 minutes, has not finished after 5, or
+  hands over an archive that does not match, the node logs why and downloads
+  the archive from GitHub (a parrot answering 503, which has no feed yet, is
+  waited out within those limits). The host's engine helper on a Docker
+  install stages through the same parrot. Only while GitHub is unreachable —
+  no connection, a 30 s timeout, a connection dropped mid-answer, 5xx, 429 —
+  does the node take parrot's copy of the signed files, verified against the
+  same keys. A definite answer from GitHub (404, 403, a bad signature) is
+  final, and so is any other answer: a redirect off GitHub, or signed files
+  over their size cap.
 
   On a Mac set up by `viiwork init` (its `install.json` names a llama root),
   staging first reads the new binary's `--build-info`. When it carries a
@@ -221,8 +238,8 @@ them through an `os.Root` on the state directory, refuses a link anywhere
 there, reads only small regular files without blocking, and replaces its
 result file by rename, so a planted link can make it neither read nor write
 elsewhere. The repository comes from the host's compose file (and must be one
-of the published `ghcr.io/janit/viiwork-*` images), the download root from the
-host's `viiwork.yaml` (`update.source`), and where things are from the host's
+of the published `ghcr.io/janit/viiwork-*` images), the download root is
+GitHub's (the only `update.source` a config may name), and where things are from the host's
 `install.json`. A compromised node can still ask for any *signed* release,
 newer than the running one, or one this host has already run.
 
@@ -240,6 +257,7 @@ helper did and why.
 viiwork update status                        # every member: running, current, last good, previous, pending, engines
 viiwork update                               # the latest signed release, everywhere it is enabled
 viiwork update --to v2.6.0 --hosts node-a,node-b   # one version, some hosts
+viiwork update --parallel 3                  # activate up to three hosts at a time
 viiwork update rollback --host node-b              # one host back a release
 ```
 
@@ -250,12 +268,22 @@ stops the rollout at the first host.
 A rollout lists its plan — every member with what will happen to it, or why it
 is skipped (not alive, updates off, already there, newer, older than rolling
 updates) — and asks for `YES I WANT TO UPDATE THE NODES ABOVE` (or `--confirm`). It
-then stages the release on every chosen host, so a download, signature or
-engine problem stops everything before any host restarts, and activates them
+then stages the release on every chosen host — all at once, at most eight
+together, since staging changes nothing a host runs — so a download, signature
+or engine problem stops everything before any host restarts, and activates them
 one at a time, the node it talks to last. Each host must come back on the new
 release and confirm it before the next starts; a host that rolls itself back,
 or misses its own confirmation deadline, stops the rollout with the rest
-untouched. In a secured mesh, run it where the mesh secret is loaded. On a Linux node
+untouched.
+
+`--parallel N` activates in waves of up to N hosts instead, and waits for
+every host of a wave before the next. The node the CLI talks to is still
+last and alone. No wave holds every alive host that lists a model in its
+status, counting hosts outside the rollout, so a model served by two or more
+machines never goes offline; a model on one machine is offline while it
+restarts, as it is one at a time. The plan shows the waves before the phrase.
+If any host of a wave fails, the CLI still follows the rest of that wave,
+reports where each host ended up, and starts no later wave. In a secured mesh, run it where the mesh secret is loaded. On a Linux node
 installed by `viiwork init`, `mesh.env` is readable by root only:
 `sudo sh -c 'set -a; . /etc/viiwork/mesh.env; /usr/local/bin/viiwork update'`.
 On a Mac installed by `viiwork init`, the CLI reads the secret from the node's

@@ -48,6 +48,9 @@ type captureWriter struct {
 	status   int
 	overflow bool
 	tail     []byte // the newest bytes past the cap, at most captureTailBytes once trimmed
+
+	usageDone  bool // usage has been decoded; usageCache is valid even when it found nothing
+	usageCache decodedUsage
 }
 
 func (c *captureWriter) WriteHeader(status int) {
@@ -58,8 +61,10 @@ func (c *captureWriter) WriteHeader(status int) {
 func (c *captureWriter) Write(b []byte) (int, error) {
 	if !c.overflow {
 		if room := maxCaptureBytes - len(c.buf); len(b) <= room {
+			c.grow(len(b))
 			c.buf = append(c.buf, b...)
 		} else {
+			c.grow(room)
 			c.buf = append(c.buf, b[:room]...)
 			c.overflow = true
 			c.keepTail(b[room:])
@@ -68,6 +73,19 @@ func (c *captureWriter) Write(b []byte) (int, error) {
 		c.keepTail(b)
 	}
 	return c.ResponseWriter.Write(b)
+}
+
+// grow makes room for n more bytes by doubling, up to the cap. append alone
+// grows a large slice by about 1.25x, which allocates about five times the
+// cap on the way to it; doubling allocates about twice.
+func (c *captureWriter) grow(n int) {
+	if cap(c.buf)-len(c.buf) >= n {
+		return
+	}
+	next := min(max(2*cap(c.buf), len(c.buf)+n, 4<<10), maxCaptureBytes)
+	buf := make([]byte, len(c.buf), next)
+	copy(buf, c.buf)
+	c.buf = buf
 }
 
 // keepTail appends past-the-cap bytes to a rolling tail. Nothing here runs
@@ -88,18 +106,39 @@ func (c *captureWriter) keepTail(b []byte) {
 	c.tail = append(c.tail, b...)
 }
 
-// CompletionTokens is usage.completion_tokens from the finished response, read
-// once after the response completes and never per token. Past the cap it reads
-// the tail, dropping its first, partial line.
-func (c *captureWriter) CompletionTokens() (int64, bool) {
+// usageTail is the bytes CompletionTokens and PromptUsage both scan for usage:
+// the whole capture below the cap, or past it, the tail with its first,
+// partial line dropped.
+func (c *captureWriter) usageTail() []byte {
 	if !c.overflow {
-		return extractCompletionTokens(c.buf)
+		return c.buf
 	}
 	tail := c.tail
 	if i := bytes.IndexByte(tail, '\n'); i >= 0 {
 		tail = tail[i+1:]
 	}
-	return extractCompletionTokens(tail)
+	return tail
+}
+
+// usage lazily decodes this response's usage exactly once, so that a caller
+// asking for both CompletionTokens and PromptUsage on the same captureWriter
+// — Task 5's wiring calls both per request — shares one scan of the buffer
+// and one JSON decode per usage-bearing payload, not two.
+func (c *captureWriter) usage() decodedUsage {
+	if !c.usageDone {
+		completion, completionOK, prompt, promptOK := extractUsage(c.usageTail())
+		c.usageCache = decodedUsage{completion: completion, completionOK: completionOK, prompt: prompt, promptOK: promptOK}
+		c.usageDone = true
+	}
+	return c.usageCache
+}
+
+// CompletionTokens is usage.completion_tokens from the finished response, read
+// once after the response completes and never per token. Past the cap it reads
+// the tail, dropping its first, partial line.
+func (c *captureWriter) CompletionTokens() (int64, bool) {
+	u := c.usage()
+	return u.completion, u.completionOK
 }
 
 // Unwrap lets http.ResponseController reach the real writer, should anything
@@ -233,47 +272,138 @@ func appendChoiceText(payload []byte, content, reasoning *strings.Builder) {
 	}
 }
 
+// usageShape covers a finished response's usage object: completion count,
+// prompt count and how much of the prompt was cached. It appears either in a
+// single JSON object or in the last usage-bearing SSE event of a stream.
 type usageShape struct {
 	Usage *struct {
-		CompletionTokens *float64 `json:"completion_tokens"`
+		CompletionTokens    *float64 `json:"completion_tokens"`
+		PromptTokens        *float64 `json:"prompt_tokens"`
+		PromptTokensDetails *struct {
+			CachedTokens *float64 `json:"cached_tokens"`
+		} `json:"prompt_tokens_details"`
 	} `json:"usage"`
 }
 
 var usageKey = []byte(`"usage"`)
 
-// extractCompletionTokens finds usage.completion_tokens in a finished
-// response: a single JSON object, or else an SSE stream, where the last data
-// payload carrying a numeric value wins. Absent gives (0, false): a streaming
-// client that did not ask for usage is counted as a request with no tokens.
-func extractCompletionTokens(raw []byte) (int64, bool) {
-	if n, ok := usageOf(bytes.TrimSpace(raw)); ok {
-		return n, true
-	}
-	var last int64
-	found := false
-	for _, line := range bytes.Split(raw, []byte("\n")) {
-		line = bytes.TrimSpace(line)
-		if !bytes.HasPrefix(line, sseDataPrefix) {
-			continue
-		}
-		payload := bytes.TrimSpace(line[len(sseDataPrefix):])
-		if !bytes.Contains(payload, usageKey) {
-			continue // only chunks that mention usage are decoded
-		}
-		if n, ok := usageOf(payload); ok {
-			last, found = n, true
-		}
-	}
-	return last, found
+// promptUsage is a finished response's prompt token counts, for performance
+// measurement. CachedPresent distinguishes a reported 0 from an absent field.
+type promptUsage struct {
+	Prompt, Cached int64
+	CachedPresent  bool
 }
 
-func usageOf(payload []byte) (int64, bool) {
+// decodedUsage is one payload's usage object, decoded once. completionOK and
+// promptOK are independent: a payload can carry either count without the
+// other (or neither), and extractUsage tracks each independently across a
+// stream's payloads for exactly that reason.
+type decodedUsage struct {
+	completion   int64
+	completionOK bool
+	prompt       promptUsage
+	promptOK     bool
+}
+
+// decodeUsage decodes one JSON payload's usage object, if it has one. This is
+// the one place completion and prompt counts are ever read out of a payload,
+// so a caller wanting both never decodes the same JSON twice.
+func decodeUsage(payload []byte) decodedUsage {
+	var d decodedUsage
 	if len(payload) == 0 || payload[0] != '{' {
-		return 0, false
+		return d
 	}
 	var u usageShape
-	if json.Unmarshal(payload, &u) != nil || u.Usage == nil || u.Usage.CompletionTokens == nil {
+	if json.Unmarshal(payload, &u) != nil || u.Usage == nil {
+		return d
+	}
+	if u.Usage.CompletionTokens != nil {
+		d.completion, d.completionOK = int64(*u.Usage.CompletionTokens), true
+	}
+	if u.Usage.PromptTokens != nil {
+		d.prompt.Prompt, d.promptOK = int64(*u.Usage.PromptTokens), true
+		if pd := u.Usage.PromptTokensDetails; pd != nil && pd.CachedTokens != nil {
+			d.prompt.Cached, d.prompt.CachedPresent = int64(*pd.CachedTokens), true
+		}
+	}
+	return d
+}
+
+func promptUsageOf(payload []byte) (promptUsage, bool) {
+	d := decodeUsage(payload)
+	return d.prompt, d.promptOK
+}
+
+// promptUsageFromEvent reads one SSE event ("data: {...}\n\n").
+func promptUsageFromEvent(ev []byte) (promptUsage, bool) {
+	ev = bytes.TrimSpace(ev)
+	if !bytes.HasPrefix(ev, sseDataPrefix) {
+		return promptUsage{}, false
+	}
+	return promptUsageOf(bytes.TrimSpace(ev[len(sseDataPrefix):]))
+}
+
+// completionTokensFromEvent reads usage.completion_tokens from one SSE event
+// ("data: {...}\n\n"), such as the usage chunk stripped for a client that did
+// not ask for usage.
+func completionTokensFromEvent(ev []byte) (int64, bool) {
+	ev = bytes.TrimSpace(ev)
+	if !bytes.HasPrefix(ev, sseDataPrefix) {
 		return 0, false
 	}
-	return int64(*u.Usage.CompletionTokens), true
+	d := decodeUsage(bytes.TrimSpace(ev[len(sseDataPrefix):]))
+	return d.completion, d.completionOK
+}
+
+// extractUsage finds usage in a finished response: a single JSON object, or
+// else an SSE stream, where the last data payload carrying a numeric value
+// wins — independently for completion and prompt tokens, since in principle
+// the two counts need not be reported in the same payload. Absent gives
+// (0, false): a streaming client that did not ask for usage is counted as a
+// request with no tokens.
+//
+// extractCompletionTokens and extractPromptUsage are both thin views onto
+// this: each usage-bearing payload is decoded once here for both fields
+// together, rather than once per field as two independent scans would. A
+// caller wanting both counts from the same buffer — captureWriter.usage()
+// does, so that CompletionTokens and PromptUsage share one call here — pays
+// for exactly one pass.
+func extractUsage(raw []byte) (completion int64, completionOK bool, prompt promptUsage, promptOK bool) {
+	if d := decodeUsage(bytes.TrimSpace(raw)); d.completionOK || d.promptOK {
+		return d.completion, d.completionOK, d.prompt, d.promptOK
+	}
+	for _, line := range bytes.Split(raw, []byte("\n")) {
+		line = bytes.TrimSpace(line)
+		if !bytes.HasPrefix(line, sseDataPrefix) || !bytes.Contains(line, usageKey) {
+			continue // only chunks that mention usage are decoded
+		}
+		d := decodeUsage(bytes.TrimSpace(line[len(sseDataPrefix):]))
+		if d.completionOK {
+			completion, completionOK = d.completion, true
+		}
+		if d.promptOK {
+			prompt, promptOK = d.prompt, true
+		}
+	}
+	return
+}
+
+// extractCompletionTokens finds usage.completion_tokens in a finished
+// response. See extractUsage.
+func extractCompletionTokens(raw []byte) (int64, bool) {
+	completion, completionOK, _, _ := extractUsage(raw)
+	return completion, completionOK
+}
+
+// extractPromptUsage is extractCompletionTokens for prompt counts. See
+// extractUsage.
+func extractPromptUsage(raw []byte) (promptUsage, bool) {
+	_, _, prompt, promptOK := extractUsage(raw)
+	return prompt, promptOK
+}
+
+// PromptUsage is CompletionTokens for the prompt counts.
+func (c *captureWriter) PromptUsage() (promptUsage, bool) {
+	u := c.usage()
+	return u.prompt, u.promptOK
 }

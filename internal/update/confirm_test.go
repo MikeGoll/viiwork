@@ -1,6 +1,8 @@
 package update
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -129,4 +131,28 @@ func TestRollbackDoesNotPruneEngines(t *testing.T) {
 	c.PruneEngines = func(State) { t.Error("pruned on a rollback") }
 	c.Backends = backends(map[string]string{"m/0": meshapi.StatusDead}, "")
 	c.Step()
+}
+
+// One unreadable state.json (a hand edit mid-write, a transient EIO) does not
+// end the confirmer for the rest of the run: it keeps polling and confirms
+// once the state reads again.
+func TestConfirmerSurvivesAnUnreadableState(t *testing.T) {
+	dir, c, clock, _ := pendingState(t, "m/0")
+	good, err := os.ReadFile(filepath.Join(dir, "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Backends = backends(map[string]string{"m/0": meshapi.StatusHealthy}, "")
+	os.WriteFile(filepath.Join(dir, "state.json"), []byte("{"), 0o644)
+	if c.Step() {
+		t.Fatal("finished on an unreadable state")
+	}
+	os.WriteFile(filepath.Join(dir, "state.json"), good, 0o644)
+	clock.t = clock.t.Add(5 * time.Second)
+	if !c.Step() {
+		t.Fatal("did not confirm once the state read again")
+	}
+	if s, _ := LoadState(dir); s.LastGood != "v2.6.0" {
+		t.Errorf("state %+v", s)
+	}
 }

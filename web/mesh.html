@@ -184,6 +184,7 @@
   body.halted .mono-list, body.halted #backendsCard { outline: 1px solid rgba(210,153,34,0.35); }
   tr.gone td { color: var(--dimmer); }
   .respawns { color: var(--warn); font-size: 0.72rem; }
+  .perf { color: var(--dimmer); font-size: 0.72rem; }
   /* The VRAM cell carried a 46px meter as well as its numbers. In a table that
      has to fit a whole fleet the bar was the widest thing in the column and
      said what the numbers already say, so only its warning survives, as the
@@ -379,6 +380,14 @@ function meter(frac) {
   return `<span class="meter"><i class="${cls}" style="width:${pct.toFixed(0)}%"></i></span>`;
 }
 
+// A host's measured prefill rate for a model, from /v1/status perf; empty when
+// the host publishes none (absent is not zero).
+function perfLabel(m) {
+  const p = m && m.perf;
+  if (!p || !p.prefill_ms_per_1k) return "";
+  return (p.prefill_ms_per_1k / 1000).toFixed(1) + " s/1k";
+}
+
 // A backend's GPU label: the host GPU indices it runs on, or "cpu" for a
 // backend with none. A tensor-split group shares one "gpu-" prefix —
 // "gpu-4+5", not "gpu-4 + gpu-5" — because this column sits in a table that
@@ -443,7 +452,7 @@ function flattenBackends(c) {
         }
         rows.push({
           host: h.host, model: m.name, id: b.id, status: b.status, phase: b.phase || "",
-          gpuHTML: gpuLabel(b), busy: b.busy || 0, slots: b.slots || 0,
+          gpuHTML: gpuLabel(b), busy: b.busy || 0, slots: b.slots || 0, perf: m.perf || null,
           rssMB: b.rss_mb || 0, util, vramUsed: used, vramTotal: total,
           tokDecoded: b.tok_decoded || 0, tokRemain: b.tok_remain || 0,
           respawns: b.respawns || 0
@@ -506,12 +515,13 @@ function renderBackends() {
       const utilTxt = r.util === null ? '<span class="empty">—</span>'
                                       : `${r.util.toFixed(0)}%`;
       const title = r.status + (r.phase ? " · " + r.phase : "") + (r.respawns ? ` · ${r.respawns} respawns` : "");
+      const pl = perfLabel(r);
       html += `<tr>` +
         `<td><span class="dot ${esc(r.status)}" title="${esc(title)}"></span></td>` +
         `<td class="gpu">${esc(r.id)}${r.respawns ? ` <span class="respawns" title="respawns">↻${r.respawns}</span>` : ""}</td>` +
         `<td class="gpu">${r.gpuHTML}</td>` +
         `<td class="host">${esc(r.host)}</td>` +
-        `<td class="num">${r.busy}/${r.slots}</td>` +
+        `<td class="num">${r.busy}/${r.slots}${pl ? ` <span class="perf">${esc(pl)}</span>` : ""}</td>` +
         `<td class="num">${fmtGB(r.rssMB)}</td>` +
         `<td class="num">${utilTxt}</td>` +
         `<td class="num">${r.vramTotal ? `<span class="${vramFrac > 0.9 ? "bad" : vramFrac > 0.7 ? "warn" : ""}">${fmtGB(r.vramUsed)}/${fmtGB(r.vramTotal)}</span>` : "—"}</td>` +

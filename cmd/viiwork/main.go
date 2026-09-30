@@ -1,7 +1,8 @@
 // Command viiwork is a viiwork 2 node: one process per machine that runs its
 // models, joins the mesh and serves the API. `viiwork alias ...` manages the
 // mesh's model aliases through a node's API, `viiwork top` watches the mesh,
-// and `viiwork init` sets up a machine.
+// `viiwork init` sets up a machine, and `viiwork stop` and `start` stop and
+// start its node.
 package main
 
 import (
@@ -25,9 +26,11 @@ import (
 	"github.com/janit/viiwork/v2/internal/enginesync"
 	"github.com/janit/viiwork/v2/internal/joincode"
 	"github.com/janit/viiwork/v2/internal/node"
+	"github.com/janit/viiwork/v2/internal/parrot"
 	"github.com/janit/viiwork/v2/internal/release"
 	"github.com/janit/viiwork/v2/internal/setup"
 	"github.com/janit/viiwork/v2/internal/setup/install"
+	"github.com/janit/viiwork/v2/internal/setup/nodectl"
 	"github.com/janit/viiwork/v2/internal/setup/prompt"
 	"github.com/janit/viiwork/v2/internal/setup/uninstall"
 	"github.com/janit/viiwork/v2/internal/top"
@@ -79,6 +82,7 @@ func run(args []string, env runEnv) int {
 		return aliascli.Run(ctx, args[1:], aliascli.Env{
 			Stdout: env.stdout, Stderr: env.stderr, LookupEnv: env.lookupEnv,
 			Hostname: env.hostname, Client: &http.Client{}, ReadFile: os.ReadFile,
+			Plist: launchAgentPlist(),
 		})
 	}
 
@@ -118,6 +122,9 @@ func run(args []string, env runEnv) int {
 		}
 		return uninstall.Main(context.Background(), args[1:], uninstall.Env{Stdin: in, Stdout: env.stdout, Stderr: env.stderr})
 	}
+	if len(args) > 0 && (args[0] == "stop" || args[0] == "start") {
+		return nodectl.Main(context.Background(), args[0], args[1:], nodectl.Env{Stdout: env.stdout, Stderr: env.stderr})
+	}
 	if len(args) > 0 && args[0] == "init" {
 		fs := flag.NewFlagSet("init", flag.ContinueOnError)
 		fs.SetOutput(io.Discard)
@@ -138,7 +145,7 @@ func run(args []string, env runEnv) int {
 	engineReqs := fs.Bool("engine-requirements", false, "print the minimum engine versions this binary needs, as JSON, and exit")
 	buildInfo := fs.Bool("build-info", false, "print the version, the llama.cpp pin and its macOS digest as JSON, and exit")
 	fs.Usage = func() {
-		fmt.Fprintf(env.stderr, "usage: viiwork [--config path] [--version]\n       viiwork alias <command> ...\n       viiwork top [--node host:port] [--host name] [--once]\n       viiwork update [status|rollback] ...\n       viiwork join-code [--open] [--config path]\n       viiwork init\n       viiwork uninstall [--yes] [--delete-models] [--keep-images] [--from-config]\n       viiwork engine-sync   (run by systemd on a Docker install; see docs/releases.md)\n\n")
+		fmt.Fprintf(env.stderr, "usage: viiwork [--config path] [--version]\n       viiwork alias <command> ...\n       viiwork top [--node host:port] [--host name] [--once]\n       viiwork update [status|rollback] ...\n       viiwork join-code [--open] [--config path]\n       viiwork init\n       viiwork stop | start   (this machine's node)\n       viiwork uninstall [--yes] [--delete-models] [--keep-images] [--from-config]\n       viiwork engine-sync   (run by systemd on a Docker install; see docs/releases.md)\n\n")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -314,6 +321,13 @@ func engineSync(args []string, env runEnv) int {
 		Target: release.Target{OS: runtime.GOOS, Arch: runtime.GOARCH}, Keys: keys,
 		Client: &http.Client{Transport: tr}, Run: enginesync.Command(env.stderr),
 		Log: func(format string, a ...any) { fmt.Fprintf(env.stderr, format+"\n", a...) },
+	}
+	// The same parrot as the node's; without one the helper uses GitHub.
+	if api, err := config.PeekParrotAPI(h.Config); err == nil {
+		pc := parrot.New(api)
+		h.Local = func(ctx context.Context, version string) (string, error) {
+			return pc.AwaitRelease(ctx, config.UpdateRepo(), version, nil, parrot.Await{})
+		}
 	}
 	if err := h.Sync(ctx); err != nil {
 		fmt.Fprintf(env.stderr, "viiwork engine-sync: %v\n", err)

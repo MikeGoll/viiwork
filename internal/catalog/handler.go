@@ -33,7 +33,12 @@ type Handler struct {
 	mu      sync.Mutex
 	cached  Catalog
 	fetched time.Time
+	failed  time.Time // the last failed fetch; none is retried within upstreamRetry
 }
+
+// upstreamRetry is how long a failed upstream fetch is remembered, so clients
+// starting together do not each wait out another fetch behind the lock.
+const upstreamRetry = 30 * time.Second
 
 // NewHandler returns a handler serving src's models as cfg's provider.
 func NewHandler(cfg Config, src discovery.Source) *Handler {
@@ -93,12 +98,16 @@ func (h *Handler) upstream() Catalog {
 	if h.cached != nil && time.Since(h.fetched) < h.cfg.UpstreamTTL {
 		return h.cached
 	}
+	if time.Since(h.failed) < upstreamRetry {
+		return h.cached
+	}
 
 	c, err := h.fetchUpstream()
 	if err != nil {
 		// Keep serving a stale copy rather than dropping providers the client
 		// saw a moment ago: the upstream is a catalogue, not a liveness check.
 		log.Printf("catalog: upstream %s: %v", h.cfg.Upstream, err)
+		h.failed = time.Now()
 		return h.cached
 	}
 	h.cached, h.fetched = c, time.Now()

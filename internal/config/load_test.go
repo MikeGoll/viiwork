@@ -331,3 +331,15 @@ func TestEqualSeesSource(t *testing.T) {
 		t.Error("models differing only in source must not be Equal")
 	}
 }
+
+func TestRoutingPerformanceDefaultsOn(t *testing.T) {
+	var r RoutingConfig
+	if !r.PerformanceOn() {
+		t.Fatal("routing.performance must default to true")
+	}
+	off := false
+	r.Performance = &off
+	if r.PerformanceOn() {
+		t.Fatal("routing.performance: false must switch it off")
+	}
+}

@@ -1,5 +1,5 @@
 // Package updatecli is `viiwork update`: rolling a signed release across the
-// mesh one host at a time, reading every member's /v1/update, and sending one
+// mesh one host, or one wave of hosts, at a time, reading every member's /v1/update, and sending one
 // host back a release. Like `viiwork alias` it talks only to
 // nodes' HTTP APIs, and it verifies nothing itself: the signature, the
 // engines and the confirmation are each node's job.
@@ -37,13 +37,15 @@ import (
 // Phrase is what an operator types to start a rollout. There is no --yes.
 const Phrase = "YES I WANT TO UPDATE THE NODES ABOVE"
 
-const Usage = `usage: viiwork update [--to vX.Y.Z] [--hosts a,b] [--allow-downgrade] [--confirm PHRASE] [flags]
+const Usage = `usage: viiwork update [--to vX.Y.Z] [--hosts a,b] [--parallel N] [--allow-downgrade] [--confirm PHRASE] [flags]
        viiwork update status [--json] [flags]
        viiwork update rollback --host NAME [flags]
 
-A rollout stages the release on every chosen host first, then activates them one
-at a time — the node you talk to last — and waits for each to confirm itself
-before the next. A host that rolls itself back stops the rollout.
+A rollout stages the release on every chosen host first, all at once, then
+activates them in waves of --parallel hosts (default 1, one at a time) — the
+node you talk to last, alone — and waits for every host of a wave to confirm
+itself before the next wave. No wave holds every live host of a model. A host
+that fails stops the rollout after its wave.
 
 A rollback sends one host to its last good release, or, when it is already on
 it, to the release that was last good before it (PREVIOUS in status).
@@ -56,10 +58,13 @@ flags:
 `
 
 const (
-	secretBytes  = 32
-	stageTimeout = 20 * time.Minute
-	writeTimeout = 30 * time.Second
-	readTimeout  = 10 * time.Second
+	secretBytes = 32
+	// stageParallel caps concurrent stages: each downloads a release and may
+	// pull an engine image, so a large fleet should not all fetch at once.
+	stageParallel = 8
+	stageTimeout  = 20 * time.Minute
+	writeTimeout  = 30 * time.Second
+	readTimeout   = 10 * time.Second
 	// statusTimeout is longer: a node's first GET /v1/update reads every
 	// engine's --version, and vLLM's imports torch.
 	statusTimeout = 90 * time.Second
@@ -119,6 +124,16 @@ type cli struct {
 	env    Env
 	node   string
 	signer *meshauth.Signer
+	// out serialises whole lines from concurrent stages and waits, so no
+	// two hosts' lines interleave.
+	out sync.Mutex
+}
+
+// say writes one line to w, whole.
+func (c *cli) say(w io.Writer, format string, args ...any) {
+	c.out.Lock()
+	defer c.out.Unlock()
+	fmt.Fprintf(w, format, args...)
 }
 
 // host is one member as the CLI sees it: its API address and release state,
@@ -145,11 +160,16 @@ func Run(ctx context.Context, args []string, env Env) int {
 	to := fs.String("to", "", "")
 	hosts := fs.String("hosts", "", "")
 	allowDowngrade := fs.Bool("allow-downgrade", false, "")
+	parallel := fs.Int("parallel", 1, "")
 	confirm := fs.String("confirm", "", "")
 	hostFlag := fs.String("host", "", "")
 	asJSON := fs.Bool("json", false, "")
 	if err := fs.Parse(args); err != nil || fs.NArg() > 0 {
 		fmt.Fprint(env.Stderr, Usage)
+		return 2
+	}
+	if *parallel < 1 {
+		fmt.Fprintf(env.Stderr, "--parallel must be at least 1, not %d\n", *parallel)
 		return 2
 	}
 	c, code := newCLI(env, *node, *configPath, *secretEnv)
@@ -166,7 +186,7 @@ func Run(ctx context.Context, args []string, env Env) int {
 		}
 		return c.rollback(ctx, *hostFlag)
 	}
-	return c.rollout(ctx, rolloutOpts{to: *to, repo: *repo, hosts: *hosts, allowDowngrade: *allowDowngrade, confirm: *confirm})
+	return c.rollout(ctx, rolloutOpts{to: *to, repo: *repo, hosts: *hosts, allowDowngrade: *allowDowngrade, confirm: *confirm, parallel: *parallel})
 }
 
 // newCLI resolves the node and the signer exactly as `viiwork alias` does.
@@ -257,12 +277,14 @@ func (c *cli) updateStatus(ctx context.Context, addr string) (meshapi.UpdateStat
 }
 
 // view is the mesh as the CLI sees it: every machine, sorted by name, with its
-// release state; the node the CLI reads it from (the entry node); and whether
-// the mesh is open or secured.
+// release state; the node the CLI reads it from (the entry node); whether the
+// mesh is open or secured; and the models each alive machine lists in its
+// status, which is what keeps a wave from taking a model offline.
 type view struct {
-	hosts []host
-	entry string
-	mode  string
+	hosts  []host
+	entry  string
+	mode   string
+	serves map[string][]string
 }
 
 // members reads the mesh from the entry node and every member's release state,
@@ -275,9 +297,18 @@ func (c *cli) members(ctx context.Context) (view, error) {
 		return view{}, fmt.Errorf("reading the mesh from %s: %w", c.node, err)
 	}
 	var out []host
+	serves := map[string][]string{}
 	for _, m := range cl.Members {
 		if m.Role == meshapi.RoleGateway {
 			continue
+		}
+		// A model counts as served wherever it is configured, healthy or
+		// not: a host whose backends are only respawning is about to serve
+		// it again, and the price of counting it is at most one more wave.
+		if m.State == meshapi.MemberAlive && m.Status != nil {
+			for _, ms := range m.Status.Models {
+				serves[m.Node] = append(serves[m.Node], ms.Name)
+			}
 		}
 		h := host{name: m.Node}
 		switch {
@@ -307,7 +338,7 @@ func (c *cli) members(ctx context.Context) (view, error) {
 	}
 	wg.Wait()
 	sort.Slice(out, func(i, j int) bool { return out[i].name < out[j].name })
-	return view{hosts: out, entry: cl.View, mode: cl.Mesh}, nil
+	return view{hosts: out, entry: cl.View, mode: cl.Mesh, serves: serves}, nil
 }
 
 // errOpenMesh is a write to another machine in an open mesh, which that
@@ -458,6 +489,60 @@ func (c *cli) rollback(ctx context.Context, name string) int {
 type rolloutOpts struct {
 	to, repo, hosts, confirm string
 	allowDowngrade           bool
+	parallel                 int
+}
+
+// buildWaves groups targets, in order, into activation waves of at most
+// parallel hosts. The entry node, when it is a target, is alone in the last
+// wave: it answers the CLI's view of the mesh, so waiting on anything else
+// while it restarts would fail. A host starts a new wave when the current
+// one is full, or when adding it would put every alive host that serves one
+// of its models in the same wave — serves covers the whole mesh, not just the
+// targets, so a host outside the rollout keeps its models up. A model with a
+// single host goes offline while that host restarts whatever the waves are,
+// as it does one at a time, so it constrains nothing.
+func buildWaves(targets []string, entry string, parallel int, serves map[string][]string) [][]string {
+	if parallel < 1 {
+		parallel = 1
+	}
+	hostsOf := map[string]int{}
+	for _, models := range serves {
+		for _, m := range models {
+			hostsOf[m]++
+		}
+	}
+	var waves [][]string
+	var cur []string
+	down := map[string]int{} // models' hosts in cur
+	takesLast := func(h string) bool {
+		for _, m := range serves[h] {
+			if hostsOf[m] > 1 && down[m]+1 == hostsOf[m] {
+				return true
+			}
+		}
+		return false
+	}
+	hasEntry := false
+	for _, h := range targets {
+		if h == entry {
+			hasEntry = true
+			continue
+		}
+		if len(cur) > 0 && (len(cur) == parallel || takesLast(h)) {
+			waves, cur, down = append(waves, cur), nil, map[string]int{}
+		}
+		cur = append(cur, h)
+		for _, m := range serves[h] {
+			down[m]++
+		}
+	}
+	if len(cur) > 0 {
+		waves = append(waves, cur)
+	}
+	if hasEntry {
+		waves = append(waves, []string{entry})
+	}
+	return waves
 }
 
 var repoRe = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
@@ -584,6 +669,31 @@ func (c *cli) rollout(ctx context.Context, o rolloutOpts) int {
 		fmt.Fprintln(c.env.Stdout, "nothing to update")
 		return 0
 	}
+	byName := map[string]host{}
+	for _, h := range targets {
+		byName[h.name] = h
+	}
+	var waves [][]host
+	for _, names := range buildWaves(hostNames(targets), entry, o.parallel, v.serves) {
+		var wave []host
+		for _, name := range names {
+			wave = append(wave, byName[name])
+		}
+		waves = append(waves, wave)
+	}
+	// The operator confirms exactly what will happen, so the waves are part
+	// of the plan. One at a time needs no listing: the order is the table's,
+	// the entry node last.
+	if o.parallel > 1 {
+		last := ""
+		if _, ok := byName[entry]; ok {
+			last = ", and " + entry + " goes last, alone"
+		}
+		fmt.Fprintf(c.env.Stdout, "activation in waves of at most %d; no wave takes every live host of a model%s:\n", o.parallel, last)
+		for i, wave := range waves {
+			fmt.Fprintf(c.env.Stdout, "  wave %d: %s\n", i+1, strings.Join(hostNames(wave), ", "))
+		}
+	}
 
 	if !c.confirmed(o.confirm) {
 		fmt.Fprintln(c.env.Stderr, "aborted: the confirmation phrase did not match")
@@ -591,43 +701,126 @@ func (c *cli) rollout(ctx context.Context, o rolloutOpts) int {
 	}
 
 	// Stage everywhere first, so a download, signature or engine problem is
-	// found before any host restarts.
-	failed := false
-	for _, h := range targets {
-		fmt.Fprintf(c.env.Stdout, "staging %s on %s…\n", to, h.name)
-		if err := c.post(ctx, h.addr, meshapi.PathUpdateStage, meshapi.UpdateRequest{Version: to}, nil, stageTimeout); err != nil {
-			fmt.Fprintf(c.env.Stderr, "%s: stage failed: %v\n", h.name, err)
-			failed = true
+	// found before any host restarts. Staging changes nothing a host runs,
+	// so the hosts stage at once.
+	fmt.Fprintf(c.env.Stdout, "staging %s on %d host(s)…\n", to, len(targets))
+	stageErrs := make([]error, len(targets))
+	sem := make(chan struct{}, stageParallel)
+	var wg sync.WaitGroup
+	for i := range targets {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			h := targets[i]
+			if err := c.post(ctx, h.addr, meshapi.PathUpdateStage, meshapi.UpdateRequest{Version: to}, nil, stageTimeout); err != nil {
+				stageErrs[i] = err
+				c.say(c.env.Stderr, "%s: stage failed: %v\n", h.name, err)
+				return
+			}
+			c.say(c.env.Stdout, "%s: staged %s\n", h.name, to)
+		}(i)
+	}
+	wg.Wait()
+	var stageFailed []string
+	for i, err := range stageErrs {
+		if err != nil {
+			stageFailed = append(stageFailed, targets[i].name)
 		}
 	}
-	if failed {
-		fmt.Fprintln(c.env.Stderr, "staging failed: nothing was activated")
+	if len(stageFailed) > 0 {
+		fmt.Fprintf(c.env.Stderr, "staging failed on %s: nothing was activated\n", strings.Join(stageFailed, ", "))
 		return 1
 	}
 
-	// One at a time, the node we read the mesh from last.
-	sort.SliceStable(targets, func(i, j int) bool {
-		return targets[i].name != entry && targets[j].name == entry
-	})
-	for _, h := range targets {
-		fmt.Fprintf(c.env.Stdout, "activating %s on %s…\n", to, h.name)
-		req := meshapi.UpdateRequest{Version: to, AllowDowngrade: o.allowDowngrade}
-		if err := c.post(ctx, h.addr, meshapi.PathUpdateActivate, req, nil, writeTimeout); err != nil {
-			fmt.Fprintf(c.env.Stderr, "%s: activate failed: %v; later hosts untouched\n", h.name, err)
+	for i, wave := range waves {
+		if o.parallel > 1 {
+			fmt.Fprintf(c.env.Stdout, "wave %d/%d: %s\n", i+1, len(waves), strings.Join(hostNames(wave), ", "))
+		}
+		if !c.runWave(ctx, wave, fmt.Sprintf("%d/%d", i+1, len(waves)), to, o.allowDowngrade) {
 			return 1
 		}
-		if err := c.waitConfirmed(ctx, h, to); err != nil {
-			fmt.Fprintf(c.env.Stderr, "rollout stopped at %s: %v; later hosts untouched\n", h.name, err)
-			return 1
-		}
-		if err := c.waitInMesh(ctx, h, to); err != nil {
-			fmt.Fprintf(c.env.Stderr, "rollout stopped at %s: confirmed, but %v; later hosts untouched\n", h.name, err)
-			return 1
-		}
-		fmt.Fprintf(c.env.Stdout, "%s: on %s, confirmed\n", h.name, to)
 	}
 	fmt.Fprintf(c.env.Stdout, "rollout of %s complete\n", to)
 	return 0
+}
+
+func hostNames(hs []host) []string {
+	var names []string
+	for _, h := range hs {
+		names = append(names, h.name)
+	}
+	return names
+}
+
+// runWave activates every host of one wave, then follows them all at once
+// through their restarts. It reports true when every host confirmed and is
+// back in the mesh. An activate the node refuses leaves the rest of the wave
+// unactivated, but the hosts already restarting are still followed, so the
+// report says where each one ended up.
+func (c *cli) runWave(ctx context.Context, wave []host, label, to string, allowDowngrade bool) bool {
+	errs := make([]error, len(wave))
+	activated := make([]bool, len(wave))
+	for i, h := range wave {
+		c.say(c.env.Stdout, "activating %s on %s…\n", to, h.name)
+		req := meshapi.UpdateRequest{Version: to, AllowDowngrade: allowDowngrade}
+		if err := c.post(ctx, h.addr, meshapi.PathUpdateActivate, req, nil, writeTimeout); err != nil {
+			errs[i] = fmt.Errorf("activate failed: %v", err)
+			break
+		}
+		activated[i] = true
+	}
+	var wg sync.WaitGroup
+	for i, h := range wave {
+		if !activated[i] {
+			continue
+		}
+		wg.Add(1)
+		go func(i int, h host) {
+			defer wg.Done()
+			if err := c.waitConfirmed(ctx, h, to); err != nil {
+				errs[i] = err
+			} else if err := c.waitInMesh(ctx, h, to); err != nil {
+				errs[i] = fmt.Errorf("confirmed, but %v", err)
+			}
+			switch {
+			case errs[i] == nil:
+				c.say(c.env.Stdout, "%s: on %s, confirmed\n", h.name, to)
+			case len(wave) > 1:
+				// Said now, not only in the report: the rest of the wave may
+				// take many minutes more.
+				c.say(c.env.Stderr, "%s: %v\n", h.name, errs[i])
+			}
+		}(i, h)
+	}
+	wg.Wait()
+	failed := false
+	for i := range wave {
+		if errs[i] != nil {
+			failed = true
+		}
+	}
+	if !failed {
+		return true
+	}
+	if len(wave) == 1 {
+		fmt.Fprintf(c.env.Stderr, "rollout stopped at %s: %v; later hosts untouched\n", wave[0].name, errs[0])
+		return false
+	}
+	fmt.Fprintf(c.env.Stderr, "rollout stopped after wave %s:\n", label)
+	for i, h := range wave {
+		switch {
+		case errs[i] != nil:
+			fmt.Fprintf(c.env.Stderr, "  %s: %v\n", h.name, errs[i])
+		case activated[i]:
+			fmt.Fprintf(c.env.Stderr, "  %s: on %s, confirmed\n", h.name, to)
+		default:
+			fmt.Fprintf(c.env.Stderr, "  %s: not activated\n", h.name)
+		}
+	}
+	fmt.Fprintln(c.env.Stderr, "later waves untouched")
+	return false
 }
 
 // confirmed checks the phrase, from --confirm or typed on stdin.

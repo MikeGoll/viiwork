@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -187,7 +188,7 @@ func newEnv(t *testing.T, tag string) *env {
 		EngineHelper: &install.EngineHelper{Units: install.EngineUnits, Dir: p.Dir}}
 	b, _ := json.Marshal(m)
 	os.WriteFile(p.Manifest, b, 0o644)
-	os.WriteFile(p.Config, []byte("node: {name: n}\nupdate: {enabled: true, source: '"+src+"'}\n"), 0o644)
+	os.WriteFile(p.Config, []byte("node: {name: n}\nupdate: {enabled: true}\n"), 0o644)
 	os.WriteFile(compose, []byte("name: viiwork\nservices:\n  viiwork:\n    image: "+repo+":"+tag+"\n    container_name: viiwork\n"), 0o644)
 	os.WriteFile(p.Binary, []byte("host binary"), 0o755)
 	d := &docker{
@@ -200,7 +201,7 @@ func newEnv(t *testing.T, tag string) *env {
 	}
 	logs := &strings.Builder{}
 	h := &Helper{Paths: p, Version: "v2.6.0", Target: release.Target{OS: runtime.GOOS, Arch: runtime.GOARCH},
-		Keys: []ed25519.PublicKey{pub}, Client: &http.Client{}, Run: d.run,
+		Keys: []ed25519.PublicKey{pub}, Client: &http.Client{}, Run: d.run, Source: src,
 		Log: func(f string, a ...any) { fmt.Fprintf(logs, f+"\n", a...) }}
 	return &env{h: h, d: d, root: root, logs: logs, source: src}
 }
@@ -624,5 +625,36 @@ func TestImageRemovalFailureOnlyLogs(t *testing.T) {
 	}
 	if !strings.Contains(e.logs.String(), "removing") || !slices.Contains(readRecord(t, e).Pulled, repo+":v2.6.1") {
 		t.Errorf("logs:\n%s\nrecord %+v", e.logs, readRecord(t, e))
+	}
+}
+
+// With GitHub down the helper verifies the release from the host's
+// viiwork-parrot, as the node does, and still swaps.
+func TestSwapsFromParrotWhileGitHubIsDown(t *testing.T) {
+	e := newEnv(t, "v2.6.0")
+	dir := t.TempDir()
+	name := release.ArchiveName("v2.6.1", e.h.Target)
+	for _, asset := range []string{"SHA256SUMS", "SHA256SUMS.sig", name} {
+		resp, err := http.Get(e.source + "/v2.6.1/" + asset)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		os.WriteFile(filepath.Join(dir, asset), b, 0o644)
+	}
+	down := httptest.NewServer(http.NotFoundHandler())
+	down.Close()
+	e.h.Source = down.URL
+	e.h.Local = func(context.Context, string) (string, error) { return dir, nil }
+	e.state(`{"current":"v2.6.1","last_good":"builtin","pending":{"version":"v2.6.1","attempts":0,"baseline":[]}}`)
+	if err := e.h.Sync(context.Background()); err != nil {
+		t.Fatalf("%v\n%s", err, e.logs)
+	}
+	if !strings.Contains(e.compose(), "    image: "+repo+":v2.6.1\n") {
+		t.Errorf("compose:\n%s", e.compose())
+	}
+	if !strings.Contains(e.logs.String(), "GitHub unreachable") {
+		t.Errorf("logs:\n%s", e.logs)
 	}
 }

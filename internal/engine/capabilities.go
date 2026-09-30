@@ -59,3 +59,34 @@ type Versioner interface {
 	// AtLeast reports whether installed satisfies min in this engine's order.
 	AtLeast(installed, min string) (bool, error)
 }
+
+// UsageReporting says what an engine's streamed chat responses tell the proxy
+// about token usage (performance routing, spec §4).
+type UsageReporting struct {
+	// Unasked: a streamed response ends with a usage chunk even when the
+	// client did not set stream_options.include_usage. When false the proxy
+	// asks for usage and strips the chunk again for a client that did not.
+	Unasked bool
+	// CachedTokens: usage.prompt_tokens_details.cached_tokens is present
+	// whenever any prompt token came from cache, so its absence means zero.
+	// When false an absent field means "unknown" and the sample is dropped.
+	CachedTokens bool
+}
+
+// UsageReporter declares how the engine reports token usage, which is what
+// performance routing measures with. Optional, like every capability here: an
+// engine that does not implement it is assumed to report nothing it was not
+// asked for and no cached count, so viiwork never asks it for usage, it
+// yields no time-to-first-token sample in practice, and the scored router
+// treats it as learning (priced at the fleet median, plus a 5% trickle).
+type UsageReporter interface {
+	UsageReporting() UsageReporting
+}
+
+// UsageOf is e's UsageReporting, or the zero value.
+func UsageOf(e Engine) UsageReporting {
+	if u, ok := e.(UsageReporter); ok {
+		return u.UsageReporting()
+	}
+	return UsageReporting{}
+}

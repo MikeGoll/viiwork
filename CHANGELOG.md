@@ -1,5 +1,141 @@
 # Changelog
 
+## v2.7.0-beta1
+
+A pre-release, published so the fleet can measure performance routing before
+v2.7.0. It also carries everything listed under v2.6.2, which was never
+published on its own.
+
+**Routing follows measured speed.** Hosts differ: an A4000 pair prefills about
+three times faster than a Radeon VII pair. Until now the router only counted
+free slots and always served on the entry node first.
+
+- **Every host measures itself.** The node that runs a request records its
+  time to first token, from the moment a local slot takes the request to the
+  first streamed chunk that carries text or a tool call. The time is split
+  into a fixed overhead and milliseconds per 1,000 uncached prompt tokens.
+  Queueing and the network hop are left out, because free slots and RTT
+  already cover them.
+- **Scores are shared through the capacity report.** `/v1/capacity` carries
+  three new fields: `ttft_overhead_ms`, `prefill_ms_per_1k` and
+  `perf_samples`. All are additive and omitted when the node cannot say, so a
+  node one version behind simply publishes no score.
+- **The last ten minutes count, with a remembered baseline.** A score comes
+  from one-minute buckets, ten at most. When fewer than five samples are
+  recent, it leans on the host's last well-sampled value, which is saved in
+  `state_dir/perf.json`. Changing a model's engine, weights, GPUs or args
+  drops the saved value.
+- **Every node picks by predicted speed.** Among hosts with a free slot, this
+  node included, a node picks at random, weighted by 1/prediction³. The
+  prediction is overhead + rate × prompt size + RTT. A host twice as fast gets
+  about eight times the traffic, and slower hosts still get enough to stay
+  measured.
+- **New hosts earn their place.** A host that publishes no score is priced at
+  the fleet median and gets a 5% share of traffic until it is measured.
+- **Nothing changes until there is data.** With no scores anywhere, routing is
+  exactly as before: the local backend first, then the member with the most
+  free slots. Pins, forwards, refusal marks, `stale_after`, reservations and
+  the queue all work as before.
+- **`routing.performance`** (default `true`). Set it to `false` for the old
+  routing. Measuring continues either way, and `/v1/status` still shows the
+  scores.
+
+**Engines are asked for token counts.** To know how many prompt tokens were
+actually prefilled, the executing node adds `stream_options.include_usage` to
+streamed requests for llama.cpp and vLLM. It removes the resulting usage chunk
+again for a client that did not ask for it, so that client receives the same
+bytes as before. vLLM backends now start with
+`--enable-prompt-tokens-details`. FreeToken reports no cached-token count, so
+FreeToken hosts are not scored. A side effect: `tokens_total` now also counts
+streamed requests from clients that never asked for usage.
+
+**Seeing it.** `/v1/status` shows each model's score under `perf`, `/mesh`
+shows each host's prefill rate beside its slots, and `viiwork top` shows it in
+the host line.
+
+Before v2.7.0 this beta is measured on the fleet with performance routing off
+and on. The measurement records mean and p90 time to first token and the cache
+hit rate for each entry node.
+
+## v2.6.2
+
+**Faster rollouts.**
+
+- **`viiwork update` stages every host at once**, at most eight together.
+  Staging changes nothing a host runs, so there was no reason to download and
+  verify one host at a time. Each host reports as it finishes, and any failure
+  still activates nothing.
+- **`--parallel N` activates in waves** of up to N hosts, waiting for the whole
+  wave to confirm and rejoin the mesh before the next. The default, 1, is the
+  old one-at-a-time rollout. The node the CLI talks to is still last and
+  alone, and no wave takes down every live host of a model, counting hosts
+  outside the rollout. The plan shows the waves before the phrase. A host that
+  fails stops the rollout after its wave, with every host of that wave
+  reported.
+
+**`viiwork stop` and `viiwork start`.**
+
+- **`viiwork stop` stops this machine's node and every model it runs** (sudo
+  on Linux): the node leaves the mesh and drains first, and the command
+  returns once its API has gone quiet. On a Mac it boots out the LaunchAgent,
+  so KeepAlive does not start it again; on Linux it stops the engine helper,
+  then the compose project. It stays stopped until `viiwork start` or the
+  next boot or login. Like uninstall it goes by the install manifest, and on
+  a host set up by hand it says so rather than guess.
+
+**Releases come from GitHub and nowhere else.**
+
+- **`update.source` accepts only `https://github.com/janit/viiwork/releases/download`.**
+  A release was always verified against the compiled-in key, so another host
+  could not smuggle code in, but a mirror could still choose which signed
+  releases a node saw, withhold them, or watch the fleet ask. Any other value
+  is now refused at start, and by the Docker engine helper; the key remains so
+  existing files keep parsing.
+- **A download follows a redirect only to GitHub's asset hosts**
+  (`*.githubusercontent.com`, over https) or within the source's own host.
+  Anything else is refused before the other host is asked.
+
+**Releases through viiwork-parrot.**
+
+- **A node takes the release archive from its host's viiwork-parrot**, with
+  the other mesh members as peer hints, checked against the signed
+  `SHA256SUMS` it fetched from GitHub. Parrot absent, refusing, stalled for
+  2 minutes, or wrong: the node logs why and downloads the archive from
+  GitHub. Parrot's copy of the signed files is used only while GitHub is
+  unreachable, and a definite answer from GitHub (404, a bad signature) is
+  final. viiwork-parrot does not serve releases yet, so every node downloads
+  from GitHub until it does.
+
+**Fixes from a six-lens review.**
+
+- **Routing:** a refusal mark is cleared, and in-flight forwards are counted,
+  from when a capacity report was requested, not received — a poll in flight
+  across a refusal carries the peer's state from before it, and sent the retry
+  straight back to the member that just refused.
+- **Routing:** a forward for a model the receiver does not serve (dropped on
+  reload, or a restart with another config) is a 503 refusal the origin retries
+  elsewhere, not a 404 handed to the client.
+- **Pipelines:** a step refused for capacity answers 429 with Retry-After, not
+  502.
+- **Discovery:** a node advertises the smallest context its healthy backends
+  report, the one every backend the router may choose can honour.
+- **/v1/cluster:** a member status older than four polls is dropped, so a
+  member whose API is wedged shows no status instead of frozen numbers, and its
+  cost stops counting toward the cluster's.
+- **Power:** a GPU-sum reading counts only while every card that has reported
+  still reports a wattage; a stale or powerless card is not 0 W.
+- **Open mesh:** a write must come from a program on the machine — a request
+  carrying `Origin`, or naming a non-loopback `Host`, is refused, so a web page
+  in a local browser cannot change aliases or trigger an update.
+- **`viiwork alias`** reads the mesh secret from a Mac install's LaunchAgent,
+  as `viiwork update` does.
+- **Updates:** the confirmer keeps polling through an unreadable
+  `state.json`; a failed `sudo viiwork init` engine-helper add is not recorded,
+  so it can be retried.
+- **Performance:** the output capture grows by doubling (a full 2 MiB capture
+  allocates 4.4 MB, not 10.8 MB); a failed catalogue upstream is not retried
+  for 30 s.
+
 ## v2.6.1
 
 **The engine follows the release, and the four issues v2.6.0 shipped as

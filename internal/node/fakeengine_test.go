@@ -30,6 +30,10 @@ import (
 //	                             between its first chunk and the rest
 //	FAKE_HOLD=<duration>         a non-streaming completion waits this long
 //	FAKE_REQUIRE_MODEL=<path>    exit 1 unless --model is exactly this path
+//	FAKE_PREFILL_PER_1K=<dur>    a streaming completion sleeps this long per
+//	                             1000 FAKE_PROMPT_TOKENS before its first chunk
+//	FAKE_PROMPT_TOKENS=<n>       prompt tokens reported in a streamed
+//	                             completion's usage, with zero cached tokens
 
 func TestMain(m *testing.M) {
 	switch os.Getenv("NODE_HELPER") {
@@ -72,6 +76,8 @@ func serveFakeLlamaServer() {
 	readyAfter, _ := time.ParseDuration(os.Getenv("FAKE_READY_AFTER"))
 	streamHold, _ := time.ParseDuration(os.Getenv("FAKE_STREAM_HOLD"))
 	hold, _ := time.ParseDuration(os.Getenv("FAKE_HOLD"))
+	prefillPer1k, _ := time.ParseDuration(os.Getenv("FAKE_PREFILL_PER_1K"))
+	promptTokens, _ := strconv.Atoi(os.Getenv("FAKE_PROMPT_TOKENS"))
 	start := time.Now()
 	var busy atomic.Int64
 
@@ -96,11 +102,16 @@ func serveFakeLlamaServer() {
 		defer busy.Add(-1)
 		body, _ := io.ReadAll(r.Body)
 		if strings.Contains(string(body), `"stream":true`) {
+			time.Sleep(time.Duration(float64(prefillPer1k) * float64(promptTokens) / 1000))
 			w.Header().Set("Content-Type", "text/event-stream")
 			_, _ = io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n")
 			w.(http.Flusher).Flush()
 			time.Sleep(streamHold)
-			_, _ = io.WriteString(w, "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":3,\"total_tokens\":4}}\n\n")
+			usage := `{"prompt_tokens":1,"completion_tokens":3,"total_tokens":4}`
+			if promptTokens > 0 {
+				usage = fmt.Sprintf(`{"prompt_tokens":%d,"completion_tokens":3,"total_tokens":%d,"prompt_tokens_details":{"cached_tokens":0}}`, promptTokens, promptTokens+3)
+			}
+			_, _ = io.WriteString(w, "data: {\"choices\":[],\"usage\":"+usage+"}\n\n")
 			_, _ = io.WriteString(w, "data: [DONE]\n\n")
 			return
 		}
@@ -137,12 +148,14 @@ func processGone(pid int) bool {
 
 // fakeModel is a models[] entry served by the fake llama-server.
 type fakeModel struct {
-	name       string
-	args       []string
-	parallel   int // 0 = 2
-	readyAfter string
-	streamHold string
-	hold       string
+	name         string
+	args         []string
+	parallel     int // 0 = 2
+	readyAfter   string
+	streamHold   string
+	hold         string
+	prefillPer1k string
+	promptTokens string
 }
 
 func (m fakeModel) yaml() string {
@@ -168,6 +181,12 @@ func (m fakeModel) yaml() string {
 	}
 	if m.hold != "" {
 		fmt.Fprintf(&b, "      FAKE_HOLD: %s\n", m.hold)
+	}
+	if m.prefillPer1k != "" {
+		fmt.Fprintf(&b, "      FAKE_PREFILL_PER_1K: %s\n", m.prefillPer1k)
+	}
+	if m.promptTokens != "" {
+		fmt.Fprintf(&b, "      FAKE_PROMPT_TOKENS: %s\n", m.promptTokens)
 	}
 	return b.String()
 }

@@ -63,7 +63,7 @@ func TestV2WireFields(t *testing.T) {
 		"energy_kwh_24h", "energy_kwh_30d", "cost", "prompt_history",
 	})
 	assertFields(t, GPUInfo{}, []string{"index", "uuid", "name", "vendor", "util", "vram_used_mb", "vram_total_mb", "power_w"})
-	assertFields(t, ModelStatus{}, []string{"name", "engine", "slots", "busy", "queued", "ctx", "requests_total", "tokens_total", "backends"})
+	assertFields(t, ModelStatus{}, []string{"name", "engine", "slots", "busy", "queued", "ctx", "requests_total", "tokens_total", "perf", "backends"})
 	assertFields(t, BackendStatus{}, []string{
 		"id", "gpus", "status", "phase", "pid", "rss_mb", "slots", "busy",
 		"tok_decoded", "tok_remain", "respawns", "uptime_s",
@@ -72,7 +72,7 @@ func TestV2WireFields(t *testing.T) {
 	assertFields(t, CostInfo{}, []string{"available", "eur_per_hour", "today_eur", "breakdown"})
 	assertFields(t, CostBreakdown{}, []string{"spot_cents_kwh", "transfer_cents_kwh", "tax_cents_kwh", "vat_percent", "total_cents_kwh"})
 	assertFields(t, CapacityResponse{}, []string{"node", "ver", "models"})
-	assertFields(t, ModelCapacity{}, []string{"name", "engine", "slots", "busy", "queued", "ctx", "backends", "healthy_backends"})
+	assertFields(t, ModelCapacity{}, []string{"name", "engine", "slots", "busy", "queued", "ctx", "backends", "healthy_backends", "ttft_overhead_ms", "prefill_ms_per_1k", "perf_samples"})
 	assertFields(t, ClusterResponse{}, []string{"view", "mesh", "members", "models", "power_control", "cluster_cost_eur_per_hour", "cluster_cost_today_eur"})
 	assertFields(t, Member{}, []string{"node", "addr", "role", "state", "status"})
 	assertFields(t, PowerControlInfo{}, []string{"hosts", "out_of_band"})
@@ -89,6 +89,7 @@ func TestV2WireFields(t *testing.T) {
 	assertFields(t, UpdateStatus{}, []string{"enabled", "running", "current", "last_good", "previous", "pending", "staged", "engines"})
 	assertFields(t, UpdatePending{}, []string{"version", "attempts", "deadline"})
 	assertFields(t, UpdateRequest{}, []string{"version", "allow_downgrade"})
+	assertFields(t, PerfScore{}, []string{"overhead_ms", "prefill_ms_per_1k", "samples", "baseline_age_s"})
 }
 
 // Fields a node may be unable to measure must be omitempty, so "absent" never
@@ -128,6 +129,18 @@ func TestMemberStatusIsNullWhenNotAlive(t *testing.T) {
 	}
 	if !strings.Contains(string(b), `"status":null`) {
 		t.Errorf("a member that is not alive must carry status null, got %s", b)
+	}
+}
+
+func TestPerfFieldsAreOmittedWhenUnknown(t *testing.T) {
+	b, err := json.Marshal(ModelCapacity{Name: "m"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"ttft_overhead_ms", "prefill_ms_per_1k", "perf_samples"} {
+		if strings.Contains(string(b), k) {
+			t.Errorf("%s present on a node with no score: absent must mean cannot say", k)
+		}
 	}
 }
 

@@ -24,6 +24,7 @@ import (
 
 	"github.com/janit/viiwork/v2/internal/config"
 	"github.com/janit/viiwork/v2/internal/meshauth"
+	"github.com/janit/viiwork/v2/internal/plistenv"
 	"github.com/janit/viiwork/v2/meshapi"
 )
 
@@ -61,6 +62,9 @@ type Env struct {
 	Hostname  func() (string, error)
 	Client    *http.Client
 	ReadFile  func(string) ([]byte, error)
+	// Plist is the node's LaunchAgent, read for the mesh secret when the
+	// variable is unset (a Mac installed by viiwork init). "" elsewhere.
+	Plist string
 }
 
 // commands maps each command to its number of positional arguments.
@@ -144,7 +148,13 @@ func Run(ctx context.Context, args []string, env Env) int {
 	if *secretEnv != "" {
 		c.secretEnv = *secretEnv
 	}
-	if v, ok := env.LookupEnv(c.secretEnv); ok && v != "" {
+	v, ok := env.LookupEnv(c.secretEnv)
+	if (!ok || v == "") && env.Plist != "" {
+		if data, err := env.ReadFile(env.Plist); err == nil {
+			v, ok = plistenv.Value(data, c.secretEnv)
+		}
+	}
+	if ok && v != "" {
 		secret, err := base64.StdEncoding.DecodeString(v)
 		if err != nil || len(secret) != secretBytes {
 			fmt.Fprintf(env.Stderr, "%s must be the standard base64 encoding of a %d-byte mesh secret\n", c.secretEnv, secretBytes)

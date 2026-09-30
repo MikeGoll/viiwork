@@ -89,3 +89,31 @@ func TestNodePower(t *testing.T) {
 		}
 	})
 }
+
+// swappableGPUs lets a test change what the collector reports between calls.
+type swappableGPUs struct{ s []gpu.GPUSample }
+
+func (g *swappableGPUs) Latest() []gpu.GPUSample { return g.s }
+
+// A GPU-sum reading is the node's draw only when every card that has
+// reported still reports a wattage: a card that went stale, or answers
+// without power, is not 0 W, so the sum is then "cannot say".
+func TestNodePowerGPUSumNeedsEveryCard(t *testing.T) {
+	g := &swappableGPUs{s: []gpu.GPUSample{{GPUID: 0, PowerW: 100}, {GPUID: 1, PowerW: 120}}}
+	p := NewNodePower(nil, g, gpu.VendorAMD, true)
+	if !p.Available() || p.Watts() != 220 {
+		t.Fatalf("both cards: %v %v", p.Available(), p.Watts())
+	}
+	g.s = []gpu.GPUSample{{GPUID: 0, PowerW: 100}} // card 1 went stale
+	if p.Available() {
+		t.Errorf("a missing card counted as 0 W: %v W available", p.Watts())
+	}
+	g.s = []gpu.GPUSample{{GPUID: 0, PowerW: 100}, {GPUID: 1, PowerW: 0}} // reports, but no power
+	if p.Available() {
+		t.Errorf("a powerless card counted as 0 W: %v W available", p.Watts())
+	}
+	g.s = []gpu.GPUSample{{GPUID: 0, PowerW: 90}, {GPUID: 1, PowerW: 110}}
+	if !p.Available() || p.Watts() != 200 {
+		t.Errorf("both back: %v %v", p.Available(), p.Watts())
+	}
+}

@@ -241,8 +241,11 @@ update:
 ```
 
 A request names a version; the node builds the URL from `source` itself.
-`source` must be https (http only for a loopback test server). Changing any of
-these needs a restart. See docs/releases.md.
+`source` accepts only the value shown: releases are downloaded from GitHub and
+nowhere else, and a download may be redirected only to GitHub's own asset
+hosts (`*.githubusercontent.com`). Any other value is refused at start. The
+key remains so existing files keep parsing. Changing any of these needs a
+restart. See docs/releases.md.
 
 ## Environment variables
 

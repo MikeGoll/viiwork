@@ -94,8 +94,27 @@ func New(addr string) *Client {
 // Ensure asks viiwork-parrot to make model id available on this host. It
 // never returns an error: every outcome is a Result the caller acts on.
 func (c *Client) Ensure(ctx context.Context, id string) Result {
-	body, _ := json.Marshal(map[string]string{"id": id})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+"/ensure", bytes.NewReader(body))
+	return c.post(ctx, "/ensure", map[string]string{"id": id})
+}
+
+// EnsureRelease asks viiwork-parrot for a signed release of repo, answered
+// with a directory holding SHA256SUMS, SHA256SUMS.sig and the archives.
+// peers are addresses of hosts likely to hold it (the mesh's members); parrot
+// treats them as hints. Nothing parrot returns is trusted: the caller
+// verifies every file. Classified exactly like Ensure.
+func (c *Client) EnsureRelease(ctx context.Context, repo, version string, peers []string) Result {
+	body := struct {
+		Repo    string   `json:"repo"`
+		Version string   `json:"version"`
+		Peers   []string `json:"peers,omitempty"`
+	}{repo, version, peers}
+	return c.post(ctx, "/ensure-release", body)
+}
+
+// post sends v as JSON to path and classifies the answer.
+func (c *Client) post(ctx context.Context, path string, v any) Result {
+	body, _ := json.Marshal(v)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+path, bytes.NewReader(body))
 	if err != nil {
 		return Result{Kind: Refused, Message: err.Error()}
 	}

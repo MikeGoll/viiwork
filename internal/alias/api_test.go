@@ -39,6 +39,7 @@ func newAPIFx(t *testing.T, primary, previous []byte) *apiFx {
 func (fx *apiFx) do(t *testing.T, method, target, body string, signWith []byte, remote string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(method, target, strings.NewReader(body))
+	req.Host = "127.0.0.1:8086" // as the CLI dials it
 	if remote != "" {
 		req.RemoteAddr = remote
 	}
@@ -218,5 +219,33 @@ func TestAPIPersistFailure(t *testing.T) {
 	var list meshapi.AliasesResponse
 	if json.Unmarshal(rec.Body.Bytes(), &list) != nil || len(list.Aliases) != 1 || list.Aliases[0].Target != "Qwen3.8-27B" {
 		t.Errorf("A17: after the failure GET shows %s", rec.Body.String())
+	}
+}
+
+// In an open mesh "this machine" means a program on it, not a web page in a
+// browser on it: a request carrying Origin, or naming a non-loopback Host
+// (DNS rebinding), is refused even from 127.0.0.1.
+func TestAPIOpenRefusesBrowsers(t *testing.T) {
+	fx := newAPIFx(t, nil, nil)
+	for label, tweak := range map[string]func(*http.Request){
+		"Origin":       func(r *http.Request) { r.Header.Set("Origin", "http://localhost:3000") },
+		"rebound Host": func(r *http.Request) { r.Host = "attacker.example:8086" },
+	} {
+		req := httptest.NewRequest(http.MethodPut, "/v1/aliases/stable-coder", strings.NewReader(coderBody))
+		req.Host = "127.0.0.1:8086"
+		req.RemoteAddr = "127.0.0.1:5555"
+		tweak(req)
+		rec := httptest.NewRecorder()
+		fx.h.ServeHTTP(rec, req)
+		if rec.Code != 403 {
+			t.Errorf("%s: %d %s", label, rec.Code, rec.Body.String())
+		}
+	}
+	req := httptest.NewRequest(http.MethodPut, "/v1/aliases/stable-coder", strings.NewReader(coderBody))
+	req.Host, req.RemoteAddr = "localhost:8086", "[::1]:5555"
+	rec := httptest.NewRecorder()
+	fx.h.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Errorf("localhost Host from ::1: %d %s", rec.Code, rec.Body.String())
 	}
 }

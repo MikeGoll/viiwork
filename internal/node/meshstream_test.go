@@ -209,6 +209,41 @@ func TestMeshStreamSnapshots(t *testing.T) {
 	waitEvent(t, events, 2*time.Second, func(e sseEvent) bool { return e.name == "aliases" && strings.Contains(e.data, "stable") })
 }
 
+// A baselined score's age ticks every second until the window holds enough
+// samples; left in the snapshot it would defeat the diff, and every node would
+// push a full cluster snapshot every second forever. /v1/status keeps it.
+func TestMeshStreamIgnoresBaselineAge(t *testing.T) {
+	d, _, fx := newStreamDeps(t)
+	withAge := func(age int64) *meshapi.NodeStatus {
+		return &meshapi.NodeStatus{Node: "gb1", Models: []meshapi.ModelStatus{{Name: "m", Slots: 1,
+			Perf: &meshapi.PerfScore{OverheadMs: 400, MsPer1k: 3000, Samples: 2, BaselineAgeS: age}}}}
+	}
+	fx.cluster.Members = []meshapi.Member{{Node: "gb1", State: meshapi.MemberAlive, Role: meshapi.RoleNode, Status: withAge(10)}}
+	events, _ := openStream(t, NewServer(d))
+	first := waitEvent(t, events, 2*time.Second, func(e sseEvent) bool { return e.name == meshapi.SSECluster })
+	if !strings.Contains(first.data, `"prefill_ms_per_1k":3000`) || strings.Contains(first.data, "baseline_age_s") {
+		t.Errorf("snapshot perf: %s", first.data)
+	}
+	for age := int64(11); age <= 13; age++ {
+		fx.set(func() { fx.cluster.Members[0].Status = withAge(age) })
+		if n := countNamed(collect(events, 1100*time.Millisecond), meshapi.SSECluster); n != 0 {
+			t.Fatalf("%d cluster events when only baseline_age_s ticked", n)
+		}
+	}
+}
+
+func TestSnapshotLeavesTheCallersStatusAlone(t *testing.T) {
+	st := &meshapi.NodeStatus{Node: "gb1", Models: []meshapi.ModelStatus{{Name: "m", Perf: &meshapi.PerfScore{MsPer1k: 3000, BaselineAgeS: 7}}}}
+	state := meshapi.ClusterResponse{Members: []meshapi.Member{{Node: "gb1", Status: st}}}
+	newHostMemDeadband().apply(&state)
+	if st.Models[0].Perf.BaselineAgeS != 7 {
+		t.Error("the snapshot filter changed the status it was given")
+	}
+	if p := state.Members[0].Status.Models[0].Perf; p.BaselineAgeS != 0 || p.MsPer1k != 3000 {
+		t.Errorf("snapshot perf %+v", p)
+	}
+}
+
 func countNamed(events []sseEvent, name string) int {
 	n := 0
 	for _, e := range events {

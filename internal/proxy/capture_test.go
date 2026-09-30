@@ -1,8 +1,10 @@
 package proxy
 
 import (
+	"bytes"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -98,5 +100,29 @@ func TestCaptureWriterTailKeepsUsagePastTheCap(t *testing.T) {
 	}
 	if rec.Body.Len() != written {
 		t.Errorf("client received %d bytes, wrote %d", rec.Body.Len(), written)
+	}
+}
+
+// Filling the capture to its cap allocates about twice the cap, not the five
+// times append's 1.25x growth past 256 KB costs.
+func TestCaptureGrowthIsBounded(t *testing.T) {
+	chunk := bytes.Repeat([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"tok\"}}]}\n\n"), 20)
+	fill := func() {
+		c := &captureWriter{ResponseWriter: httptest.NewRecorder()}
+		for len(c.buf) < maxCaptureBytes {
+			c.Write(chunk)
+		}
+	}
+	fill() // warm up the recorder's own buffers' code paths
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	c := &captureWriter{ResponseWriter: discardWriter{}}
+	for len(c.buf) < maxCaptureBytes {
+		c.Write(chunk)
+	}
+	runtime.ReadMemStats(&after)
+	if got := after.TotalAlloc - before.TotalAlloc; got > 5*maxCaptureBytes/2 {
+		t.Errorf("filling a %d-byte capture allocated %d bytes", maxCaptureBytes, got)
 	}
 }

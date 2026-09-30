@@ -1,4 +1,4 @@
-.PHONY: build build-darwin mcp accept release test vet-cross clean docker docker-stable docker-rocm docker-vllm docker-freetoken up down
+.PHONY: build build-darwin mcp install-mcp accept release test vet-cross clean docker docker-stable docker-rocm docker-vllm docker-freetoken up down
 
 # scripts/version.sh, not `git describe` inline: the private repo carries no
 # tags, so describe reports the last one it can still see. See that script.
@@ -17,6 +17,11 @@ build-darwin:
 # assistant in its initialize response.
 mcp:
 	./scripts/gobuild.sh ./cmd/viiwork-mcp bin/viiwork-mcp $(VERSION)
+
+# Onto PATH, so an MCP client config can name the binary rather than a checkout.
+PREFIX ?= $(HOME)/.local
+install-mcp: mcp
+	install -D -m 0755 bin/viiwork-mcp $(PREFIX)/bin/viiwork-mcp
 
 # The acceptance checker. Version-stamped like the node because `viiwork-accept
 # --version` is what a conversion report records.

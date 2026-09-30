@@ -67,14 +67,31 @@ func (a *Authorizer) Authorize(r *http.Request, body []byte) (status int, messag
 		}
 		return 0, "", true
 	}
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		host = r.RemoteAddr
+	// Open mesh: a program on this machine. A web page in a browser here is
+	// on this machine too, so a request with an Origin (every browser write
+	// sends one; the CLIs never do) or with a Host that is not loopback (DNS
+	// rebinding) is refused, even from 127.0.0.1.
+	if r.Header.Get("Origin") != "" || !loopbackHost(r.Host) {
+		return http.StatusForbidden, "writes in an open mesh are accepted only from a program on this machine, not a web page", false
 	}
-	if addr, err := netip.ParseAddr(host); err == nil && addr.Unmap().IsLoopback() {
+	if loopbackHost(r.RemoteAddr) {
 		return 0, "", true
 	}
 	return http.StatusForbidden, "alias writes are accepted only from this machine in an open mesh", false
+}
+
+// loopbackHost reports whether hostport ("host", "host:port" or
+// "[v6]:port") names this machine: localhost or a loopback address.
+func loopbackHost(hostport string) bool {
+	host, _, err := net.SplitHostPort(hostport)
+	if err != nil {
+		host = hostport
+	}
+	if host == "localhost" {
+		return true
+	}
+	addr, err := netip.ParseAddr(strings.Trim(host, "[]"))
+	return err == nil && addr.Unmap().IsLoopback()
 }
 
 type apiHandler struct {

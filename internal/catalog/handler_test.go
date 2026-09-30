@@ -173,3 +173,23 @@ func keys(c Catalog) []string {
 	}
 	return out
 }
+
+// A failing upstream is remembered for a while: clients starting together
+// must not each wait out another fetch, one after another behind the lock.
+func TestAFailingUpstreamIsNotAskedOnEveryRequest(t *testing.T) {
+	var hits atomic.Int64
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	t.Cleanup(up.Close)
+	h := NewHandler(Config{ProviderID: "viiwork", Upstream: up.URL, UpstreamTTL: time.Hour}, oneModel())
+	for i := 0; i < 5; i++ {
+		if rec, _ := get(t, h, "http://gb1:8086/api.json"); rec.Code != http.StatusOK {
+			t.Fatalf("status %d", rec.Code)
+		}
+	}
+	if n := hits.Load(); n != 1 {
+		t.Errorf("upstream asked %d times for 5 requests", n)
+	}
+}

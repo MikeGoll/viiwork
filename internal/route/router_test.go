@@ -408,6 +408,25 @@ func TestRouterRefusal(t *testing.T) {
 		}
 	})
 
+	// A poll sent before the refusal can arrive after it, carrying the
+	// peer's state from before: it must not clear the mark.
+	t.Run("R24b a report requested before the refusal does not clear it", func(t *testing.T) {
+		f := newFixture()
+		f.clock.set(t0.Add(100 * time.Millisecond))
+		f.reports.set(report("P", t0, time.Millisecond, capM(1, 0, 1)))
+		l := f.pick(t, Request{})
+		f.clock.set(t0.Add(500 * time.Millisecond))
+		l.Refused() // refused at t0+500ms
+		l.Release()
+		late := report("P", t0.Add(600*time.Millisecond), 300*time.Millisecond, capM(1, 0, 1))
+		late.Sent = t0.Add(300 * time.Millisecond) // requested before the refusal
+		f.clock.set(t0.Add(700 * time.Millisecond))
+		f.reports.set(late)
+		if err := f.pickErr(Request{}); !errors.Is(err, ErrNoFreeSlot) {
+			t.Errorf("a report requested before the refusal cleared it: err = %v", err)
+		}
+	})
+
 	t.Run("R25 other peers stay candidates", func(t *testing.T) {
 		f := newFixture()
 		f.clock.set(t0.Add(100 * time.Millisecond))

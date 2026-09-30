@@ -39,6 +39,13 @@ type execResult struct {
 	// failure of the request itself. Only refusals make an exhausted dispatch
 	// a 503 with Retry-After instead of a 502.
 	Refusal bool
+	// Performance measurement, local serves only (spec §1). Granted is when
+	// the local lease was granted; FirstToken when the first content chunk
+	// went to the client (zero = never); StrippedUsage the usage-only event
+	// removed for a client that did not ask for usage.
+	Granted       time.Time
+	FirstToken    time.Time
+	StrippedUsage []byte
 }
 
 func retryable(format string, args ...any) execResult {
@@ -204,11 +211,15 @@ func varyWithoutOrigin(values []string) []string {
 // client unless a response the client should see arrived: a transport failure
 // or a 429/503 from the engine is retryable, and a hard socket failure also
 // tells the backend's supervision loop to probe at once.
-func serveLocal(w http.ResponseWriter, r *http.Request, body []byte, b route.LocalBackend, model, self string, thinkDisabled bool) execResult {
+func serveLocal(w http.ResponseWriter, r *http.Request, body []byte, b route.LocalBackend, model, self string, thinkDisabled, strip bool) execResult {
 	addr := b.Addr()
 	if addr == "" {
 		return refused("backend %s has no running process", b.ID())
 	}
+	// Every header and body write below goes through the measuring writer.
+	// With strip on it holds back an incomplete SSE event, so every return
+	// after WriteHeader must call meter.finish, or the client loses the tail.
+	w, meter := newMeasureWriter(w, strip, time.Now)
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, r.Method, targetURL(addr, r), bytes.NewReader(body))
@@ -249,7 +260,8 @@ func serveLocal(w http.ResponseWriter, r *http.Request, body []byte, b route.Loc
 		rewritten = rewriteThinkResponse(raw)
 	}
 
-	copyResponseHeaders(w.Header(), resp.Header, thinkDisabled)
+	// Both the think rewrite and the usage strip change the body's length.
+	copyResponseHeaders(w.Header(), resp.Header, thinkDisabled || strip)
 	w.Header().Set(meshapi.HeaderNode, self)
 	w.Header().Set(meshapi.HeaderGPUBackend, b.ID())
 	w.Header().Set(meshapi.HeaderModel, model)
@@ -259,6 +271,10 @@ func serveLocal(w http.ResponseWriter, r *http.Request, body []byte, b route.Loc
 		w.Header().Set("Content-Length", strconv.Itoa(len(rewritten)))
 		w.WriteHeader(resp.StatusCode)
 		_, err := w.Write(rewritten)
+		if ferr := meter.finish(); ferr != nil {
+			err = ferr
+		}
+		// No FirstToken: a JSON body's first byte arrives after generation ends.
 		return endStream(res, r, err != nil, nil, "backend "+b.ID())
 	}
 	w.WriteHeader(resp.StatusCode)
@@ -269,7 +285,18 @@ func serveLocal(w http.ResponseWriter, r *http.Request, body []byte, b route.Loc
 	} else {
 		clientGone, upstreamErr = stream(w, resp.Body, cancel)
 	}
-	return endStream(res, r, clientGone, upstreamErr, "backend "+b.ID())
+	if err := meter.finish(); err != nil {
+		clientGone = true
+	}
+	res = endStream(res, r, clientGone, upstreamErr, "backend "+b.ID())
+	if sse {
+		// Only a stream has a first-token moment. A non-streamed JSON body also
+		// contains "content", but its first byte arrives after generation ends.
+		// Read here, after streaming completed: firstAt is not synchronised.
+		res.FirstToken = meter.firstAt
+	}
+	res.StrippedUsage = meter.stripped
+	return res
 }
 
 // endStream completes the result of a response whose headers went out. A

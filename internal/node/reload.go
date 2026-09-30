@@ -54,6 +54,7 @@ func (n *Node) Reload() error {
 		n.logf("reload: applying models: %v", err)
 		return err
 	}
+	n.perf.SetKeys(perfKeys(next.Models))
 	n.mu.Lock()
 	updated := *n.cfg
 	updated.Models = next.Models

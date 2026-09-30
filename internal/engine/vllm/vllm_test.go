@@ -66,6 +66,7 @@ func TestCommandSingleCard(t *testing.T) {
 		"--gpu-memory-utilization", "0.85",
 		"--max-model-len", "16384",
 		"--max-num-seqs", "8",
+		"--enable-prompt-tokens-details",
 		"--enforce-eager",
 	}
 	if !slices.Equal(cmd.Args, want) {
@@ -405,6 +406,29 @@ func read(t *testing.T, name string) []byte {
 }
 
 func hostPort(srv *httptest.Server) string { return strings.TrimPrefix(srv.URL, "http://") }
+
+func TestCommandEnablesPromptTokenDetails(t *testing.T) {
+	cmd, err := (&Engine{}).Command(engine.Spec{Name: "m", Path: "/m", GPUs: []int{0}, Port: 9000, Context: 4096, Parallel: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, a := range cmd.Args {
+		if a == "--enable-prompt-tokens-details" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("args %v: without the flag vLLM never reports cached_tokens and performance routing cannot tell cached from prefilled tokens", cmd.Args)
+	}
+}
+
+func TestUsageReporting(t *testing.T) {
+	u := engine.UsageOf(&Engine{})
+	if u.Unasked || !u.CachedTokens {
+		t.Fatalf("vllm usage = %+v, want Unasked false (needs include_usage), CachedTokens true (with the flag)", u)
+	}
+}
 
 // argOf returns the value following flag on a command line, or "" if absent.
 func argOf(args []string, flag string) string {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/janit/viiwork/v2/internal/update/updatetest"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -101,7 +102,7 @@ func TestStartupManagedNeverExecs(t *testing.T) {
 func TestStagePreparesTheImage(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	src, pub := fakeRelease(t, "v2.6.0", releaseOpts{requires: `{"llamacpp":"b100"}`})
+	src, pub := fakeRelease(t, "v2.6.0", updatetest.Opts{Requires: `{"llamacpp":"b100"}`})
 	st := stager(dir, src, pub)
 	st.Engines = func(context.Context, map[string]string) error {
 		t.Error("the running engines were checked")

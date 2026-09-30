@@ -9,8 +9,10 @@ import (
 	"time"
 
 	"github.com/janit/viiwork/v2/internal/config"
+	"github.com/janit/viiwork/v2/internal/parrot"
 	"github.com/janit/viiwork/v2/internal/release"
 	"github.com/janit/viiwork/v2/internal/update"
+	"github.com/janit/viiwork/v2/meshapi"
 )
 
 // ErrRestart is Run's return when an update asked for a restart: the node
@@ -50,6 +52,17 @@ func (n *Node) buildUpdate(cfg *config.Config, auth update.Authorizer) (*update.
 			return update.CheckEngines(ctx, models(), required)
 		},
 	}
+	if n.o.UpdateSource != "" {
+		stager.Source = n.o.UpdateSource
+	}
+	// The signed files come from GitHub whenever it answers; the archive from
+	// the host's viiwork-parrot, checked against them. GitHub is the fallback
+	// whenever parrot cannot provide it.
+	pc := parrot.New(cfg.ViiworkParrot.API)
+	stager.Local = func(ctx context.Context, version string) (string, error) {
+		return pc.AwaitRelease(ctx, config.UpdateRepo(), version, n.meshPeers(), parrot.Await{})
+	}
+	stager.Log = n.logf
 	if n.o.Managed {
 		// The release is the image: the host's helper pulls and verifies it
 		// at stage, so activation never waits on a pull, and the engine it
@@ -97,4 +110,20 @@ func (n *Node) buildUpdate(cfg *config.Config, auth update.Authorizer) (*update.
 		}
 	}
 	return svc, c, nil
+}
+
+// meshPeers is the address of every other alive member: likely holders of a
+// release, handed to viiwork-parrot as hints.
+func (n *Node) meshPeers() []string {
+	m := n.mesh.Load()
+	if m == nil {
+		return nil
+	}
+	var out []string
+	for _, mem := range m.Members() {
+		if mem.State == meshapi.MemberAlive && !mem.Local && mem.Meta.Role == meshapi.RoleNode {
+			out = append(out, mem.Addr.String())
+		}
+	}
+	return out
 }

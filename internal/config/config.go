@@ -196,7 +196,14 @@ type RoutingConfig struct {
 	QueueTimeout Duration `yaml:"queue_timeout"`
 	ForwardRetry int      `yaml:"forward_retry"`
 	StaleAfter   Duration `yaml:"stale_after"`
+	// Performance routes by each host's measured time to first token
+	// (performance-routing spec). Default true; false restores local-first,
+	// most-free-slots routing and stops publishing scores.
+	Performance *bool `yaml:"performance"`
 }
+
+// PerformanceOn is routing.performance with its default applied.
+func (r RoutingConfig) PerformanceOn() bool { return r.Performance == nil || *r.Performance }
 
 type GPUConfig struct {
 	Vendor          string `yaml:"vendor"`

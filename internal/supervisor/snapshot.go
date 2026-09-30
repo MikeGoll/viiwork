@@ -97,8 +97,8 @@ func (v backendView) status(cfg config.Model) meshapi.BackendStatus {
 }
 
 // totals sums slots and busy over healthy backends, and picks the context per
-// slot: the largest the engine reports on a healthy fresh backend, else the
-// configured one.
+// slot: the smallest the engine reports on a healthy fresh backend — the one
+// every backend the router may choose can honour — else the configured one.
 func totals(cfg config.Model, views []backendView) (slots, busy, healthy int, ctx int64) {
 	for _, v := range views {
 		if v.State != StateHealthy {
@@ -107,8 +107,8 @@ func totals(cfg config.Model, views []backendView) (slots, busy, healthy int, ct
 		healthy++
 		slots += v.slots(cfg)
 		busy += v.busy()
-		if v.LoadFresh {
-			ctx = max(ctx, v.Load.CtxPerSlot)
+		if v.LoadFresh && v.Load.CtxPerSlot > 0 && (ctx == 0 || v.Load.CtxPerSlot < ctx) {
+			ctx = v.Load.CtxPerSlot
 		}
 	}
 	if ctx == 0 {

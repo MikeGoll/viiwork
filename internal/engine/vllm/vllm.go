@@ -87,10 +87,21 @@ func (e *Engine) Command(s engine.Spec) (engine.Command, error) {
 		// more than the node advertises makes ctx a lie on every dashboard.
 		"--max-model-len", strconv.Itoa(s.Context),
 		"--max-num-seqs", strconv.Itoa(s.Parallel),
+		// Reports usage.prompt_tokens_details.cached_tokens, which performance
+		// routing needs to separate prefilled from cached tokens. vLLM omits
+		// the field when it would be 0, and only reports it with this flag.
+		"--enable-prompt-tokens-details",
 	}
 
 	// Operator args last: vLLM's parser takes the last occurrence of a
 	// repeated flag, so this is what lets an operator override a generated one
 	// without this package growing a key for it.
 	return engine.Command{Path: opts.Binary, Args: append(args, s.Args...)}, nil
+}
+
+// UsageReporting: vLLM sends usage only when asked (include_usage), and
+// cached_tokens only with --enable-prompt-tokens-details, which Command
+// always passes (vLLM v0.11.2 serving_chat.py:1223-1250, 1232-1235).
+func (e *Engine) UsageReporting() engine.UsageReporting {
+	return engine.UsageReporting{Unasked: false, CachedTokens: true}
 }

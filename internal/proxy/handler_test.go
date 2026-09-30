@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/janit/viiwork/v2/internal/activity"
+	"github.com/janit/viiwork/v2/internal/engine"
 	"github.com/janit/viiwork/v2/internal/pipeline"
 	"github.com/janit/viiwork/v2/internal/route"
 	"github.com/janit/viiwork/v2/internal/supervisor"
@@ -151,6 +152,8 @@ type handlerFx struct {
 	extra        ModelLister
 	pipelines    *PipelineResolver
 	exec         *pipeline.Executor
+	perf         PerfRecorder
+	usage        func(string) engine.UsageReporting
 
 	counters *Counters
 	log      *activity.Log
@@ -185,6 +188,8 @@ func (f *handlerFx) build() *handlerFx {
 		PipelineExec: f.exec,
 		Resolve:      f.resolve,
 		ExtraModels:  f.extra,
+		Perf:         f.perf,
+		Usage:        f.usage,
 	})
 	return f
 }
@@ -448,12 +453,13 @@ func TestHandlerForwards(t *testing.T) {
 		}
 	})
 
+	// Never forwarded again: a refusal the origin retries on P itself.
 	t.Run("H15 forward for a peer-only model", func(t *testing.T) {
 		f := newHandlerFx(t)
 		f.members = fakeMembers{gb1}
 		f.reports.add("P", newRecEngine(t, nil).addr(), time.Now(), peerModel("m", 1, 0))
 		f.build()
-		if rec := f.do(http.MethodPost, "/v1/chat/completions", chatReq, fromMember("gb1")); rec.Code != 404 {
+		if rec := f.do(http.MethodPost, "/v1/chat/completions", chatReq, fromMember("gb1")); rec.Code != 503 {
 			t.Errorf("code=%d body=%q", rec.Code, rec.Body.String())
 		}
 	})
@@ -863,5 +869,23 @@ func TestModelsEndpointCarriesTheServedContext(t *testing.T) {
 	}
 	if strings.Contains(rec.Body.String(), `"max_model_len":0`) {
 		t.Errorf("a zero window was serialised; absent is not zero: %s", rec.Body.String())
+	}
+}
+
+// A forward for a model this node no longer serves (dropped on reload, or a
+// member restarted with another config) is a refusal the origin can retry
+// elsewhere — 503 — not a 404 it would hand the client while another member
+// serves the model. A client asking for an unknown model still gets 404.
+func TestForwardForAnUnservedModelIsARefusal(t *testing.T) {
+	gb1 := memberAt("gb1", "127.0.0.1", meshapi.MemberAlive, false)
+	f := newHandlerFx(t)
+	f.members = fakeMembers{gb1}
+	f.build()
+	rec := f.do(http.MethodPost, "/v1/chat/completions", chatReq, fromMember("gb1"))
+	if rec.Code != http.StatusServiceUnavailable || rec.Header().Get("Retry-After") == "" {
+		t.Errorf("forward: %d %v %s", rec.Code, rec.Header(), rec.Body.String())
+	}
+	if rec := f.do(http.MethodPost, "/v1/chat/completions", chatReq); rec.Code != http.StatusNotFound {
+		t.Errorf("client: %d %s", rec.Code, rec.Body.String())
 	}
 }

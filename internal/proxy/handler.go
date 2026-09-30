@@ -14,8 +14,10 @@ import (
 	"github.com/janit/viiwork/v2/internal/activity"
 	"github.com/janit/viiwork/v2/internal/api"
 	"github.com/janit/viiwork/v2/internal/discovery"
+	"github.com/janit/viiwork/v2/internal/engine"
 	"github.com/janit/viiwork/v2/internal/httpjson"
 	"github.com/janit/viiwork/v2/internal/logging"
+	"github.com/janit/viiwork/v2/internal/perf"
 	"github.com/janit/viiwork/v2/internal/pipeline"
 	"github.com/janit/viiwork/v2/internal/route"
 	"github.com/janit/viiwork/v2/meshapi"
@@ -64,6 +66,20 @@ type Deps struct {
 	PipelineExec *pipeline.Executor
 	Resolve      Resolver    // nil = identity
 	ExtraModels  ModelLister // nil = none
+	// Perf receives service-TTFT samples of requests this node executed and
+	// supplies this node's scores (performance routing). nil = no measurement.
+	Perf PerfRecorder
+	// PublishPerf adds the scores to /v1/capacity (routing.performance).
+	PublishPerf bool
+	// Usage says how a model's engine reports usage. nil = the zero value:
+	// ask for usage, and treat an absent cached_tokens as unknown.
+	Usage func(model string) engine.UsageReporting
+}
+
+// PerfRecorder is *perf.Tracker as the proxy uses it.
+type PerfRecorder interface {
+	Record(model string, at time.Time, uncached int64, ttft time.Duration)
+	Score(model string) (perf.Score, bool)
 }
 
 // Handler serves inference, /v1/models and /v1/capacity. The node server
@@ -245,6 +261,9 @@ type dispatch struct {
 	rid                        int64
 	start                      time.Time
 	capture                    *captureWriter
+	localBody                  []byte // body with include_usage injected, built on the first local attempt
+	localStrip                 bool
+	localBuilt                 bool
 }
 
 // dispatch runs the request over the router. The rules that make it safe all
@@ -262,8 +281,18 @@ type dispatch struct {
 //     503 with Retry-After — the mesh is busy, not broken; any other failure
 //     among them makes it a 502.
 func (h *Handler) dispatch(w http.ResponseWriter, r *http.Request, d *dispatch) {
-	lease, queued, err := h.d.Router.Acquire(r.Context(), route.Request{Model: d.model, Host: d.host, Forwarded: d.forwarded})
+	estK := float64(len(d.body)) / 4000 // ~4 bytes per token; the entry cannot see caches
+	lease, queued, err := h.d.Router.Acquire(r.Context(), route.Request{Model: d.model, Host: d.host, Forwarded: d.forwarded, EstK: estK})
 	if err != nil {
+		if d.forwarded && errors.Is(err, route.ErrModelNotFound) {
+			// The origin chose this node from a report that still listed
+			// the model (dropped on reload since, or a restart with another
+			// config): a refusal it retries elsewhere, not a 404 for the
+			// client while another member serves the model.
+			w.Header().Set("Retry-After", "1")
+			httpjson.Error(w, http.StatusServiceUnavailable, meshapi.ErrTypeUnavailable, fmt.Sprintf("model %q is not served here", d.model))
+			return
+		}
 		h.writeAcquireError(w, err, d.model, d.host)
 		return
 	}
@@ -303,8 +332,16 @@ func (h *Handler) dispatch(w http.ResponseWriter, r *http.Request, d *dispatch) 
 			// Counted where the request ran, so a forward is counted by its
 			// receiver and not twice (spec).
 			if t.Local {
+				// The response is complete here, so the capture's usage
+				// decode (cached on first use) sees the whole body. The
+				// capture never sees a stripped usage chunk, so without the
+				// stripped event tokens_total would lose every such request.
 				tokens, _ := d.capture.CompletionTokens()
+				if n, ok := completionTokensFromEvent(res.StrippedUsage); ok {
+					tokens = n
+				}
 				h.d.Counters.Add(d.model, tokens)
+				h.recordPerf(d.model, res, d.capture)
 			}
 			if res.Truncated {
 				// The headers are out, so the status cannot say it failed; a
@@ -345,7 +382,7 @@ func (h *Handler) dispatch(w http.ResponseWriter, r *http.Request, d *dispatch) 
 		tried[t.Key()] = true
 		if retries < h.d.ForwardRetry {
 			retries++
-			if next, err := h.d.Router.Pick(route.Request{Model: d.model, Host: d.host, Exclude: tried}); err == nil {
+			if next, err := h.d.Router.Pick(route.Request{Model: d.model, Host: d.host, Exclude: tried, EstK: estK}); err == nil {
 				lease = next
 				continue
 			}
@@ -358,7 +395,7 @@ func (h *Handler) dispatch(w http.ResponseWriter, r *http.Request, d *dispatch) 
 			budget = -1
 		}
 		var waited time.Duration
-		lease, waited, err = h.d.Router.Acquire(r.Context(), route.Request{Model: d.model, Host: d.host, QueueBudget: budget})
+		lease, waited, err = h.d.Router.Acquire(r.Context(), route.Request{Model: d.model, Host: d.host, QueueBudget: budget, EstK: estK})
 		queued += waited
 		if err != nil {
 			h.endUnserved(d, label)
@@ -367,6 +404,51 @@ func (h *Handler) dispatch(w http.ResponseWriter, r *http.Request, d *dispatch) 
 		}
 		final = true
 	}
+}
+
+func (h *Handler) usage(model string) engine.UsageReporting {
+	if h.d.Usage == nil {
+		return engine.UsageReporting{}
+	}
+	return h.d.Usage(model)
+}
+
+// localBodyFor is the body a local backend gets, built once per request:
+// with include_usage injected only when measuring and the engine both needs
+// asking for usage and reports cached tokens. Any other engine could never
+// yield a sample (recordPerf needs the cached count), so its request goes out
+// exactly as the client sent it. strip reports that the usage chunk must be
+// removed again, because the client never asked for it.
+func (h *Handler) localBodyFor(d *dispatch) ([]byte, bool) {
+	if !d.localBuilt {
+		d.localBuilt, d.localBody = true, d.body
+		if h.d.Perf != nil && h.usage(d.model) == (engine.UsageReporting{CachedTokens: true}) {
+			d.localBody, d.localStrip = injectIncludeUsage(d.body)
+		}
+	}
+	return d.localBody, d.localStrip
+}
+
+// recordPerf records one local serve's service TTFT (spec §1): only a 200
+// with a first token and prompt usage that says how many tokens were
+// prefilled. Everything else records nothing. Called only after the response
+// completed: the capture caches its usage decode on first use.
+func (h *Handler) recordPerf(model string, res execResult, c *captureWriter) {
+	if h.d.Perf == nil || res.Status != http.StatusOK || res.FirstToken.IsZero() || res.Granted.IsZero() {
+		return
+	}
+	u, ok := promptUsageFromEvent(res.StrippedUsage)
+	if !ok {
+		u, ok = c.PromptUsage()
+	}
+	if !ok || (!u.CachedPresent && !h.usage(model).CachedTokens) {
+		return
+	}
+	uncached := u.Prompt - u.Cached
+	if uncached < 0 {
+		return
+	}
+	h.d.Perf.Record(model, res.FirstToken, uncached, res.FirstToken.Sub(res.Granted))
 }
 
 // attempt runs one dispatch on the lease's target and releases the lease on
@@ -385,7 +467,11 @@ func (h *Handler) attempt(w http.ResponseWriter, r *http.Request, lease *route.L
 	}()
 	t := lease.Target()
 	if t.Local {
-		return serveLocal(w, r, d.body, lease.Backend(), d.model, h.d.Self, d.thinkDisabled)
+		body, strip := h.localBodyFor(d)
+		granted := time.Now()
+		res = serveLocal(w, r, body, lease.Backend(), d.model, h.d.Self, d.thinkDisabled, strip)
+		res.Granted = granted
+		return res
 	}
 	res = forwardToPeer(w, r, d.body, t, h.d.Auth, h.d.Self)
 	if res.Outcome == outcomeRetryable {
@@ -540,6 +626,11 @@ func (h *Handler) handleCapacity(w http.ResponseWriter) {
 	models := make([]meshapi.ModelCapacity, len(local))
 	for i, m := range local {
 		m.Queued = h.d.Router.QueueLen(m.Name)
+		if h.d.PublishPerf && h.d.Perf != nil {
+			if s, ok := h.d.Perf.Score(m.Name); ok {
+				m.TTFTOverheadMs, m.PrefillMsPer1k, m.PerfSamples = s.OverheadMs, s.MsPer1k, s.Samples
+			}
+		}
 		models[i] = m
 	}
 	httpjson.Write(w, http.StatusOK, meshapi.CapacityResponse{Node: h.d.Self, Ver: h.d.Version, Models: models})

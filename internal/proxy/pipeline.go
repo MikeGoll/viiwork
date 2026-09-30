@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -160,7 +161,14 @@ func (h *Handler) handlePipeline(w http.ResponseWriter, r *http.Request, p *pipe
 		if h.d.Activity != nil {
 			h.d.Activity.EmitRequestTask(rid, -1, taskID, "[pipeline] %s failed: %v", modelName, err)
 		}
-		if stepErr, ok := err.(*pipeline.StepError); ok && stepErr.Status == http.StatusServiceUnavailable {
+		var stepErr *pipeline.StepError
+		if errors.As(err, &stepErr) && stepErr.Status == http.StatusTooManyRequests {
+			w.Header().Set("Retry-After", queueRetryAfter)
+			httpjson.Error(w, http.StatusTooManyRequests, meshapi.ErrTypeRateLimit,
+				fmt.Sprintf("pipeline step '%s' failed: no capacity for model '%s'", stepErr.Step, stepErr.Model))
+			return
+		}
+		if stepErr != nil && stepErr.Status == http.StatusServiceUnavailable {
 			w.Header().Set("Retry-After", "5")
 			httpjson.Write(w, http.StatusServiceUnavailable, map[string]any{
 				"error": map[string]string{

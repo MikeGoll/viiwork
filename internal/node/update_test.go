@@ -2,12 +2,20 @@ package node
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"github.com/janit/viiwork/v2/internal/release"
+	"github.com/janit/viiwork/v2/internal/update/updatetest"
+	"github.com/janit/viiwork/v2/mesh"
 	"net/http"
+	"net/http/httptest"
+	"net/netip"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -115,5 +123,79 @@ func TestManagedActivateLeavesTheNodeRunning(t *testing.T) {
 	}
 	if st, err := update.LoadState(rel); err != nil || st.Current != "v9.0.0" || st.Pending == nil {
 		t.Fatalf("state = %+v, %v", st, err)
+	}
+}
+
+// fakeParrot answers /ensure-release with dir and records the request.
+func fakeParrot(t *testing.T, dir string) (api string, got *struct {
+	Repo, Version string
+	Peers         []string
+}) {
+	got = &struct {
+		Repo, Version string
+		Peers         []string
+	}{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(got)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"path": dir})
+	}))
+	t.Cleanup(srv.Close)
+	return strings.TrimPrefix(srv.URL, "http://"), got
+}
+
+// GitHub up: the node takes the signed files from GitHub and the archive
+// from its parrot, telling parrot the mesh's other members as peers.
+func TestStageThroughParrot(t *testing.T) {
+	assets, pub := updatetest.Assets(t, "v9.1.0", updatetest.Opts{})
+	github, hits := updatetest.Serve(t, "v9.1.0", assets)
+	api, got := fakeParrot(t, updatetest.WriteDir(t, assets))
+
+	net := meshtest.NewNetwork()
+	extra := "update:\n  enabled: true\nviiwork_parrot:\n  api: " + api + "\n"
+	opts := func(o *Options) { o.ReleaseKeys = []ed25519.PublicKey{pub}; o.UpdateSource = github }
+	a := startNodeOpts(t, net, "node-a", nil, extra, nil, opts)
+	seedA := func(tn *testNode) func(*mesh.Options) {
+		return meshTune(net, "node-b", &tn.gossip, func() netip.AddrPort { return a.gossip })
+	}
+	startNodeOpts(t, net, "node-b", nil, extra, seedA, opts)
+	until(t, 10*time.Second, "node-b alive in node-a's view", func() bool { return len(a.meshPeers()) == 1 })
+	want := a.meshPeers()
+
+	if code := postUpdate(t, a.url(meshapi.PathUpdateStage), `{"version":"v9.1.0"}`); code != 200 {
+		t.Fatalf("stage: %d\n%s", code, a.log.String())
+	}
+	if got.Repo != "janit/viiwork" || got.Version != "v9.1.0" {
+		t.Errorf("parrot asked for %+v", got)
+	}
+	if len(got.Peers) != 1 || got.Peers[0] != want[0] {
+		t.Errorf("peers = %v, want %v (the other member, not this node)", got.Peers, want)
+	}
+	name := release.ArchiveName("v9.1.0", release.Target{OS: runtime.GOOS, Arch: runtime.GOARCH})
+	if hits.Get("SHA256SUMS.sig") != 1 || hits.Get(name) != 0 {
+		t.Errorf("GitHub served the signature %d times and the archive %d times; want 1 and 0", hits.Get("SHA256SUMS.sig"), hits.Get(name))
+	}
+	if _, err := update.Binary(update.ReleasesDir(a.stateDir), "v9.1.0"); err != nil {
+		t.Error(err)
+	}
+}
+
+// GitHub unreachable: the node stages entirely from its parrot, and says so.
+func TestStageThroughParrotWhileGitHubIsDown(t *testing.T) {
+	assets, pub := updatetest.Assets(t, "v9.1.0", updatetest.Opts{})
+	api, _ := fakeParrot(t, updatetest.WriteDir(t, assets))
+	down := httptest.NewServer(http.NotFoundHandler())
+	down.Close()
+
+	extra := "update:\n  enabled: true\nviiwork_parrot:\n  api: " + api + "\n"
+	a := startNodeOpts(t, meshtest.NewNetwork(), "node-a", nil, extra, nil, func(o *Options) {
+		o.ReleaseKeys = []ed25519.PublicKey{pub}
+		o.UpdateSource = down.URL
+	})
+	if code := postUpdate(t, a.url(meshapi.PathUpdateStage), `{"version":"v9.1.0"}`); code != 200 {
+		t.Fatalf("stage: %d\n%s", code, a.log.String())
+	}
+	if !strings.Contains(a.log.String(), "GitHub unreachable") {
+		t.Errorf("log does not say GitHub was unreachable:\n%s", a.log.String())
 	}
 }

@@ -664,8 +664,34 @@ func (d *hostMemDeadband) apply(state *meshapi.ClusterResponse) {
 		}
 		st := *m.Status // the caller's status is not changed
 		st.HostMemUsedMB = d.value(m.Node, st.HostMemUsedMB, st.HostMemTotalMB)
+		st.Models = withoutBaselineAge(st.Models)
 		m.Status = &st
 	}
+}
+
+// withoutBaselineAge drops each score's baseline age from the snapshot. The
+// age ticks every second while a window holds fewer than perf.K samples, and
+// like exact host memory it would make every snapshot differ from the last,
+// so the stream would push a full cluster snapshot every second forever. The
+// mesh view does not show it; /v1/status and /v1/cluster keep it. The
+// caller's models are copied, never changed.
+func withoutBaselineAge(models []meshapi.ModelStatus) []meshapi.ModelStatus {
+	var out []meshapi.ModelStatus
+	for i, ms := range models {
+		if ms.Perf == nil || ms.Perf.BaselineAgeS == 0 {
+			continue
+		}
+		if out == nil {
+			out = append([]meshapi.ModelStatus(nil), models...)
+		}
+		p := *ms.Perf
+		p.BaselineAgeS = 0
+		out[i].Perf = &p
+	}
+	if out == nil {
+		return models
+	}
+	return out
 }
 
 func (d *hostMemDeadband) value(key string, usedMB, totalMB int64) int64 {

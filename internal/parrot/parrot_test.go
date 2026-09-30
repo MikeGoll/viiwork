@@ -200,3 +200,55 @@ func TestStatusErrors(t *testing.T) {
 		t.Error("a malformed body must be an error")
 	}
 }
+
+func TestEnsureReleaseSendsRepoVersionAndPeers(t *testing.T) {
+	var got map[string]any
+	c := serve(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/ensure-release" || r.Method != http.MethodPost {
+			http.NotFound(w, r)
+			return
+		}
+		json.NewDecoder(r.Body).Decode(&got)
+		reply(200, `{"path":"/data/releases/viiwork/v2.7.0"}`)(w, r)
+	})
+	r := c.EnsureRelease(context.Background(), "janit/viiwork", "v2.7.0", []string{"192.168.80.176", "100.64.0.12"})
+	if r.Kind != Ready || r.Path != "/data/releases/viiwork/v2.7.0" {
+		t.Fatalf("result = %+v", r)
+	}
+	if got["repo"] != "janit/viiwork" || got["version"] != "v2.7.0" {
+		t.Errorf("body = %v", got)
+	}
+	peers, _ := got["peers"].([]any)
+	if len(peers) != 2 || peers[0] != "192.168.80.176" {
+		t.Errorf("peers = %v", got["peers"])
+	}
+}
+
+func TestEnsureReleaseOmitsEmptyPeers(t *testing.T) {
+	var raw string
+	c := serve(t, func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		raw = string(b)
+		reply(202, `{"status":{"state":"downloading","percent":12.5}}`)(w, r)
+	})
+	r := c.EnsureRelease(context.Background(), "janit/viiwork", "v2.7.0", nil)
+	if r.Kind != Pending || r.Percent != 12.5 || r.State != "downloading" {
+		t.Fatalf("result = %+v", r)
+	}
+	if strings.Contains(raw, "peers") {
+		t.Errorf("body carries peers: %s", raw)
+	}
+}
+
+func TestEnsureReleaseClassifiesLikeEnsure(t *testing.T) {
+	for code, want := range map[int]Kind{404: Refused, 409: Refused, 503: Unavailable, 507: Refused} {
+		c := serve(t, reply(code, `{"error":"x"}`))
+		if r := c.EnsureRelease(context.Background(), "janit/viiwork", "v2.7.0", nil); r.Kind != want {
+			t.Errorf("%d: %v, want %v", code, r.Kind, want)
+		}
+	}
+	c := New("127.0.0.1:1") // nothing listens on port 1
+	if r := c.EnsureRelease(context.Background(), "janit/viiwork", "v2.7.0", nil); r.Kind != Unavailable {
+		t.Errorf("connection refused: %v", r.Kind)
+	}
+}

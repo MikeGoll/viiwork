@@ -7,6 +7,7 @@ import (
 
 	"github.com/janit/viiwork/v2/internal/supervisor"
 	"github.com/janit/viiwork/v2/mesh/capacity"
+	"github.com/janit/viiwork/v2/meshapi"
 )
 
 var (
@@ -23,6 +24,12 @@ type Config struct {
 	QueueMax     int
 	QueueTimeout time.Duration
 	Now          func() time.Time
+	// Performance enables the scored choice (routing.performance).
+	Performance bool
+	// LocalScore is this node's own score for a model; nil = none.
+	LocalScore func(model string) (overheadMs, msPer1k int, ok bool)
+	// Rand returns a float in [0,1); nil = math/rand/v2. Tests inject it.
+	Rand func() float64
 }
 
 // Target is where a lease runs its request.
@@ -47,6 +54,10 @@ type Request struct {
 	Exclude     map[string]bool // Target.Key() values already tried
 	Forwarded   bool
 	QueueBudget time.Duration // how long Acquire may queue; 0 = QueueTimeout, < 0 = do not queue (Decision 17)
+	// EstK is the prompt's estimated size in thousands of tokens, for the
+	// scored choice's prediction. The entry cannot see any cache, so it
+	// assumes every token is uncached.
+	EstK float64
 }
 
 type resKey struct{ node, model string }
@@ -177,6 +188,14 @@ func (r *Router) pickWithReportsLocked(req Request, reports []capacity.Report) (
 		}
 	}
 
+	if r.c.Performance && !req.Forwarded && req.Host == "" {
+		if l, handled := r.pickScoredLocked(req, backends, localOK && admitting, reports); handled {
+			if l != nil {
+				return l, nil
+			}
+			return nil, ErrNoFreeSlot
+		}
+	}
 	if localOK && admitting && (req.Host == "" || req.Host == r.c.Self) {
 		if l := r.pickLocalLocked(req, backends); l != nil {
 			return l, nil
@@ -221,26 +240,9 @@ func (r *Router) pickPeerLocked(req Request, reports []capacity.Report) *Lease {
 	var tied []capacity.Report
 	best, bestRTT := 0, time.Duration(0)
 	for _, rep := range reports {
-		if rep.Node == r.c.Self || (req.Host != "" && rep.Node != req.Host) || req.Exclude["peer:"+rep.Node] {
-			continue
-		}
-		if !capacity.Fresh(rep, now, r.c.StaleAfter) {
-			continue
-		}
-		mc, has := rep.Model(req.Model)
-		if !has || mc.HealthyBackends <= 0 {
-			continue
-		}
-		key := resKey{rep.Node, req.Model}
-		if at, ok := r.refused[key]; ok {
-			if !rep.Received.After(at) {
-				continue
-			}
-			delete(r.refused, key)
-		}
-		free := mc.Slots - mc.Busy - r.reservedLocked(key, rep.Received)
+		_, free, serves := r.peerFreeLocked(req, rep, now)
 		switch {
-		case free <= 0 || free < best:
+		case !serves || free <= 0 || free < best:
 		case free > best || rep.RTT < bestRTT:
 			best, bestRTT, tied = free, rep.RTT, append(tied[:0], rep)
 		case rep.RTT == bestRTT:
@@ -253,19 +255,56 @@ func (r *Router) pickPeerLocked(req Request, reports []capacity.Report) *Lease {
 	n := r.peerRR[req.Model]
 	r.peerRR[req.Model] = n + 1
 	rep := tied[n%len(tied)]
+	return r.peerLeaseLocked(rep, req.Model, now)
+}
+
+// peerFreeLocked is the one rule for a peer, shared by the most-free and the
+// scored pick. serves reports that rep is another node's fresh report listing
+// the model with a healthy backend: such a peer's score counts toward the
+// fleet median even when it has no room for this request. free is its free
+// slots for this request: 0 when the request excludes it or pins another
+// host, and 0 while a refusal is not older than the report's AsOf (a report
+// requested after the refusal clears the mark); otherwise slots - busy - this
+// router's forwards still in flight that started after the report's AsOf.
+func (r *Router) peerFreeLocked(req Request, rep capacity.Report, now time.Time) (mc meshapi.ModelCapacity, free int, serves bool) {
+	if rep.Node == r.c.Self || !capacity.Fresh(rep, now, r.c.StaleAfter) {
+		return mc, 0, false
+	}
+	mc, has := rep.Model(req.Model)
+	if !has || mc.HealthyBackends <= 0 {
+		return mc, 0, false
+	}
+	if (req.Host != "" && rep.Node != req.Host) || req.Exclude["peer:"+rep.Node] {
+		return mc, 0, true
+	}
 	key := resKey{rep.Node, req.Model}
+	if at, ok := r.refused[key]; ok {
+		// Only a report requested after the refusal can show it lifted:
+		// one received after it may have been built before it.
+		if !rep.AsOf().After(at) {
+			return mc, 0, true
+		}
+		delete(r.refused, key)
+	}
+	return mc, mc.Slots - mc.Busy - r.reservedLocked(key, rep.AsOf()), true
+}
+
+// peerLeaseLocked reserves one slot on rep for model.
+func (r *Router) peerLeaseLocked(rep capacity.Report, model string, now time.Time) *Lease {
+	key := resKey{rep.Node, model}
 	res := &reservation{start: now}
 	r.reservations[key] = append(r.reservations[key], res)
 	return &Lease{r: r, key: key, res: res, target: Target{Node: rep.Node, Addr: rep.APIAddr}}
 }
 
 // reservedLocked counts this router's forwards to (node, model) that are
-// still in flight and started after the report was received: an older one is
-// already in the report's busy count.
-func (r *Router) reservedLocked(key resKey, received time.Time) int {
+// still in flight and started after asOf, the moment the report certainly
+// reflects: an older one is already in the report's busy count, and one that
+// started while the poll was in flight may not be.
+func (r *Router) reservedLocked(key resKey, asOf time.Time) int {
 	n := 0
 	for _, res := range r.reservations[key] {
-		if res.start.After(received) {
+		if res.start.After(asOf) {
 			n++
 		}
 	}

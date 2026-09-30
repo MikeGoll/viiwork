@@ -2,8 +2,8 @@ package config
 
 import (
 	"fmt"
-	"net/url"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/janit/viiwork/v2/internal/engine"
@@ -41,12 +41,20 @@ func PeekUpdate(path string) (stateDir string, enabled bool, err error) {
 // DefaultUpdateSource is where signed releases are downloaded from.
 const DefaultUpdateSource = "https://github.com/janit/viiwork/releases/download"
 
+// UpdateRepo is the GitHub owner/name DefaultUpdateSource names: how a
+// release is identified to viiwork-parrot.
+func UpdateRepo() string {
+	rest := strings.TrimPrefix(DefaultUpdateSource, "https://github.com/")
+	return strings.TrimSuffix(rest, "/releases/download")
+}
+
 // UpdateConfig is how this node takes part in rolling updates. Off by
 // default: a node that has not opted in refuses stage, activate and rollback.
 type UpdateConfig struct {
 	Enabled bool `yaml:"enabled"`
 	// Source is the release download root: <source>/<version>/<asset>. A
-	// request names a version, never a URL.
+	// request names a version, never a URL. Only DefaultUpdateSource is
+	// accepted (validateSource).
 	Source string `yaml:"source"`
 	// ConfirmTimeout bounds how long a newly activated release has to bring
 	// every previously healthy backend back. Zero derives it (ConfirmWindow).
@@ -54,8 +62,8 @@ type UpdateConfig struct {
 }
 
 // PeekSource reads update.source from a config file as leniently as
-// PeekUpdate, the default when it is absent, and refuses one Validate would
-// refuse. The host's engine helper reads it: it verifies releases itself,
+// PeekUpdate, the default when it is absent, and refuses any other value,
+// as Validate does. The host's engine helper reads it: it verifies releases itself,
 // from the same source as the node.
 func PeekSource(path string) (string, error) {
 	b, err := os.ReadFile(path)
@@ -77,6 +85,30 @@ func PeekSource(path string) (string, error) {
 	return src, validateSource(src)
 }
 
+// PeekParrotAPI reads viiwork_parrot.api from a config file as leniently as
+// PeekUpdate, the default when absent, and refuses one Validate would refuse.
+// The host's engine helper reads it to stage through the same parrot as the
+// node.
+func PeekParrotAPI(path string) (string, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	var peek struct {
+		ViiworkParrot struct {
+			API string `yaml:"api"`
+		} `yaml:"viiwork_parrot"`
+	}
+	if err := yaml.Unmarshal(b, &peek); err != nil {
+		return "", err
+	}
+	api := peek.ViiworkParrot.API
+	if api == "" {
+		api = Defaults().ViiworkParrot.API
+	}
+	return api, validParrotAPI(api)
+}
+
 func (c *Config) validateUpdate() error {
 	if err := validateSource(c.Update.Source); err != nil {
 		return err
@@ -87,22 +119,14 @@ func (c *Config) validateUpdate() error {
 	return nil
 }
 
+// validateSource accepts only DefaultUpdateSource. A release is signed, so
+// another host could not smuggle code in, but it could choose which signed
+// releases the fleet sees, withhold them or watch the fleet ask: releases
+// come from GitHub and nowhere else. The key stays because operator keys are
+// frozen, and a trailing slash is forgiven.
 func validateSource(src string) error {
-	u, err := url.Parse(src)
-	if err != nil || u.Host == "" || u.RawQuery != "" || u.Fragment != "" {
-		return fmt.Errorf("update.source %q must be an https URL with no query", src)
-	}
-	switch u.Scheme {
-	case "https":
-	case "http":
-		// Only a test server on this machine. A release is signed, so http
-		// could not smuggle code in, but anyone on the path could withhold
-		// or observe the fleet's updates.
-		if h := u.Hostname(); h != "127.0.0.1" && h != "localhost" && h != "::1" {
-			return fmt.Errorf("update.source %q: http is allowed only for a loopback host", src)
-		}
-	default:
-		return fmt.Errorf("update.source %q must be an https URL", src)
+	if strings.TrimSuffix(src, "/") != DefaultUpdateSource {
+		return fmt.Errorf("update.source %q: releases are downloaded only from %s (remove the key)", src, DefaultUpdateSource)
 	}
 	return nil
 }

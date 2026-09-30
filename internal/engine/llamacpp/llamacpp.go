@@ -54,6 +54,13 @@ func New() *Engine {
 
 func (e *Engine) Name() string { return Name }
 
+// UsageReporting: llama-server always carries cached_tokens in usage; on
+// 2,436 overnight requests prompt_tokens-cached_tokens equalled timings.prompt_n
+// (performance-routing spike §1).
+func (e *Engine) UsageReporting() engine.UsageReporting {
+	return engine.UsageReporting{Unasked: false, CachedTokens: true}
+}
+
 // DefaultStartupTimeout is the spec's 10 minutes. Large split models on slow
 // risers need more, set per model with startup_timeout.
 func (e *Engine) DefaultStartupTimeout() time.Duration { return 10 * time.Minute }

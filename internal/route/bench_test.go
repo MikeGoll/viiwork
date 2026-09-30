@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/janit/viiwork/v2/internal/perf"
 	"github.com/janit/viiwork/v2/meshapi"
 )
 
@@ -69,5 +70,52 @@ func BenchmarkDispatchManyWaiters(b *testing.B) {
 	}
 	if got := r.QueueLen("m"); got != 264 {
 		b.Fatalf("queue = %d, want every waiter still queued", got)
+	}
+}
+
+// BenchmarkPickScored is BenchmarkPick with every host scored. The scored
+// choice must allocate nothing beyond BenchmarkPick's lease.
+func BenchmarkPickScored(b *testing.B) {
+	benchPickScored(b, func(string) (int, int, bool) { return 400, 3000, true })
+}
+
+// BenchmarkPickScoredTracker is BenchmarkPickScored with this node's score
+// read from a real perf.Tracker holding a window of samples, as the node
+// wires it: every scored pick asks for it under the router mutex, so a
+// steady-state cache hit must add no allocation either.
+func BenchmarkPickScoredTracker(b *testing.B) {
+	tr := perf.New(time.Now)
+	now := time.Now()
+	for i := 0; i < 20; i++ {
+		tr.Record("m1", now, 100, 400*time.Millisecond)
+		tr.Record("m1", now, 4000, 12400*time.Millisecond)
+	}
+	benchPickScored(b, func(model string) (int, int, bool) {
+		s, ok := tr.Score(model)
+		return s.OverheadMs, s.MsPer1k, ok
+	})
+}
+
+func benchPickScored(b *testing.B, localScore func(string) (int, int, bool)) {
+	local := newFakeLocal()
+	for i := 0; i < 4; i++ {
+		local.add("m1", newFakeBackend(fmt.Sprintf("m1/%d", i), 2))
+	}
+	reports := &fakeReports{}
+	now := time.Now()
+	for n := 0; n < 10; n++ {
+		reports.reports = append(reports.reports, report(fmt.Sprintf("peer%d", n), now, time.Millisecond,
+			meshapi.ModelCapacity{Name: "m1", Slots: 4, Busy: 1, HealthyBackends: 2, TTFTOverheadMs: 400, PrefillMsPer1k: 1000 + 100*n}))
+	}
+	r := New(Config{Self: "self", Local: local, Remote: reports, StaleAfter: time.Hour, QueueMax: 64, QueueTimeout: time.Second,
+		Performance: true, LocalScore: localScore})
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		l, err := r.Pick(Request{Model: "m1", EstK: 4})
+		if err != nil {
+			b.Fatal(err)
+		}
+		l.Release()
 	}
 }

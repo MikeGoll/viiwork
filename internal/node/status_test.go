@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/janit/viiwork/v2/internal/gpu"
+	"github.com/janit/viiwork/v2/internal/perf"
 	"github.com/janit/viiwork/v2/internal/proxy"
 	"github.com/janit/viiwork/v2/meshapi"
 )
@@ -55,6 +56,9 @@ func statusFixture() StatusSources {
 			}
 			return proxy.ModelCounters{}
 		},
+		Perf: func(m string) (perf.Score, bool) {
+			return perf.Score{OverheadMs: 400, MsPer1k: 5100, Samples: 7, Baseline: true, BaselineAge: 90 * time.Second}, m == "a"
+		},
 		GPUs:          fakeGPUs{{GPUID: 1, Utilization: 10, VRAMUsedMB: 100, VRAMTotalMB: 16000, PowerW: 20}, {GPUID: 0, Utilization: 90, VRAMUsedMB: 15000, VRAMTotalMB: 16000, PowerW: 150}},
 		Inventory:     []gpu.Identity{{Index: 0, UUID: "GPU-aaaa", Name: "Test Card"}},
 		Vendor:        gpu.VendorNVIDIA,
@@ -77,6 +81,12 @@ func TestBuildStatusFull(t *testing.T) {
 	}
 	if len(st.Models) != 2 || st.Models[0].Queued != 2 || st.Models[0].RequestsTotal != 5 || st.Models[0].TokensTotal != 120 || st.Models[1].Queued != 0 {
 		t.Errorf("S1 models: %+v", st.Models)
+	}
+	if p := st.Models[0].Perf; p == nil || p.OverheadMs != 400 || p.MsPer1k != 5100 || p.Samples != 7 || p.BaselineAgeS != 90 {
+		t.Errorf("S1 perf = %+v", p)
+	}
+	if st.Models[1].Perf != nil {
+		t.Errorf("S1 perf for an unscored model = %+v, want absent", st.Models[1].Perf)
 	}
 	if len(st.GPUs) != 2 || st.GPUs[0].Index != 0 || st.GPUs[0].UUID != "GPU-aaaa" || st.GPUs[0].Name != "Test Card" || st.GPUs[0].Util != 90 || st.GPUs[0].PowerW != 150 ||
 		st.GPUs[1].Index != 1 || st.GPUs[1].UUID != "" || st.GPUs[0].Vendor != "nvidia" || st.GPUs[1].Vendor != "nvidia" {

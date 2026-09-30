@@ -151,6 +151,12 @@ models:
   #   gpus: [3]
   #   context: 16384
 
+# routing:
+#   # Route by each host's measured time to first token. Hosts measure
+#   # themselves and publish the score; with no scores yet, routing is local
+#   # first, then the member with the most free slots. Default true.
+#   performance: true
+
 # viiwork_parrot:
 #   api: 127.0.0.1:7950   # loopback only
 
@@ -160,5 +166,5 @@ power:
 # Rolling updates (docs/releases.md). Off unless enabled.
 # update:
 #   enabled: true
-#   source: https://github.com/janit/viiwork/releases/download
+#   source: https://github.com/janit/viiwork/releases/download   # the only value accepted
 #   confirm_timeout: 0     # 0 = sum of the models' startup timeouts + 10m

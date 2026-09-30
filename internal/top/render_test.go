@@ -217,3 +217,15 @@ func TestModelSort(t *testing.T) {
 		t.Error("sort cycle")
 	}
 }
+
+func TestHostLineShowsThePerformanceScore(t *testing.T) {
+	m := meshapi.ModelStatus{Name: "qwen", Slots: 10, Busy: 2, Perf: &meshapi.PerfScore{OverheadMs: 400, MsPer1k: 5100, Samples: 7}}
+	got := modelSummary(m)
+	if !strings.Contains(got, "qwen 2/10") || !strings.Contains(got, "5.1s/1k") {
+		t.Fatalf("summary %q, want slots and the prefill rate", got)
+	}
+	m.Perf = nil
+	if strings.Contains(modelSummary(m), "/1k") {
+		t.Fatal("no score, no rate: absent is not zero")
+	}
+}

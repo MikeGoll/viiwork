@@ -2,6 +2,7 @@ package update
 
 import (
 	"encoding/json"
+	"github.com/janit/viiwork/v2/internal/update/updatetest"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -36,7 +37,7 @@ func (a allow) Authorize(*http.Request, []byte) (int, string, bool) {
 func service(t *testing.T, enabled bool, auth Authorizer) (*Service, *atomic.Int32) {
 	t.Helper()
 	dir := t.TempDir()
-	src, pub := fakeRelease(t, "v2.6.0", releaseOpts{})
+	src, pub := fakeRelease(t, "v2.6.0", updatetest.Opts{})
 	restarts := &atomic.Int32{}
 	return &Service{
 		Enabled: enabled, Running: "v2.5.0", Store: NewStore(dir), Auth: auth,

@@ -361,9 +361,19 @@ func ramText(st *meshapi.NodeStatus) string {
 func modelsText(ms []meshapi.ModelStatus) string {
 	parts := make([]string, 0, len(ms))
 	for _, m := range ms {
-		parts = append(parts, fmt.Sprintf("%s %d/%d", m.Name, m.Busy, m.Slots))
+		parts = append(parts, modelSummary(m))
 	}
 	return strings.Join(parts, " · ")
+}
+
+// modelSummary is "name busy/slots", plus the prefill rate when the host
+// publishes a performance score.
+func modelSummary(m meshapi.ModelStatus) string {
+	s := fmt.Sprintf("%s %d/%d", m.Name, m.Busy, m.Slots)
+	if m.Perf != nil && m.Perf.MsPer1k > 0 {
+		s += fmt.Sprintf(" %.1fs/1k", float64(m.Perf.MsPer1k)/1000)
+	}
+	return s
 }
 
 // modelRow is one model's totals across alive members. ctx is the smallest

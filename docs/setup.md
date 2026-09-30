@@ -10,7 +10,17 @@ under a user LaunchAgent: see [On a Mac](#on-a-mac).
 
 ## Before you start
 
-**Linux:**
+**Linux, AMD Radeon VII, MI50 or MI60 (gfx906)** — the reference fleet:
+
+- The in-kernel `amdgpu` driver (`/dev/kfd` exists). No ROCm on the host: the
+  wizard reads the cards from the kernel's KFD topology, and ROCm 6.2.4 is in
+  the image.
+- Docker Engine with the Compose v2 plugin.
+- A checkout of the release to build the ROCm image from: gfx906 has no
+  published image, so the wizard writes the config and you start the node; see
+  [When it writes the config only](#when-it-writes-the-config-only).
+
+**Linux, NVIDIA:**
 
 - An NVIDIA GPU with its driver (`nvidia-smi` works).
 - Docker Engine with the Compose v2 plugin (`docker compose version` works).
@@ -20,7 +30,7 @@ under a user LaunchAgent: see [On a Mac](#on-a-mac).
   register its runtime with `sudo nvidia-ctk runtime configure
   --runtime=docker` and restart Docker.
 
-An AMD card works too, but you start its node by hand; see
+Other AMD cards are found too, but no image is verified for them yet; see
 [When it writes the config only](#when-it-writes-the-config-only). A machine
 with no supported GPU is refused.
 
@@ -188,12 +198,19 @@ sudo docker kill -s HUP viiwork                                   # Linux
 launchctl kill HUP gui/$(id -u)/fi.viiwork.node                   # Mac
 ```
 
-If the node itself is not running, start it again:
+To stop the node and every model it runs, and to start it again:
 
 ```sh
-sudo docker compose -f /etc/viiwork/docker-compose.yaml -p viiwork up -d   # Linux
-launchctl kickstart -k gui/$(id -u)/fi.viiwork.node                        # Mac
+sudo viiwork stop     # Linux; `viiwork stop` on a Mac, without sudo
+sudo viiwork start
 ```
+
+`stop` leaves the mesh first and finishes in-flight requests, so other members
+take the traffic, and returns once the node's API has gone quiet. On Linux it
+also stops the engine helper, which could otherwise bring the container back.
+The node stays stopped until `viiwork start`, or the next boot (Linux) or
+login (Mac). Only this machine is stopped. Both commands work from the install
+manifest, so a host set up by hand is stopped the way it was started.
 
 To start over, `viiwork uninstall` (with `sudo` on Linux) removes everything
 in the manifest and nothing else.

@@ -9,6 +9,7 @@ import (
 	"github.com/janit/viiwork/v2/internal/cost"
 	"github.com/janit/viiwork/v2/internal/gpu"
 	"github.com/janit/viiwork/v2/internal/hostinfo"
+	"github.com/janit/viiwork/v2/internal/perf"
 	"github.com/janit/viiwork/v2/internal/power"
 	"github.com/janit/viiwork/v2/internal/proxy"
 	"github.com/janit/viiwork/v2/meshapi"
@@ -50,6 +51,7 @@ type StatusSources struct {
 	Models        func() []meshapi.ModelStatus // Supervisor.Status
 	QueueLen      func(model string) int       // Router.QueueLen
 	Counters      func(model string) proxy.ModelCounters
+	Perf          func(model string) (perf.Score, bool)
 	GPUs          gpuLatest // nil = none
 	Inventory     []gpu.Identity
 	Vendor        gpu.Vendor
@@ -120,6 +122,11 @@ func BuildStatus(s StatusSources) meshapi.NodeStatus {
 			if s.Counters != nil {
 				c := s.Counters(m.Name)
 				m.RequestsTotal, m.TokensTotal = c.Requests, c.Tokens
+			}
+			if s.Perf != nil {
+				if sc, ok := s.Perf(m.Name); ok {
+					m.Perf = &meshapi.PerfScore{OverheadMs: sc.OverheadMs, MsPer1k: sc.MsPer1k, Samples: sc.Samples, BaselineAgeS: int64(sc.BaselineAge / time.Second)}
+				}
 			}
 			st.Models = append(st.Models, m)
 		}

@@ -163,6 +163,7 @@ type runOpts struct {
 	files    map[string]string
 	dialLog  *[]string // when set, every dial is recorded and sent to redirect
 	redirect string
+	plist    string // Env.Plist
 }
 
 func run(t *testing.T, o runOpts, args ...string) result {
@@ -187,6 +188,7 @@ func run(t *testing.T, o runOpts, args ...string) result {
 		},
 		Hostname: func() (string, error) { return "testhost", nil },
 		Client:   client,
+		Plist:    o.plist,
 		ReadFile: func(p string) ([]byte, error) {
 			if s, ok := o.files[p]; ok {
 				return []byte(s), nil
@@ -257,6 +259,20 @@ func TestCLISet(t *testing.T) {
 		node.secret = testSecret
 		env := map[string]string{"VIIWORK_MESH_SECRET": base64.StdEncoding.EncodeToString(testSecret)}
 		r := run(t, runOpts{env: env}, "set", "stable-coder", "Qwen3.8-27B", "--node", nodeAddr(node), "--wait=false")
+		if w := node.writes(); r.code != 0 || len(w) != 1 || w[0].signer != "viiwork-cli@testhost" {
+			t.Errorf("exit %d, writes %+v, stderr %q", r.code, w, r.stderr)
+		}
+	})
+
+	// A Mac install keeps the secret in its LaunchAgent, not the shell:
+	// alias signs from there as update does.
+	t.Run("C3 signed from the LaunchAgent", func(t *testing.T) {
+		node := newFakeNode(t)
+		node.secret = testSecret
+		plist := "/Users/u/Library/LaunchAgents/fi.viiwork.node.plist"
+		body := `<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict><key>EnvironmentVariables</key><dict>` +
+			"<key>VIIWORK_MESH_SECRET</key><string>" + base64.StdEncoding.EncodeToString(testSecret) + "</string></dict></dict></plist>"
+		r := run(t, runOpts{files: map[string]string{plist: body}, plist: plist}, "set", "stable-coder", "Qwen3.8-27B", "--node", nodeAddr(node), "--wait=false")
 		if w := node.writes(); r.code != 0 || len(w) != 1 || w[0].signer != "viiwork-cli@testhost" {
 			t.Errorf("exit %d, writes %+v, stderr %q", r.code, w, r.stderr)
 		}

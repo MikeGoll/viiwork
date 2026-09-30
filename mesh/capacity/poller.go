@@ -30,8 +30,21 @@ type Report struct {
 	Node     string
 	APIAddr  string
 	Received time.Time
-	RTT      time.Duration // EWMA of successful polls
-	Models   []meshapi.ModelCapacity
+	// Sent is when the poll that fetched it was sent. The peer built the
+	// report somewhere between Sent and Received, so only Sent bounds what
+	// it can already reflect.
+	Sent   time.Time
+	RTT    time.Duration // EWMA of successful polls
+	Models []meshapi.ModelCapacity
+}
+
+// AsOf is the latest moment the report certainly reflects: when its poll was
+// sent, or when it was received for a report that does not say.
+func (r Report) AsOf() time.Time {
+	if r.Sent.IsZero() {
+		return r.Received
+	}
+	return r.Sent
 }
 
 // Model returns the report's entry for name.
@@ -88,7 +101,7 @@ func decodeReport(body []byte, f Fetch) (string, Report, error) {
 	if rtt <= 0 {
 		rtt = time.Nanosecond
 	}
-	return cr.Node, Report{Node: f.Node, APIAddr: f.APIAddr, Received: f.Received, RTT: rtt, Models: cr.Models}, nil
+	return cr.Node, Report{Node: f.Node, APIAddr: f.APIAddr, Received: f.Received, Sent: f.Start, RTT: rtt, Models: cr.Models}, nil
 }
 
 func smoothRTT(prev, next Report) Report {

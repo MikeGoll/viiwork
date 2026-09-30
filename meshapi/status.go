@@ -54,6 +54,7 @@ type ModelStatus struct {
 	Ctx           int64           `json:"ctx"`
 	RequestsTotal uint64          `json:"requests_total,omitempty"`
 	TokensTotal   uint64          `json:"tokens_total,omitempty"`
+	Perf          *PerfScore      `json:"perf,omitempty"` // v2.7; nil = no score
 	Backends      []BackendStatus `json:"backends"`
 }
 
@@ -95,4 +96,13 @@ type CostBreakdown struct {
 	TaxCentsKWh      float64 `json:"tax_cents_kwh"`
 	VATPercent       float64 `json:"vat_percent"`
 	TotalCentsKWh    float64 `json:"total_cents_kwh"`
+}
+
+// PerfScore is a model's measured time to first token on this node, as
+// /v1/status shows it. The router reads the flat fields on ModelCapacity.
+type PerfScore struct {
+	OverheadMs   int   `json:"overhead_ms"`
+	MsPer1k      int   `json:"prefill_ms_per_1k"`
+	Samples      int   `json:"samples,omitempty"`
+	BaselineAgeS int64 `json:"baseline_age_s,omitempty"`
 }
