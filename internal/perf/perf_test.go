@@ -51,9 +51,10 @@ func TestWindowEstimate(t *testing.T) {
 	if s.Samples != 7 {
 		t.Errorf("samples = %d, want 7", s.Samples)
 	}
-	// overhead = median of small = 900; rate = sum(ttft-900)/sum(k) = (20400-900)/4 = 4875 -> 4900
-	if s.OverheadMs != 900 || s.MsPer1k != 4900 {
-		t.Errorf("score = %+v, want overhead 900, rate 4900", s)
+	// The small samples' 100 tokens of prefill (500 ms) are not overhead: the
+	// fit takes them off, so it recovers what feed put in, 400 and 5000.
+	if s.OverheadMs != 400 || s.MsPer1k != 5000 {
+		t.Errorf("score = %+v, want overhead 400, rate 5000", s)
 	}
 }
 
@@ -175,5 +176,73 @@ func TestSetKeysForgetsRemovedModels(t *testing.T) {
 	tr.SetKeys(map[string]string{})
 	if _, ok := tr.Score("m"); ok {
 		t.Fatal("a model no longer configured keeps no score")
+	}
+}
+
+// 2026-10-03: gb2 and gb3, identical pairs, published 5.1 s and 2.1 s of
+// overhead because their short prompts differed in size. Two hosts with the
+// same overhead and rate publish the same score whatever their prompt mix.
+func TestOverheadDoesNotCountSmallPromptPrefill(t *testing.T) {
+	score := func(smallTokens int64) Score {
+		c := &clock{t0}
+		tr := New(c.now)
+		feed(tr, c, "m", 6, smallTokens, 2000, 7000)
+		feed(tr, c, "m", 6, 20000, 2000, 7000)
+		s, ok := tr.Score("m")
+		if !ok {
+			t.Fatal("no score")
+		}
+		return s
+	}
+	a, b := score(50), score(450)
+	if a.OverheadMs != 2000 || b.OverheadMs != 2000 || a.MsPer1k != 7000 || b.MsPer1k != 7000 {
+		t.Errorf("50-token prompts give %+v, 450-token prompts %+v; both hosts are 2000 + 7000/1k", a, b)
+	}
+}
+
+// 2026-10-03: one request on gb1 waited 130 s with a short uncached prompt,
+// and with few samples it became gb1's overhead and then its baseline.
+func TestOneSlowRequestDoesNotSetTheScore(t *testing.T) {
+	c := &clock{t0}
+	tr := New(c.now)
+	feed(tr, c, "m", 5, 100, 4000, 6000)
+	feed(tr, c, "m", 5, 20000, 4000, 6000)
+	tr.Score("m")                   // the window becomes the baseline
+	c.t = c.t.Add(11 * time.Minute) // the window empties; the baseline stays
+	if s, _ := tr.Score("m"); s.OverheadMs != 4000 || s.MsPer1k != 6000 {
+		t.Fatalf("baseline %+v, want 4000 + 6000/1k", s)
+	}
+
+	feed(tr, c, "m", 1, 100, 130000, 0) // one small sample, 130 s
+	if s, _ := tr.Score("m"); s.OverheadMs != 4000 {
+		t.Errorf("overhead %d after one slow small sample; fewer than %d small samples keep the baseline's", s.OverheadMs, MinSmall)
+	}
+
+	// A big outlier among normal big samples moves the median, not the score.
+	feed(tr, c, "m", 6, 20000, 4000, 6000)
+	feed(tr, c, "m", 1, 20000, 130000, 6000)
+	s, _ := tr.Score("m")
+	if s.MsPer1k != 6000 {
+		t.Errorf("rate %d with one 130 s outlier among seven; want 6000", s.MsPer1k)
+	}
+	if s.OverheadMs != 4000 {
+		t.Errorf("overhead %d; the new baseline keeps the old overhead without %d small samples", s.OverheadMs, MinSmall)
+	}
+}
+
+// Five samples used to replace the baseline whatever their size. Only K big
+// samples measure a rate worth keeping.
+func TestSmallSamplesDoNotReplaceTheBaseline(t *testing.T) {
+	c := &clock{t0}
+	tr := New(c.now)
+	feed(tr, c, "m", 5, 20000, 0, 5000)
+	tr.Score("m")
+	c.t = c.t.Add(11 * time.Minute)
+	feed(tr, c, "m", 4, 100, 0, 5000)
+	feed(tr, c, "m", 1, 20000, 0, 9000)
+	tr.Score("m")
+	c.t = c.t.Add(11 * time.Minute) // only the baseline is left
+	if s, _ := tr.Score("m"); s.MsPer1k != 5000 {
+		t.Errorf("baseline rate %d; one big sample among five must not replace 5000", s.MsPer1k)
 	}
 }

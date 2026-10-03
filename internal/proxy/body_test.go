@@ -134,10 +134,27 @@ func TestExtractPromptText(t *testing.T) {
 		t.Errorf("completion prompt = %q, want p", got)
 	}
 	// Agent clients (pi) send content as parts; image parts carry no text.
-	parts := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"a"},{"type":"image_url","image_url":{"url":"x"}},{"type":"text","text":"b"}]},` +
-		`{"role":"assistant","content":null,"tool_calls":[{"id":"1"}]},{"role":"tool","content":"r"}]}`)
+	parts := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"a"},{"type":"image_url","image_url":{"url":"x"}},{"type":"text","text":"b"}]}]}`)
 	if got := extractPromptText(parts); got != "a\nb" {
 		t.Errorf("content parts = %q, want a\\nb", got)
+	}
+	// A coding agent's turn: the task, then a tool round trip. The prompt is
+	// the turn's tool results, named by the calls they answer, not the task.
+	agent := []byte(`{"messages":[{"role":"system","content":"sys"},{"role":"user","content":[{"type":"text","text":"build the app"}]},` +
+		`{"role":"assistant","content":null,"tool_calls":[{"id":"c1","function":{"name":"read","arguments":"{}"}},{"id":"c2","function":{"name":"bash","arguments":"{}"}}]},` +
+		`{"role":"tool","tool_call_id":"c1","content":"file text"},{"role":"tool","tool_call_id":"c2","content":[{"type":"text","text":"ok"}]}]}`)
+	if got, want := extractPromptText(agent), "[tool result: read]\nfile text\n\n[tool result: bash]\nok"; got != want {
+		t.Errorf("agent turn = %q, want %q", got, want)
+	}
+	// A user steering message in the same turn keeps its place, labelled.
+	steer := []byte(`{"messages":[{"role":"user","content":"task"},{"role":"assistant","tool_calls":[{"id":"c1","function":{"name":"read"}}]},` +
+		`{"role":"tool","tool_call_id":"c1","content":"r"},{"role":"user","content":"stop"}]}`)
+	if got, want := extractPromptText(steer), "[tool result: read]\nr\n\n[user]\nstop"; got != want {
+		t.Errorf("steered turn = %q, want %q", got, want)
+	}
+	// Nothing after the last assistant message: the last user message.
+	if got := extractPromptText([]byte(`{"messages":[{"role":"user","content":"q"},{"role":"assistant","content":"a"}]}`)); got != "q" {
+		t.Errorf("no new input = %q, want q", got)
 	}
 	// A content shape it cannot read leaves that message empty, not the body.
 	odd := []byte(`{"messages":[{"role":"user","content":"first"},{"role":"user","content":{"weird":1}}]}`)

@@ -25,6 +25,12 @@ const (
 	BigTokens = 512
 	// maxPerBucket bounds memory on a very busy minute.
 	maxPerBucket = 256
+	// MinSmall is how many small samples the window needs before its overhead
+	// replaces the baseline's: one slow request is not a host's overhead.
+	MinSmall = 3
+	// fitRounds refines overhead and rate against each other; three rounds
+	// settle well inside the two significant figures a score is published at.
+	fitRounds = 3
 )
 
 type sample struct {
@@ -48,7 +54,9 @@ type model struct {
 	buckets []bucket
 	base    *baseline
 	key     string
-	scratch []float64 // window's small-sample buffer, reused
+	small   []sample // window's buffers, reused
+	big     []sample
+	scratch []float64
 
 	// The computed score, valid while cached is true and the minute is
 	// cacheMin: the window only changes on a Record, on SetKeys or Load, and
@@ -138,38 +146,67 @@ func (m *model) expire(now time.Time) {
 }
 
 // window is the estimate over the current buckets. hasRate is false when no
-// sample of BigTokens or more exists.
-func (m *model) window() (overhead, rate float64, n int, hasRate bool) {
-	small := m.scratch[:0]
-	var bigTTFT, bigK float64
+// sample of BigTokens or more exists; nBig counts those samples, and ovOK says
+// the overhead came from MinSmall or more of the window's own small samples.
+//
+// Overhead is the median small-sample TTFT after taking off each sample's own
+// prefill, and rate the median big-sample rate after taking off the overhead;
+// each needs the other, so they are refined together from the baseline (or
+// zero). Until 2026-10-03 overhead was the raw median of small samples, which
+// counted up to 511 tokens of prefill as overhead: two identical gb pairs
+// published 2.1 s and 5.1 s by the size of their short prompts alone, and the
+// band then ruled on that. Medians rather than sums, because one request that
+// waited 130 s (gb1, the same day) must not set a host's score.
+func (m *model) window() (overhead, rate float64, n, nBig int, hasRate, ovOK bool) {
+	small, big := m.small[:0], m.big[:0]
 	for _, b := range m.buckets {
 		for _, s := range b.samples {
 			n++
 			if s.uncached < BigTokens {
-				small = append(small, s.ttftMs)
+				small = append(small, s)
+			} else {
+				big = append(big, s)
 			}
 		}
 	}
-	m.scratch = small[:0]
-	switch {
-	case len(small) > 0:
-		sort.Float64s(small)
-		overhead = small[len(small)/2]
-	case m.base != nil:
-		overhead = m.base.OverheadMs
+	m.small, m.big = small[:0], big[:0]
+	nBig, hasRate = len(big), len(big) > 0
+	if m.base != nil {
+		overhead, rate = m.base.OverheadMs, m.base.MsPer1k
 	}
-	for _, b := range m.buckets {
-		for _, s := range b.samples {
-			if s.uncached >= BigTokens {
-				bigTTFT += math.Max(s.ttftMs-overhead, 0)
-				bigK += float64(s.uncached) / 1000
+	ovOK = len(small) >= MinSmall || (m.base == nil && len(small) > 0)
+	for round := 0; round < fitRounds; round++ {
+		if ovOK {
+			xs := m.scratch[:0]
+			for _, s := range small {
+				xs = append(xs, math.Max(s.ttftMs-rate*float64(s.uncached)/1000, 0))
 			}
+			overhead = median(xs)
+			m.scratch = xs[:0]
+		}
+		if hasRate {
+			xs := m.scratch[:0]
+			for _, s := range big {
+				xs = append(xs, math.Max(s.ttftMs-overhead, 0)/(float64(s.uncached)/1000))
+			}
+			rate = median(xs)
+			m.scratch = xs[:0]
+		}
+		if !ovOK || !hasRate {
+			break // nothing left to refine against
 		}
 	}
-	if bigK > 0 {
-		rate, hasRate = bigTTFT/bigK, true
+	if !hasRate && m.base == nil {
+		rate = 0
 	}
-	return overhead, rate, n, hasRate
+	ovOK = ovOK && len(small) >= MinSmall
+	return overhead, rate, n, nBig, hasRate, ovOK
+}
+
+// median sorts xs in place.
+func median(xs []float64) float64 {
+	sort.Float64s(xs)
+	return xs[len(xs)/2]
 }
 
 // Score is the published score for a model; false when there is nothing to
@@ -206,10 +243,16 @@ func (t *Tracker) Score(name string) (Score, bool) {
 // compute recomputes the cached score as of now.
 func (m *model) compute(now time.Time) {
 	m.expire(now)
-	ov, rate, n, hasRate := m.window()
-	m.rebase = hasRate && n >= K
+	ov, rate, n, nBig, hasRate, ovOK := m.window()
+	// Only K big samples make a new baseline, and its overhead is the old
+	// one's unless MinSmall small samples measured a new one.
+	m.rebase = hasRate && nBig >= K
 	if m.rebase {
-		m.base = &baseline{OverheadMs: ov, MsPer1k: rate, At: now, Key: m.key}
+		bov := ov
+		if !ovOK && m.base != nil {
+			bov = m.base.OverheadMs
+		}
+		m.base = &baseline{OverheadMs: bov, MsPer1k: rate, At: now, Key: m.key}
 	}
 	m.cacheHas = true
 	switch {

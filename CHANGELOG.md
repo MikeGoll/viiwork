@@ -1,5 +1,44 @@
 # Changelog
 
+## v2.7.0-beta5
+
+**A session stays on its warm cache, across hosts and inside one.** A test on
+two identical hosts, gb2 and gb3, had 16 coding-agent sessions all entering
+through gb2. 12% of turns crossed to the other host and 7% moved to another
+backend on the same host, and nearly all of those turns started on a cold KV
+cache. Mean time to first token was 25.0 s, against 13.7 s for 8 sessions on
+gb2 alone.
+
+- **The session's host comes first.** In beta3 and beta4 the entry node served
+  any request it had a free slot for, before looking at the session. Any free
+  slot on gb2 pulled back a session whose cache was on gb3. Now a request with
+  `X-Session-Affinity` or `X-Session-Id` goes to its session's host in the
+  band, this node included. A request without a session is served locally if
+  this node is in the band, as before.
+- **A session keeps its backend.** Inside a node, the backend used to be the
+  one with the most free slots. Now a session returns to the same backend
+  while it has a free slot, chosen the same way as the host. A forwarded turn
+  carries the session too, so it lands on the same backend on the receiving
+  host.
+
+**Scores are steadier.** Two identical hosts published 2.1 s and 5.1 s of
+fixed overhead, and on another host one slow request became the score.
+
+- **A short prompt's prefill is not overhead.** Overhead was the median time
+  to first token of prompts under 512 uncached tokens, prefill included: up to
+  3.5 s on a Radeon VII pair. Each sample's own prefill is now taken off, and
+  overhead and rate are fitted against each other.
+- **Medians, and enough samples.** The rate is a median rather than a ratio
+  of sums. The window's overhead needs at least three short samples, and only
+  five long samples replace the saved baseline. A single 130 s request no
+  longer sets a host's score.
+
+**The prompt history shows what a turn added.** For a coding agent's turn the
+prompt page showed the original task, the same on every turn. It now shows
+the turn's new input: each tool result, labelled with the tool it answers,
+and any user message sent in the same turn. A chat turn still shows its user
+message.
+
 ## v2.7.0-beta4
 
 **The prompt history records coding-agent turns.** Requests from agent

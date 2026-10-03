@@ -461,3 +461,79 @@ func TestSupervisorModels(t *testing.T) {
 		t.Error("an empty supervisor serves no model")
 	}
 }
+
+// The same within a node: four pairs on one host, and the most-free pick
+// moved 7% of a session's turns to another backend's cold cache. A session
+// keeps its backend while that backend has a free slot.
+func TestSessionKeepsItsLocalBackend(t *testing.T) {
+	local := newFakeLocal()
+	bs := []*fakeBackend{newFakeBackend("m/0", 2), newFakeBackend("m/1", 2), newFakeBackend("m/2", 2), newFakeBackend("m/3", 2)}
+	local.add("m", bs...)
+	r := New(Config{Self: "self", Local: local, Remote: &fakeReports{}, StaleAfter: time.Hour, QueueMax: 8,
+		QueueTimeout: time.Second, Now: func() time.Time { return t0 }})
+	req := Request{Model: "m", SessionKey: 0xfeedface}
+	l, err := r.Pick(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	home := l.Target().BackendID
+	l.Release()
+
+	// Load every other backend less than home, so most-free would move it.
+	for _, b := range bs {
+		if b.id == home {
+			b.Acquire()
+		}
+	}
+	for i := 0; i < 5; i++ {
+		l, err := r.Pick(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if l.Target().BackendID != home {
+			t.Fatalf("pick %d went to %s; the session's backend %s still has a free slot", i, l.Target().BackendID, home)
+		}
+		l.Release()
+	}
+
+	// Full: the session takes another backend, and returns once home frees.
+	for _, b := range bs {
+		if b.id == home {
+			b.Acquire()
+		}
+	}
+	l, err = r.Pick(req)
+	if err != nil || l.Target().BackendID == home {
+		t.Fatalf("got %+v %v; a full backend is never picked", l, err)
+	}
+	l.Release()
+	for _, b := range bs {
+		if b.id == home {
+			b.Release()
+		}
+	}
+	l, _ = r.Pick(req)
+	if l.Target().BackendID != home {
+		t.Fatalf("picked %s; once %s has a free slot the session returns", l.Target().BackendID, home)
+	}
+}
+
+// Sessions spread over a node's backends rather than piling onto one.
+func TestSessionsSpreadOverLocalBackends(t *testing.T) {
+	local := newFakeLocal()
+	local.add("m", newFakeBackend("m/0", 64), newFakeBackend("m/1", 64), newFakeBackend("m/2", 64), newFakeBackend("m/3", 64))
+	r := New(Config{Self: "self", Local: local, Remote: &fakeReports{}, StaleAfter: time.Hour, QueueMax: 8,
+		QueueTimeout: time.Second, Now: func() time.Time { return t0 }})
+	seen := map[string]int{}
+	for k := uint64(1); k <= 64; k++ {
+		l, err := r.Pick(Request{Model: "m", SessionKey: k * 0x9e3779b97f4a7c15})
+		if err != nil {
+			t.Fatal(err)
+		}
+		seen[l.Target().BackendID]++
+		l.Release()
+	}
+	if len(seen) != 4 {
+		t.Fatalf("spread %v; 64 sessions must reach all four backends", seen)
+	}
+}

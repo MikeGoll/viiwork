@@ -63,10 +63,10 @@ func TestScoreReflectsANewRecord(t *testing.T) {
 	if s, _ := tr.Score("m"); s.Samples != 2 {
 		t.Fatalf("samples = %d, want 2", s.Samples)
 	}
-	feed(tr, c, "m", 1, 2000, 0, 2000)
+	feed(tr, c, "m", 3, 2000, 0, 2000) // the median moves to 2000
 	s, _ := tr.Score("m")
-	if s.Samples != 3 || s.MsPer1k != 4000 {
-		t.Errorf("after a record: %+v, want 3 samples at 4000", s)
+	if s.Samples != 5 || s.MsPer1k != 2000 {
+		t.Errorf("after a record: %+v, want 5 samples at 2000", s)
 	}
 }
 

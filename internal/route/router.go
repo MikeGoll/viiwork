@@ -216,11 +216,21 @@ func (r *Router) pickWithReportsLocked(req Request, reports []capacity.Report) (
 func (r *Router) pickLocalLocked(req Request, backends []LocalBackend) *Lease {
 	var tied []LocalBackend
 	best := 0
+	var home LocalBackend
+	var top uint64
 	for _, b := range backends {
 		if b.State() != supervisor.StateHealthy || req.Exclude["local:"+b.ID()] {
 			continue
 		}
 		free := b.Slots() - b.InFlight()
+		// A session keeps its backend, and so its KV cache, while that
+		// backend has a free slot: the same rendezvous as across hosts, over
+		// backend IDs. Without one, the most-free pick below.
+		if req.SessionKey != 0 && free > 0 {
+			if h := rendezvous(req.SessionKey, b.ID()); home == nil || h > top {
+				home, top = b, h
+			}
+		}
 		switch {
 		case free <= 0 || free < best:
 		case free > best:
@@ -232,9 +242,12 @@ func (r *Router) pickLocalLocked(req Request, backends []LocalBackend) *Lease {
 	if len(tied) == 0 {
 		return nil
 	}
-	n := r.localRR[req.Model]
-	r.localRR[req.Model] = n + 1
-	b := tied[n%len(tied)]
+	b := home
+	if b == nil {
+		n := r.localRR[req.Model]
+		r.localRR[req.Model] = n + 1
+		b = tied[n%len(tied)]
+	}
 	b.Acquire()
 	return &Lease{r: r, backend: b, target: Target{Local: true, Node: r.c.Self, BackendID: b.ID(), Addr: b.Addr()}}
 }

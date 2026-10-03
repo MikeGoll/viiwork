@@ -124,11 +124,20 @@ var (
 // same last-user-message convention handlePipeline already uses for
 // sourceText, plus the legacy /v1/completions "prompt" string field.
 type promptExtract struct {
-	Messages []struct {
-		Role    string      `json:"role"`
-		Content messageText `json:"content"`
-	} `json:"messages"`
-	Prompt string `json:"prompt"`
+	Messages []promptMessage `json:"messages"`
+	Prompt   string          `json:"prompt"`
+}
+
+type promptMessage struct {
+	Role       string      `json:"role"`
+	Content    messageText `json:"content"`
+	ToolCallID string      `json:"tool_call_id"`
+	ToolCalls  []struct {
+		ID       string `json:"id"`
+		Function struct {
+			Name string `json:"name"`
+		} `json:"function"`
+	} `json:"tool_calls"`
 }
 
 // messageText is a message's content as text: a plain string, or the text
@@ -171,17 +180,88 @@ func (m *messageText) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
-// extractPromptText is best-effort: a body that does not decode yields
-// whatever was read before the error, and no error the caller has to handle.
+// extractPromptText is what a request adds to its conversation: the messages
+// after the last assistant message. For a chat turn that is the user's
+// message, as before. For a coding agent's turn it is usually tool results,
+// each labelled with the tool the assistant called; the last user message
+// there is the task, the same on every turn, so showing it told nothing about
+// the turn. With nothing after the assistant it falls back to the last user
+// message, then to the legacy /v1/completions "prompt".
+//
+// Best-effort: a body that does not decode yields whatever was read before the
+// error, and no error the caller has to handle.
 func extractPromptText(body []byte) string {
 	var p promptExtract
 	json.Unmarshal(body, &p)
-	for i := len(p.Messages) - 1; i >= 0; i-- {
-		if p.Messages[i].Role == "user" && p.Messages[i].Content != "" {
-			return string(p.Messages[i].Content)
+	msgs := p.Messages
+	start := len(msgs)
+	for start > 0 && msgs[start-1].Role != "assistant" {
+		start--
+	}
+	if text := turnInput(msgs, start); text != "" {
+		return text
+	}
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role == "user" && msgs[i].Content != "" {
+			return string(msgs[i].Content)
 		}
 	}
 	return p.Prompt
+}
+
+// turnInput renders msgs[start:], the turn's new messages. Without a tool
+// result it is the last user message alone, unlabelled; with one, every
+// tool result and user message in order, each under a label.
+func turnInput(msgs []promptMessage, start int) string {
+	tools, last := false, ""
+	for _, m := range msgs[start:] {
+		switch {
+		case m.Role == "tool":
+			tools = true
+		case m.Role == "user" && m.Content != "":
+			last = string(m.Content)
+		}
+	}
+	if !tools {
+		return last
+	}
+	var sb strings.Builder
+	for _, m := range msgs[start:] {
+		var label string
+		switch m.Role {
+		case "tool":
+			label = "[tool result"
+			if name := toolName(msgs, start, m.ToolCallID); name != "" {
+				label += ": " + name
+			}
+			label += "]"
+		case "user":
+			label = "[user]"
+		default:
+			continue
+		}
+		if sb.Len() > 0 {
+			sb.WriteString("\n\n")
+		}
+		sb.WriteString(label)
+		sb.WriteByte('\n')
+		sb.WriteString(string(m.Content))
+	}
+	return sb.String()
+}
+
+// toolName finds the name of the call a tool result answers, in the assistant
+// message just before the turn.
+func toolName(msgs []promptMessage, start int, id string) string {
+	if start == 0 || id == "" {
+		return ""
+	}
+	for _, c := range msgs[start-1].ToolCalls {
+		if c.ID == id {
+			return c.Function.Name
+		}
+	}
+	return ""
 }
 
 // modelValueSpan returns the byte offsets of the top-level "model" key's string

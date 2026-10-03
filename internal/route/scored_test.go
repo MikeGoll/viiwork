@@ -70,10 +70,11 @@ func TestScoredKeepsLocalWithinTheBand(t *testing.T) {
 	local := newFakeLocal()
 	local.add("m", newFakeBackend("m/0", 2))
 	reps := &fakeReports{reports: []capacity.Report{report("fast", t0, time.Millisecond, scoredModel("m", 2, 0, 100, 1000))}}
-	// local pred 100+1200*4 = 4900 ms, 1.19x the peer's 4101 ms.
+	// local pred 100+1200*4 = 4900 ms, 1.19x the peer's 4101 ms. No session:
+	// a request with one follows its session's host instead (below).
 	for _, draw := range []float64{0, 0.5, 0.999} {
 		r := newScored(local, reps, func(string) (int, int, bool) { return 100, 1200, true }, seq(draw))
-		l, err := r.Pick(Request{Model: "m", EstK: 4, SessionKey: 42})
+		l, err := r.Pick(Request{Model: "m", EstK: 4})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -288,4 +289,56 @@ func TestPerformanceOffIsTodaysRouting(t *testing.T) {
 	if !l.Target().Local {
 		t.Fatal("routing.performance false keeps local-first")
 	}
+}
+
+// sessionKeyFavouring returns a session key whose rendezvous ranks want above
+// every other node in others.
+func sessionKeyFavouring(t *testing.T, want string, others ...string) uint64 {
+	t.Helper()
+	for k := uint64(1); k < 1000; k++ {
+		key := k * 0x9e3779b97f4a7c15
+		top := true
+		for _, o := range others {
+			if rendezvous(key, o) > rendezvous(key, want) {
+				top = false
+			}
+		}
+		if top {
+			return key
+		}
+	}
+	t.Fatalf("no key favours %s", want)
+	return 0
+}
+
+// 2026-10-03, gb2 + gb3: sixteen sessions entered through gb2. Local-first
+// came before the session's host, so every free gb2 slot pulled back a
+// session whose cache was on gb3, cold, and 12% of turns crossed hosts. A
+// session goes to its own host in the band, this node included.
+func TestSessionHostWinsOverLocalInTheBand(t *testing.T) {
+	local := newFakeLocal()
+	local.add("m", newFakeBackend("m/0", 2))
+	reps := equalPeers("gb3")
+	same := func(string) (int, int, bool) { return 100, 1000, true }
+
+	away := sessionKeyFavouring(t, "gb3", "self")
+	r := newScored(local, reps, same, seq(0.5))
+	l, err := r.Pick(Request{Model: "m", EstK: 4, SessionKey: away})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if l.Target().Local || l.Target().Node != "gb3" {
+		t.Fatalf("picked %+v; the session's host is gb3 and it has a free slot", l.Target())
+	}
+	l.Release()
+
+	home := sessionKeyFavouring(t, "self", "gb3")
+	l, err = r.Pick(Request{Model: "m", EstK: 4, SessionKey: home})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !l.Target().Local {
+		t.Fatalf("picked %+v; the session's host is this node", l.Target())
+	}
+	l.Release()
 }

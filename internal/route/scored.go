@@ -17,9 +17,10 @@ import (
 // 5% trickle. With no score anywhere the caller routes exactly as before.
 //
 // Stickiness (v2.7.0-beta3): only hosts within stickyBand of the best
-// prediction are eligible. In the band this node wins; else a request with a
-// session key goes to the band member with the highest rendezvous score; else
-// the 1/pred^3 draw runs over the band alone.
+// prediction are eligible. A request with a session key goes to the band
+// member with the highest rendezvous score, this node included (in beta3 and
+// beta4 the session came after this node); else this node, if in the band;
+// else the 1/pred^3 draw runs over the band alone.
 const (
 	// trickleShare is the probability of sending a request to a learning
 	// host, so a newcomer earns a score.
@@ -28,7 +29,7 @@ const (
 	maxScored = 32
 	// stickyBand is how much slower than the best prediction a host may be
 	// and still count as equal (v2.7.0-beta3). Within the band a request
-	// stays local, or follows its session to one host, so turns land on a
+	// follows its session to one host, or stays local, so turns land on a
 	// warm KV cache instead of being scattered across near-equal hosts.
 	stickyBand = 1.25
 )
@@ -110,11 +111,12 @@ func (r *Router) pickScoredLocked(req Request, backends []LocalBackend, localEli
 		}
 		limit := best * stickyBand
 		// The band: hosts near enough the best that a warm KV cache is worth
-		// more than the difference. This node first, then the session's
-		// host, else a weighted draw over the band only.
-		if cands[0].local && pred[0] <= limit {
-			pick, why = 0, "local-band"
-		} else if req.SessionKey != 0 {
+		// more than the difference. The session's host first, this node
+		// included, so its turns find their cache from any entry node; then
+		// this node; else a weighted draw over the band only. Local-first
+		// came before the session until 2026-10-03, and an entry node with a
+		// free slot pulled back every session whose cache was elsewhere.
+		if req.SessionKey != 0 {
 			var top uint64
 			for i, c := range cands {
 				if pred[i] > limit {
@@ -129,6 +131,8 @@ func (r *Router) pickScoredLocked(req Request, backends []LocalBackend, localEli
 				}
 			}
 			why = "session"
+		} else if cands[0].local && pred[0] <= limit {
+			pick, why = 0, "local-band"
 		} else {
 			var w [maxScored]float64
 			sum := 0.0
