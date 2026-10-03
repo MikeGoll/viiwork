@@ -1,5 +1,30 @@
 # Changelog
 
+## v2.7.2
+
+**The host's `viiwork` CLI follows the release.** `viiwork update` moved the
+node but left the CLI on the PATH behind, so an old one lacked newer commands
+(`down`, `up`) and asked for an older confirmation phrase.
+
+- **Docker install made by `viiwork init`:** after the node confirms a
+  release, the engine helper installs its own verified copy of it at the
+  binary path `install.json` records, and nowhere else. It now checks what the
+  file's `--version` reports, not its own version, keeps the old file as
+  `viiwork.prev` (was `.bak`), and leaves the CLI and `.prev` untouched when
+  the release fails to verify.
+- **Mac install made by `viiwork init`:** the CLI is the LaunchAgent's binary.
+  When a release confirms, the node installs that staged release there itself
+  and records it (`releases/cli.json`), so the next start keeps the state and
+  a rollback still runs, instead of treating the new file as an out-of-band
+  upgrade.
+- **`viiwork update cli`** does it by hand on any host with updates set up:
+  it asks the local node which release it runs, verifies that release's
+  `viiwork` from the state directory against the signed release with the
+  stager's own code, and replaces the running CLI (or `--to PATH`) in one
+  rename, keeping `<path>.prev`. `--dry-run`, `--state-dir`. Run it with
+  `sudo` where the CLI is root's.
+- Every path only ever moves the CLI forward.
+
 ## v2.7.1
 
 **`viiwork down` and `viiwork up`: free a host's GPUs without leaving the mesh.**

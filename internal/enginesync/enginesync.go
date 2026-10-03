@@ -57,13 +57,15 @@ type Paths struct {
 	Config   string // viiwork.yaml: update.source
 	StateDir string // mounted as the container's state_dir: container-writable
 	Dir      string // the helper's own, root-only
-	Binary   string // the host's viiwork, which the helper keeps up to date
+	// The host's CLI, which the helper keeps on the node's confirmed
+	// release, is not here: it is the binary the manifest records, and
+	// nothing is written when it records none.
 }
 
 // DefaultPaths are a Linux install's.
 func DefaultPaths() Paths {
 	return Paths{Manifest: install.ManifestFile, Config: install.ConfigFile, StateDir: install.StateDir,
-		Dir: install.EngineDir, Binary: install.BinaryPath}
+		Dir: install.EngineDir}
 }
 
 // Runner runs a command and returns its stdout.
@@ -234,6 +236,7 @@ func (h *Helper) Sync(ctx context.Context) error {
 // composeInstall is the host's compose project, from install.json.
 type composeInstall struct {
 	file, project, source string
+	cli                   string // the host's CLI, as the manifest records it; "" = none
 }
 
 func (h *Helper) install() (composeInstall, error) {
@@ -258,7 +261,11 @@ func (h *Helper) install() (composeInstall, error) {
 	if h.Source != "" {
 		src = h.Source
 	}
-	return composeInstall{file: m.Compose.File, project: m.Compose.Project, source: src}, nil
+	c := composeInstall{file: m.Compose.File, project: m.Compose.Project, source: src}
+	if filepath.IsAbs(m.Binary) {
+		c.cli = m.Binary
+	}
+	return c, nil
 }
 
 // ownDir makes the helper's directory, and refuses one that is not a plain
@@ -527,35 +534,34 @@ func (h *Helper) follow(ctx context.Context, c composeInstall, st nodeState, rec
 	return h.selfUpdate(ctx, c, st, img.tag)
 }
 
-// selfUpdate installs the verified release binary as the host's viiwork
-// once the node has confirmed the release the image carries, so that the
-// host's CLI and this helper's own rules move with the release. Only ever
-// forward, and only ever from the helper's own verification.
+// selfUpdate installs the verified release binary as the host's CLI — the
+// path install.json records, and nowhere else — once the node has confirmed
+// the release the image carries, so that the host's CLI and this helper's
+// own rules (the helper is that binary) move with the release. Only ever
+// forward: a CLI that reports the release, or a newer one, is left alone.
+// The binary is the helper's own verification's, never the node's staged
+// copy, which the container can write. The file is replaced atomically and
+// the old one kept as <path>.prev.
 func (h *Helper) selfUpdate(ctx context.Context, c composeInstall, st nodeState, tag string) error {
-	if !release.ValidVersion(st.Current) || st.Pending != "" || st.LastGood != st.Current || tag != st.Current {
+	if c.cli == "" || !release.ValidVersion(st.Current) || st.Pending != "" || st.LastGood != st.Current || tag != st.Current {
 		return nil
 	}
-	if cmp, ok := update.Compare(h.Version, st.Current); !ok || cmp >= 0 {
+	behind, was := update.CLIBehind(ctx, c.cli, st.Current)
+	if !behind {
 		return nil
 	}
 	bin, err := h.verify(ctx, c, st.Current)
 	if err != nil {
-		return fmt.Errorf("updating %s to %s: %w", h.Binary, st.Current, err)
+		return fmt.Errorf("updating %s to %s: %w", c.cli, st.Current, err)
 	}
 	data, err := os.ReadFile(bin)
 	if err != nil {
 		return err
 	}
-	dir, name := filepath.Dir(h.Binary), filepath.Base(h.Binary)
-	if old, err := os.ReadFile(h.Binary); err == nil {
-		if err := durable.WriteFileMode(dir, name+".bak", old, 0o755); err != nil {
-			return err
-		}
+	if err := update.InstallCLI(c.cli, data); err != nil {
+		return fmt.Errorf("updating %s to %s: %w", c.cli, st.Current, err)
 	}
-	if err := durable.WriteFileMode(dir, name, data, 0o755); err != nil {
-		return err
-	}
-	h.Log("engine-sync: %s %s -> %s (the release the node confirmed; the old one is %s.bak)", h.Binary, h.Version, st.Current, name)
+	h.Log("engine-sync: %s: %s -> %s (the release the node confirmed, verified here; the old one is %s.prev)", c.cli, was, st.Current, filepath.Base(c.cli))
 	return nil
 }
 

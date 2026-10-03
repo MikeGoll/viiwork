@@ -171,11 +171,61 @@ does not know.
 - A newer image or binary installed out of band always wins over an older
   staged release. A floor that *is* the pending release (the same version,
   exactly) runs it and keeps it pending, so it is still confirmed, not
-  forgotten.
+  forgotten. A floor the node installed itself by following a confirmed
+  release (a Mac, below) is not out of band: it is recorded in
+  `releases/cli.json` with its sha256, and while the launcher is exactly that
+  file the state still decides, so a rollback below it runs.
 
 Writes need a meshauth signature in a secured mesh and come only from loopback
 in an open one, exactly like alias writes. `GET /v1/update` reports the state,
 the staged versions and the installed engine versions.
+
+### The host's CLI follows the release
+
+`viiwork update` moves the node; the `viiwork` on the host's PATH is a
+separate file, and an old one lacks newer commands and asks for older
+confirmation phrases. Since v2.7.2 it follows the release, only ever forward
+(a CLI at or past the release, or a developer's build, is left alone), and
+always by one rename in its own directory, with the CLI it replaced kept as
+`<path>.prev` (overwritten each time):
+
+- **Docker install made by `viiwork init`:** the engine helper does it (below),
+  as root, from its own verification, to the path `install.json` records as
+  the install's binary (`/usr/local/bin/viiwork`) and nowhere else.
+- **Mac install made by `viiwork init`:** the CLI `~/.local/bin/viiwork` *is*
+  the LaunchAgent's binary, the launcher that hands over to a staged release.
+  The node runs as the user who owns it, so when a release confirms, the node
+  installs that staged release there itself (the binary it was handed over
+  to, re-checked against the sha256 recorded when it was staged), records it
+  in `releases/cli.json` and moves the launcher's recorded sha256 with it.
+  Without that record the next start would treat the new launcher as an
+  out-of-band upgrade and forget the staged releases, rollback included.
+- **Anything else** (a hand-built node, a Docker host not made by
+  `viiwork init`, an install whose manifest records no binary): `viiwork
+  update cli` by hand, below.
+
+`viiwork update cli` (with `sudo` where the CLI is root's) asks the node on
+loopback which release it runs (`GET /v1/update`, `running`), takes that
+release's `viiwork` from `<state_dir>/releases/<version>/`, and verifies it as
+staging does: the signed `SHA256SUMS` from GitHub, the archive from GitHub or
+the host's viiwork-parrot, staged afresh beside the CLI with this binary's
+keys, and the node's copy must be byte for byte that release's `viiwork`. It
+then replaces the running CLI (links resolved), or `--to PATH`, keeping
+`<path>.prev`. `--dry-run` says what it would do; `--state-dir` names the
+state directory when the config (`--config`, else this machine's) does not.
+It refuses when it cannot write the CLI's directory, when the release is not
+in the state directory, or when anything fails to verify. On a host whose CLI
+is also the node's own binary (a hand-built systemd node started from it),
+the next start treats the new file like any newer binary installed out of
+band.
+
+A CLI must itself be v2.7.2 or newer to have the command. To bring an older
+one up once, run a v2.7.2-or-newer `viiwork` from a release archive checked
+by hand (above) as `sudo ./viiwork update cli --to <the old CLI>` — never the
+copy in the state directory, which a container can write and which would run
+as root. A Mac needs nothing: the node installs its CLI when v2.7.2 itself
+confirms. A Docker install made by `viiwork init` with the engine helper needs
+nothing either.
 
 ## On a Docker install: the image follows the release
 
@@ -224,11 +274,18 @@ included:
   helper removes every image it pulled itself once nothing needs it, keeping
   the running tag, the install's own, the last two it ran and the one
   prepared for the latest stage; an image it did not pull is never removed.
-- **Itself.** Once the node has confirmed the release its image carries, the
-  helper installs its own verified copy of that release's binary as
-  `/usr/local/bin/viiwork` (the old one is kept as `viiwork.bak`), so the
-  host's CLI and the helper's own rules move with the release. Only ever
-  forward.
+- **Itself, and the host's CLI.** Once the node has confirmed the release its
+  image carries, the helper installs its own verified copy of that release's
+  binary at the path `install.json` records as the install's binary
+  (`/usr/local/bin/viiwork`, which is also the helper), so the host's CLI and
+  the helper's own rules move with the release. It writes nowhere else, and
+  nothing when the manifest records no binary. It skips a CLI whose
+  `--version` already reports the release or a newer one, never takes the
+  node's staged copy (the container can write it), replaces the file by
+  rename and keeps the old one as `viiwork.prev`, and logs what it did. A
+  release that fails to verify leaves the CLI and its `.prev` as they were.
+  (Before v2.7.2 it wrote `/usr/local/bin/viiwork` unconditionally, compared
+  its own version rather than the file's, and kept `viiwork.bak`.)
 
 **What it trusts.** The helper runs as root, and the node's releases
 directory is the container's to write. From it the helper takes `state.json`'s

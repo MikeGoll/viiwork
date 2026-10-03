@@ -156,3 +156,21 @@ func TestConfirmerSurvivesAnUnreadableState(t *testing.T) {
 		t.Errorf("state %+v", s)
 	}
 }
+
+// The CLI follows a confirm, never a rollback.
+func TestFollowCLIOnConfirmOnly(t *testing.T) {
+	_, c, _, _ := pendingState(t, "m/0")
+	var followed []string
+	c.FollowCLI = func(s State) { followed = append(followed, s.LastGood) }
+	c.Backends = backends(map[string]string{"m/0": meshapi.StatusHealthy}, "")
+	if !c.Step() || len(followed) != 1 || followed[0] != "v2.6.0" {
+		t.Errorf("confirm: followed %v", followed)
+	}
+	_, c, _, _ = pendingState(t, "m/0")
+	followed = nil
+	c.FollowCLI = func(s State) { followed = append(followed, s.LastGood) }
+	c.Backends = backends(map[string]string{"m/0": meshapi.StatusDead}, "")
+	if !c.Step() || len(followed) != 0 {
+		t.Errorf("rollback: followed %v", followed)
+	}
+}

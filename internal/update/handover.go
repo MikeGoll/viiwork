@@ -22,8 +22,21 @@ type Decision struct {
 // Decide is the launcher's startup rule, pure. running is the launcher's own
 // version; staged resolves a version to its re-verified binary.
 func Decide(s State, running string, staged func(version string) (string, error)) Decision {
+	return decide(s, running, false, staged)
+}
+
+// decide is Decide, told whether the launcher is the CLI this node installed
+// itself by following a confirmed release (Store.FollowCLI, on a Mac, where
+// the CLI is the LaunchAgent's binary). Such a floor is not an out-of-band
+// install, so the newer-floor rule does not apply to it: the state still
+// decides, and a rollback below it runs. On the release it is, it runs
+// itself, with the state kept.
+func decide(s State, running string, followed bool, staged func(version string) (string, error)) Decision {
 	d := Decision{State: s}
 	if s.Current == Builtin {
+		return d
+	}
+	if followed && s.Current == running && s.Pending == nil {
 		return d
 	}
 	// The floor is the pending release itself: an image swapped in by a
@@ -51,7 +64,7 @@ func Decide(s State, running string, staged func(version string) (string, error)
 	// A newer floor wins. The fleet is also upgraded out of band (a new image
 	// laid over the old one, a rebuilt binary); without this the new floor
 	// would hand over to the older staged release.
-	if c, ok := Compare(running, s.Current); ok && c >= 0 {
+	if c, ok := Compare(running, s.Current); ok && c >= 0 && !followed {
 		d.State = State{Current: Builtin, LastGood: Builtin, Launcher: s.Launcher}
 		d.Changed = true
 		d.Logs = append(d.Logs, fmt.Sprintf("this binary (%s) is at least staged %s: running it, staged releases forgotten", running, s.Current))
@@ -146,7 +159,9 @@ func Startup(e StartupEnv) (exec string, logs []string, err error) {
 	if e.Managed {
 		d = DecideManaged(s, e.Running)
 	} else {
-		d = Decide(s, e.Running, func(v string) (string, error) { return Binary(dir, v) })
+		r, ok := loadCLIRecord(dir)
+		followed := ok && r.Version == e.Running && r.SHA256 == self.SHA256
+		d = decide(s, e.Running, followed, func(v string) (string, error) { return Binary(dir, v) })
 	}
 	if d.Changed || changed {
 		if err := SaveState(dir, d.State); err != nil {

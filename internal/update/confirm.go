@@ -28,6 +28,10 @@ type Confirmer struct {
 	// state is pinned to; nil removes none. It runs after the releases are
 	// pruned, and only on a confirm: a rollback must find its engine there.
 	PruneEngines func(confirmed State)
+	// FollowCLI installs the confirmed release as the host's CLI (a Mac
+	// install, where the node owns it); nil installs nothing. It runs last,
+	// after the prunes, and only on a confirm.
+	FollowCLI func(confirmed State)
 	// Managed: a rollback saves the state and leaves the restart to the
 	// host's engine helper, which swaps the last good image back in.
 	Managed bool
@@ -119,6 +123,9 @@ func (c *Confirmer) Step() bool {
 			c.PruneEngines(confirmed)
 		}
 		c.Log("update: %s confirmed: every backend healthy before the update is healthy again", c.Running)
+		if c.FollowCLI != nil {
+			c.FollowCLI(confirmed)
+		}
 		return true
 	}
 	if now.After(deadline) {

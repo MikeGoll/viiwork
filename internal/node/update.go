@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"path/filepath"
 	"runtime"
 	"sync"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"github.com/janit/viiwork/v2/internal/config"
 	"github.com/janit/viiwork/v2/internal/parrot"
 	"github.com/janit/viiwork/v2/internal/release"
+	"github.com/janit/viiwork/v2/internal/setup/install"
 	"github.com/janit/viiwork/v2/internal/update"
 	"github.com/janit/viiwork/v2/meshapi"
 )
@@ -108,8 +110,33 @@ func (n *Node) buildUpdate(cfg *config.Config, auth update.Authorizer) (*update.
 		if n.llama.root != "" {
 			c.PruneEngines = n.pruneLlama(dir)
 		}
+		if cli := n.installedCLI(); cli != "" {
+			c.FollowCLI = func(confirmed update.State) {
+				ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+				defer cancel()
+				if err := store.FollowCLI(ctx, confirmed.Current, cli, n.logf); err != nil {
+					n.logf("update: %s does not follow %s: %v", cli, confirmed.Current, err)
+				}
+			}
+		}
 	}
 	return svc, c, nil
+}
+
+// installedCLI is the CLI a Mac wizard install recorded in its manifest,
+// which is also its LaunchAgent's binary: the node runs as the user who owns
+// it, so a confirmed release installs itself there (update.Store.FollowCLI).
+// "" without such a manifest — on Linux, where the host's engine helper or
+// `viiwork update cli` does it as root, and the node never writes the host.
+func (n *Node) installedCLI() string {
+	if n.o.InstallManifest == "" {
+		return ""
+	}
+	man, err := install.ReadManifest(n.o.InstallManifest)
+	if err != nil || man.OS != "darwin" || !filepath.IsAbs(man.Binary) {
+		return ""
+	}
+	return man.Binary
 }
 
 // meshPeers is the address of every other alive member: likely holders of a

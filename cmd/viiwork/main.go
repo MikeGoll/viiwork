@@ -103,7 +103,7 @@ func run(args []string, env runEnv) int {
 		defer stop()
 		return updatecli.Run(ctx, args[1:], updatecli.Env{
 			Stdout: env.stdout, Stderr: env.stderr, LookupEnv: env.lookupEnv, Hostname: env.hostname,
-			Plist: launchAgentPlist(),
+			Plist: launchAgentPlist(), DefaultConfig: osConfigPath(),
 		})
 	}
 	if len(args) > 0 && args[0] == "join-code" {
@@ -154,7 +154,7 @@ func run(args []string, env runEnv) int {
 	engineReqs := fs.Bool("engine-requirements", false, "print the minimum engine versions this binary needs, as JSON, and exit")
 	buildInfo := fs.Bool("build-info", false, "print the version, the llama.cpp pin and its macOS digest as JSON, and exit")
 	fs.Usage = func() {
-		fmt.Fprintf(env.stderr, "usage: viiwork [--config path] [--version]\n       viiwork alias <command> ...\n       viiwork top [--node host:port] [--host name] [--once]\n       viiwork update [status|rollback] ...\n       viiwork join-code [--open] [--config path]\n       viiwork init\n       viiwork stop | start   (this machine's node: it leaves the mesh, every model stops)\n       viiwork down | up [model...]   (this machine's models only: GPUs freed, the node stays in the mesh)\n       viiwork uninstall [--yes] [--delete-models] [--keep-images] [--from-config]\n       viiwork engine-sync   (run by systemd on a Docker install; see docs/releases.md)\n\n")
+		fmt.Fprintf(env.stderr, "usage: viiwork [--config path] [--version]\n       viiwork alias <command> ...\n       viiwork top [--node host:port] [--host name] [--once]\n       viiwork update [status|rollback] ...\n       viiwork update cli [--to PATH] [--dry-run]   (this machine's CLI onto the release its node runs; sudo where the CLI is root's)\n       viiwork join-code [--open] [--config path]\n       viiwork init\n       viiwork stop | start   (this machine's node: it leaves the mesh, every model stops)\n       viiwork down | up [model...]   (this machine's models only: GPUs freed, the node stays in the mesh)\n       viiwork uninstall [--yes] [--delete-models] [--keep-images] [--from-config]\n       viiwork engine-sync   (run by systemd on a Docker install; see docs/releases.md)\n\n")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {

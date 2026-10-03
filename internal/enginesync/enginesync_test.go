@@ -28,6 +28,7 @@ import (
 	"github.com/janit/viiwork/v2/internal/release"
 	"github.com/janit/viiwork/v2/internal/setup/install"
 	"github.com/janit/viiwork/v2/internal/update"
+	"github.com/janit/viiwork/v2/internal/update/updatetest"
 )
 
 const repo = "ghcr.io/janit/viiwork-llamacpp-cuda"
@@ -159,12 +160,16 @@ func (d *docker) called(prefix string) bool {
 	return slices.ContainsFunc(d.calls, func(c string) bool { return strings.HasPrefix(c, prefix) })
 }
 
+// hostCLI is the host's viiwork before any update: it reports v2.6.0.
+const hostCLI = "#!/bin/sh\necho v2.6.0\n# host binary\n"
+
 type env struct {
 	h      *Helper
 	d      *docker
 	root   string
 	logs   *strings.Builder
 	source string
+	cli    string // the host CLI install.json records
 }
 
 // newEnv is a helper-managed install under a temporary root, running image
@@ -178,19 +183,19 @@ func newEnv(t *testing.T, tag string) *env {
 		Config:   filepath.Join(root, "etc/viiwork/viiwork.yaml"),
 		StateDir: filepath.Join(root, "var/lib/viiwork"),
 		Dir:      filepath.Join(root, "var/lib/viiwork-engine"),
-		Binary:   filepath.Join(root, "usr/local/bin/viiwork"),
 	}
+	cli := filepath.Join(root, "usr/local/bin/viiwork")
 	compose := filepath.Join(root, "etc/viiwork/docker-compose.yaml")
-	for _, d := range []string{filepath.Dir(p.Manifest), filepath.Join(p.StateDir, "releases"), filepath.Dir(p.Binary)} {
+	for _, d := range []string{filepath.Dir(p.Manifest), filepath.Join(p.StateDir, "releases"), filepath.Dir(cli)} {
 		os.MkdirAll(d, 0o755)
 	}
 	m := install.Manifest{Version: 1, OS: "linux", Compose: &install.Compose{File: compose, Project: "viiwork"},
-		EngineHelper: &install.EngineHelper{Units: install.EngineUnits, Dir: p.Dir}}
+		EngineHelper: &install.EngineHelper{Units: install.EngineUnits, Dir: p.Dir}, Binary: cli}
 	b, _ := json.Marshal(m)
 	os.WriteFile(p.Manifest, b, 0o644)
 	os.WriteFile(p.Config, []byte("node: {name: n}\nupdate: {enabled: true}\n"), 0o644)
 	os.WriteFile(compose, []byte("name: viiwork\nservices:\n  viiwork:\n    image: "+repo+":"+tag+"\n    container_name: viiwork\n"), 0o644)
-	os.WriteFile(p.Binary, []byte("host binary"), 0o755)
+	os.WriteFile(cli, []byte(hostCLI), 0o755)
 	d := &docker{
 		images: map[string][]byte{repo + ":v2.6.0": script("v2.6.0"), repo + ":v2.6.1": script("v2.6.1"),
 			repo + ":v2.6.2": script("v2.6.2"), repo + ":v2.6.3": script("v2.6.3")},
@@ -203,7 +208,7 @@ func newEnv(t *testing.T, tag string) *env {
 	h := &Helper{Paths: p, Version: "v2.6.0", Target: release.Target{OS: runtime.GOOS, Arch: runtime.GOARCH},
 		Keys: []ed25519.PublicKey{pub}, Client: &http.Client{}, Run: d.run, Source: src,
 		Log: func(f string, a ...any) { fmt.Fprintf(logs, f+"\n", a...) }}
-	return &env{h: h, d: d, root: root, logs: logs, source: src}
+	return &env{h: h, d: d, root: root, logs: logs, source: src, cli: cli}
 }
 
 func (e *env) compose() string {
@@ -242,7 +247,7 @@ func TestSwapsToCurrent(t *testing.T) {
 		t.Errorf("helper dir %v %v", fi, err)
 	}
 	// The host binary waits for the release to confirm.
-	if b, _ := os.ReadFile(e.h.Binary); string(b) != "host binary" {
+	if b, _ := os.ReadFile(e.cli); string(b) != hostCLI {
 		t.Error("the host binary was replaced before the release confirmed")
 	}
 
@@ -462,30 +467,90 @@ func TestSelfUpdateAfterTheReleaseConfirms(t *testing.T) {
 	e := newEnv(t, "v2.6.0")
 	e.state(`{"current":"v2.6.1","last_good":"builtin","pending":{"version":"v2.6.1","attempts":1,"baseline":[]}}`)
 	e.h.Sync(context.Background())
-	if b, _ := os.ReadFile(e.h.Binary); string(b) != "host binary" {
+	if b, _ := os.ReadFile(e.cli); string(b) != hostCLI {
 		t.Fatal("replaced while pending")
 	}
 	e.state(`{"current":"v2.6.1","last_good":"v2.6.1"}`)
 	if err := e.h.Sync(context.Background()); err != nil {
 		t.Fatalf("%v\n%s", err, e.logs)
 	}
-	if b, _ := os.ReadFile(e.h.Binary); !bytes.Equal(b, script("v2.6.1")) {
+	if b, _ := os.ReadFile(e.cli); !bytes.Equal(b, script("v2.6.1")) {
 		t.Errorf("host binary %q", b)
 	}
-	if b, _ := os.ReadFile(e.h.Binary + ".bak"); string(b) != "host binary" {
-		t.Errorf("backup %q", b)
+	if b, _ := os.ReadFile(e.cli + ".prev"); string(b) != hostCLI {
+		t.Errorf("previous %q", b)
 	}
-	if fi, _ := os.Stat(e.h.Binary); fi.Mode().Perm() != 0o755 {
+	if fi, _ := os.Stat(e.cli); fi.Mode().Perm() != 0o755 {
 		t.Errorf("mode %v", fi.Mode())
 	}
+	if !strings.Contains(e.logs.String(), e.cli+": v2.6.0 -> v2.6.1") {
+		t.Errorf("not logged:\n%s", e.logs)
+	}
+	entries, _ := os.ReadDir(filepath.Dir(e.cli))
+	if len(entries) != 2 {
+		t.Errorf("left behind: %v", entries)
+	}
 
-	// A host binary at or past the release is left alone.
+	// A CLI that reports the release is left alone, and nothing is fetched.
+	src := e.h.Source
+	e.h.Source = "http://127.0.0.1:1"
+	os.Remove(e.cli + ".prev")
+	if err := e.h.Sync(context.Background()); err != nil {
+		t.Fatalf("%v\n%s", err, e.logs)
+	}
+	if _, err := os.Stat(e.cli + ".prev"); err == nil {
+		t.Error("reinstalled a CLI that is the release")
+	}
+	e.h.Source = src
+
+	// So is one past it.
 	e = newEnv(t, "v2.6.1")
-	e.h.Version = "v2.6.1"
+	os.WriteFile(e.cli, script("v2.7.0"), 0o755)
 	e.state(`{"current":"v2.6.1","last_good":"v2.6.1"}`)
 	e.h.Sync(context.Background())
-	if b, _ := os.ReadFile(e.h.Binary); string(b) != "host binary" {
-		t.Error("replaced a binary that is the release")
+	if b, _ := os.ReadFile(e.cli); !bytes.Equal(b, script("v2.7.0")) {
+		t.Error("replaced a newer CLI")
+	}
+}
+
+// The CLI is installed only from the helper's own verification: a release
+// whose archive does not match its signed sums leaves the old CLI and its
+// .prev exactly as they were.
+func TestSelfUpdateRefusesAnUnverifiedRelease(t *testing.T) {
+	e := newEnv(t, "v2.6.1")
+	assets, pub := updatetest.Assets(t, "v2.6.1", updatetest.Opts{Tamper: true})
+	e.h.Source, _ = updatetest.Serve(t, "v2.6.1", assets)
+	e.h.Keys = []ed25519.PublicKey{pub}
+	os.WriteFile(e.cli+".prev", []byte("older"), 0o755)
+	e.state(`{"current":"v2.6.1","last_good":"v2.6.1"}`)
+	err := e.h.Sync(context.Background())
+	if !errors.Is(err, update.ErrUnverified) {
+		t.Errorf("err %v", err)
+	}
+	if b, _ := os.ReadFile(e.cli); string(b) != hostCLI {
+		t.Errorf("CLI %q", b)
+	}
+	if b, _ := os.ReadFile(e.cli + ".prev"); string(b) != "older" {
+		t.Errorf(".prev %q", b)
+	}
+}
+
+// Only the path install.json records is ever written: without one, nothing.
+func TestSelfUpdateNeedsARecordedCLI(t *testing.T) {
+	e := newEnv(t, "v2.6.1")
+	m, _ := install.ReadManifest(e.h.Manifest)
+	m.Binary = ""
+	b, _ := json.Marshal(m)
+	os.WriteFile(e.h.Manifest, b, 0o644)
+	e.state(`{"current":"v2.6.1","last_good":"v2.6.1"}`)
+	if err := e.h.Sync(context.Background()); err != nil {
+		t.Fatalf("%v\n%s", err, e.logs)
+	}
+	if b, _ := os.ReadFile(e.cli); string(b) != hostCLI {
+		t.Errorf("CLI %q", b)
+	}
+	if entries, _ := os.ReadDir(filepath.Dir(e.cli)); len(entries) != 1 {
+		t.Errorf("wrote %v", entries)
 	}
 }
 

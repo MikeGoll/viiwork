@@ -9,6 +9,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -40,6 +41,7 @@ const Phrase = "YES I WANT TO UPDATE THE NODES ABOVE"
 const Usage = `usage: viiwork update [--to vX.Y.Z] [--hosts a,b] [--parallel N] [--allow-downgrade] [--confirm PHRASE] [flags]
        viiwork update status [--json] [flags]
        viiwork update rollback --host NAME [flags]
+       viiwork update cli [--to PATH] [--state-dir DIR] [--dry-run]   (this machine's CLI onto its node's release; viiwork update cli --help)
 
 A rollout stages the release on every chosen host first, all at once, then
 activates them in waves of --parallel hosts (default 1, one at a time) — the
@@ -84,6 +86,16 @@ type Env struct {
 	GitHubAPI string        // "" = https://api.github.com
 	PollEvery time.Duration // 0 = 2s
 	ComeBack  time.Duration // 0 = 10m: how long a restarting host may be unreachable
+
+	// For `update cli`. DefaultConfig is this machine's viiwork.yaml, read
+	// when --config is not given and it exists; Executable is the running
+	// viiwork (nil = os.Executable); Keys verify a release (nil = the
+	// compiled-in keys); UpdateSource replaces the GitHub download root and
+	// viiwork-parrot, for tests ("" = the config's).
+	DefaultConfig string
+	Executable    func() (string, error)
+	Keys          []ed25519.PublicKey
+	UpdateSource  string
 }
 
 func withDefaults(env Env) Env {
@@ -117,6 +129,9 @@ func withDefaults(env Env) Env {
 	if env.ComeBack <= 0 {
 		env.ComeBack = 10 * time.Minute
 	}
+	if env.Executable == nil {
+		env.Executable = os.Executable
+	}
 	return env
 }
 
@@ -147,6 +162,9 @@ type host struct {
 // Run is `viiwork update`. Exit 0 on success, 1 on failure, 2 on a usage error.
 func Run(ctx context.Context, args []string, env Env) int {
 	env = withDefaults(env)
+	if len(args) > 0 && args[0] == "cli" {
+		return runCLI(ctx, args[1:], env)
+	}
 	cmd := ""
 	if len(args) > 0 && (args[0] == "status" || args[0] == "rollback") {
 		cmd, args = args[0], args[1:]
