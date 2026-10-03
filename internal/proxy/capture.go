@@ -188,15 +188,73 @@ func (c *captureWriter) Output() string {
 type completionShape struct {
 	Choices []struct {
 		Delta struct {
-			Content          string `json:"content"`
-			ReasoningContent string `json:"reasoning_content"`
+			Content          string     `json:"content"`
+			ReasoningContent string     `json:"reasoning_content"`
+			ToolCalls        []toolCall `json:"tool_calls"`
 		} `json:"delta"`
 		Message struct {
-			Content          string `json:"content"`
-			ReasoningContent string `json:"reasoning_content"`
+			Content          string     `json:"content"`
+			ReasoningContent string     `json:"reasoning_content"`
+			ToolCalls        []toolCall `json:"tool_calls"`
 		} `json:"message"`
 		Text string `json:"text"`
 	} `json:"choices"`
+}
+
+// toolCall is one tool call in either spelling: whole in a message, or as
+// deltas in a stream, where the name arrives once and the arguments in
+// fragments, all tagged with the call's index.
+type toolCall struct {
+	Index    int `json:"index"`
+	Function struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	} `json:"function"`
+}
+
+// maxToolCalls bounds the calls one response may record; an index past it is
+// dropped, so a malformed index cannot grow the slice without limit.
+const maxToolCalls = 64
+
+// toolCallText gathers a response's tool calls by index. A coding agent's turn
+// usually answers with tool calls and no text, so without them most of its
+// turns would leave nothing in the prompt history.
+type toolCallText struct {
+	names, args [][]byte
+	size        int
+}
+
+func (t *toolCallText) add(i int, c toolCall) {
+	if i < 0 || i >= maxToolCalls {
+		return
+	}
+	for len(t.names) <= i {
+		t.names = append(t.names, nil)
+		t.args = append(t.args, nil)
+	}
+	t.names[i] = append(t.names[i], c.Function.Name...)
+	t.args[i] = append(t.args[i], c.Function.Arguments...)
+	t.size += len(c.Function.Name) + len(c.Function.Arguments)
+}
+
+// String renders one call per line as "name arguments".
+func (t *toolCallText) String() string {
+	var sb strings.Builder
+	for i := range t.names {
+		name, args := t.names[i], bytes.TrimSpace(t.args[i])
+		if len(name) == 0 && len(args) == 0 {
+			continue
+		}
+		if sb.Len() > 0 {
+			sb.WriteByte('\n')
+		}
+		sb.Write(name)
+		if len(args) > 0 {
+			sb.WriteByte(' ')
+			sb.Write(args)
+		}
+	}
+	return sb.String()
 }
 
 var sseDataPrefix = []byte("data:")
@@ -218,10 +276,11 @@ var sseDataPrefix = []byte("data:")
 // whitespace than that.
 func extractOutputText(raw []byte) string {
 	var content, reasoning strings.Builder
+	var tools toolCallText
 
 	if bytes.HasPrefix(bytes.TrimLeft(raw, " \r\n"), sseDataPrefix) {
 		rest := raw
-		for len(rest) > 0 && content.Len()+reasoning.Len() <= maxOutputChars {
+		for len(rest) > 0 && content.Len()+reasoning.Len()+tools.size <= maxOutputChars {
 			line := rest
 			if i := bytes.IndexByte(rest, '\n'); i >= 0 {
 				line, rest = rest[:i], rest[i+1:]
@@ -236,29 +295,38 @@ func extractOutputText(raw []byte) string {
 			if len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) {
 				continue
 			}
-			appendChoiceText(payload, &content, &reasoning)
+			appendChoiceText(payload, &content, &reasoning, &tools)
 		}
 	} else {
-		appendChoiceText(raw, &content, &reasoning)
+		appendChoiceText(raw, &content, &reasoning, &tools)
 	}
 
 	answer := strings.TrimSpace(content.String())
 	think := strings.TrimSpace(reasoning.String())
-	switch {
-	case think == "":
+	calls := tools.String()
+	if think == "" && calls == "" {
 		return answer
-	case answer == "":
-		return "[reasoning]\n" + think
-	default:
-		return "[reasoning]\n" + think + "\n\n[answer]\n" + answer
 	}
+	var sb strings.Builder
+	for _, sec := range [...]struct{ label, text string }{
+		{"[reasoning]", think}, {"[answer]", answer}, {"[tool calls]", calls},
+	} {
+		if sec.text == "" {
+			continue
+		}
+		if sb.Len() > 0 {
+			sb.WriteString("\n\n")
+		}
+		sb.WriteString(sec.label + "\n" + sec.text)
+	}
+	return sb.String()
 }
 
 // appendChoiceText decodes one JSON body or SSE payload and appends whatever
 // text it carries. A payload that does not decode is skipped rather than
 // reported: this runs off the request path on best-effort telemetry, and a
 // backend emitting something unexpected should not cost anything visible.
-func appendChoiceText(payload []byte, content, reasoning *strings.Builder) {
+func appendChoiceText(payload []byte, content, reasoning *strings.Builder, tools *toolCallText) {
 	var c completionShape
 	if json.Unmarshal(payload, &c) != nil {
 		return
@@ -269,6 +337,13 @@ func appendChoiceText(payload []byte, content, reasoning *strings.Builder) {
 		content.WriteString(ch.Text)
 		reasoning.WriteString(ch.Delta.ReasoningContent)
 		reasoning.WriteString(ch.Message.ReasoningContent)
+		for _, tc := range ch.Delta.ToolCalls {
+			tools.add(tc.Index, tc)
+		}
+		// A whole message lists its calls in order and may omit index.
+		for i, tc := range ch.Message.ToolCalls {
+			tools.add(i, tc)
+		}
 	}
 }
 

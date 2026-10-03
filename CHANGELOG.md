@@ -1,5 +1,24 @@
 # Changelog
 
+## v2.7.0-beta4
+
+**The prompt history records coding-agent turns.** Requests from agent
+clients such as pi opened to an empty prompt page.
+
+- **Prompt text from content parts.** pi sends every user message as an array
+  of content parts rather than a plain string. The prompt history read only
+  strings, so it stored no prompt for these requests. It now joins the parts'
+  text. Image parts contribute nothing.
+- **Tool calls are kept as output.** Most agent turns answer with tool calls
+  and no text, so they left no output either. Tool calls are now recorded, one
+  per line as `name arguments`, both from streamed and whole responses. When a
+  response carries more than text, the output labels its parts
+  `[reasoning]`, `[answer]` and `[tool calls]`; a plain text answer reads as
+  before.
+- **The `/mesh` prompt link names the backend.** A finished request's link
+  carried "Qwen3.8-27B/0 done (1m23.272s)" as its destination. It now keeps
+  the destination from the request's start.
+
 ## v2.7.0-beta3
 
 **Performance routing keeps a session on one host.** An A/B on the fleet

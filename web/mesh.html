@@ -762,6 +762,11 @@ function recordPrompt(e, host) {
   const key = (e.node_id || host) + "#" + e.rid;
   const isDone = /finished|done|aborted/i.test(e.message || "");
   const parts = (e.message || "").split("→");
+  // A terminal event's destination ends in " done (…)" or " aborted by
+  // client (…)": keep the start event's, else cut the suffix off.
+  const prev = promptHistory.get(key);
+  const dest = (prev && prev.dest !== "?") ? prev.dest
+    : (parts[1] || "?").replace(/\s+(done|aborted by client)\s*\([^)]*\)\s*$/, "").trim() || "?";
 
   if (!promptHistory.has(key)) {
     promptOrder.push(key);
@@ -772,7 +777,7 @@ function recordPrompt(e, host) {
   promptHistory.set(key, {
     rid: e.rid, addr: e.addr || "", host,
     model: (parts[0] || e.message || "").trim(),
-    dest: (parts[1] || "?").trim(),
+    dest,
     task: e.task_id || "",
     t: e.t || Math.floor(Date.now() / 1000),
     done: isDone

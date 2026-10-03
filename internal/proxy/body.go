@@ -125,22 +125,60 @@ var (
 // sourceText, plus the legacy /v1/completions "prompt" string field.
 type promptExtract struct {
 	Messages []struct {
-		Role    string `json:"role"`
-		Content string `json:"content"`
+		Role    string      `json:"role"`
+		Content messageText `json:"content"`
 	} `json:"messages"`
 	Prompt string `json:"prompt"`
 }
 
-// extractPromptText is best-effort: a body with multimodal content parts (an
-// array instead of a plain string) fails to decode into Content for that one
-// message, same as elsewhere in this file, and simply yields no text there
-// rather than an error the caller has to handle.
+// messageText is a message's content as text: a plain string, or the text
+// parts of a content-part array joined by newlines. Agent clients such as pi
+// send every user message as parts, so reading strings alone recorded no
+// prompt at all for them. Non-text parts (images, audio) contribute nothing,
+// and anything else decodes to empty rather than failing the body.
+type messageText string
+
+func (m *messageText) UnmarshalJSON(b []byte) error {
+	switch {
+	case len(b) > 1 && b[0] == '"' && bytes.IndexByte(b, '\\') < 0:
+		// No escapes: the bytes between the quotes are the text, so skip a
+		// second decode — this runs for every message of every request.
+		*m = messageText(b[1 : len(b)-1])
+	case len(b) > 0 && b[0] == '"':
+		var s string
+		if json.Unmarshal(b, &s) == nil {
+			*m = messageText(s)
+		}
+	case len(b) > 0 && b[0] == '[':
+		var parts []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		}
+		if json.Unmarshal(b, &parts) != nil {
+			return nil
+		}
+		var sb strings.Builder
+		for _, p := range parts {
+			if (p.Type == "text" || p.Type == "") && p.Text != "" {
+				if sb.Len() > 0 {
+					sb.WriteByte('\n')
+				}
+				sb.WriteString(p.Text)
+			}
+		}
+		*m = messageText(sb.String())
+	}
+	return nil
+}
+
+// extractPromptText is best-effort: a body that does not decode yields
+// whatever was read before the error, and no error the caller has to handle.
 func extractPromptText(body []byte) string {
 	var p promptExtract
 	json.Unmarshal(body, &p)
 	for i := len(p.Messages) - 1; i >= 0; i-- {
 		if p.Messages[i].Role == "user" && p.Messages[i].Content != "" {
-			return p.Messages[i].Content
+			return string(p.Messages[i].Content)
 		}
 	}
 	return p.Prompt

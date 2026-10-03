@@ -126,3 +126,32 @@ func TestCaptureGrowthIsBounded(t *testing.T) {
 		t.Errorf("filling a %d-byte capture allocated %d bytes", maxCaptureBytes, got)
 	}
 }
+
+// An agent turn usually answers with tool calls and no text. Streamed, the name
+// arrives once and the arguments in fragments, per call index.
+func TestExtractOutputTextToolCalls(t *testing.T) {
+	sse := "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"name\":\"read\",\"arguments\":\"\"}}]}}]}\n\n" +
+		"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"path\\\":\"}}]}}]}\n\n" +
+		"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"a.ts\\\"}\"}}]}}]}\n\n" +
+		"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":1,\"function\":{\"name\":\"bash\",\"arguments\":\"{\\\"cmd\\\":\\\"ls\\\"}\"}}]}}]}\n\n" +
+		"data: [DONE]\n\n"
+	if got, want := extractOutputText([]byte(sse)), "[tool calls]\nread {\"path\":\"a.ts\"}\nbash {\"cmd\":\"ls\"}"; got != want {
+		t.Errorf("streamed tool calls = %q, want %q", got, want)
+	}
+
+	whole := `{"choices":[{"message":{"content":"Let me look.","tool_calls":[{"function":{"name":"read","arguments":"{\"path\":\"a.ts\"}"}}]}}]}`
+	if got, want := extractOutputText([]byte(whole)), "[answer]\nLet me look.\n\n[tool calls]\nread {\"path\":\"a.ts\"}"; got != want {
+		t.Errorf("whole tool calls = %q, want %q", got, want)
+	}
+
+	// Plain text keeps its unlabelled form.
+	if got := extractOutputText([]byte(`{"choices":[{"message":{"content":"hi"}}]}`)); got != "hi" {
+		t.Errorf("text only = %q, want hi", got)
+	}
+
+	// An index past the bound is dropped rather than growing the slice.
+	huge := `{"choices":[{"delta":{"tool_calls":[{"index":100000000,"function":{"name":"x"}}]}}]}`
+	if got := extractOutputText([]byte("data: " + huge + "\n\n")); got != "" {
+		t.Errorf("out-of-range index = %q, want empty", got)
+	}
+}

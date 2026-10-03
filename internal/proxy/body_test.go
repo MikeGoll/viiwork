@@ -133,4 +133,15 @@ func TestExtractPromptText(t *testing.T) {
 	if got := extractPromptText([]byte(`{"prompt":"p"}`)); got != "p" {
 		t.Errorf("completion prompt = %q, want p", got)
 	}
+	// Agent clients (pi) send content as parts; image parts carry no text.
+	parts := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"a"},{"type":"image_url","image_url":{"url":"x"}},{"type":"text","text":"b"}]},` +
+		`{"role":"assistant","content":null,"tool_calls":[{"id":"1"}]},{"role":"tool","content":"r"}]}`)
+	if got := extractPromptText(parts); got != "a\nb" {
+		t.Errorf("content parts = %q, want a\\nb", got)
+	}
+	// A content shape it cannot read leaves that message empty, not the body.
+	odd := []byte(`{"messages":[{"role":"user","content":"first"},{"role":"user","content":{"weird":1}}]}`)
+	if got := extractPromptText(odd); got != "first" {
+		t.Errorf("unreadable content = %q, want first", got)
+	}
 }
