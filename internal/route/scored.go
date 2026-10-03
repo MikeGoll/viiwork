@@ -15,12 +15,22 @@ import (
 // pred = overhead + rate*EstK + RTT from each host's own published score. A
 // host with no score is learning: it is priced at the fleet median and gets a
 // 5% trickle. With no score anywhere the caller routes exactly as before.
+//
+// Stickiness (v2.7.0-beta3): only hosts within stickyBand of the best
+// prediction are eligible. In the band this node wins; else a request with a
+// session key goes to the band member with the highest rendezvous score; else
+// the 1/pred^3 draw runs over the band alone.
 const (
 	// trickleShare is the probability of sending a request to a learning
 	// host, so a newcomer earns a score.
 	trickleShare = 0.05
 	// maxScored bounds the candidate list so it lives on the stack.
 	maxScored = 32
+	// stickyBand is how much slower than the best prediction a host may be
+	// and still count as equal (v2.7.0-beta3). Within the band a request
+	// stays local, or follows its session to one host, so turns land on a
+	// warm KV cache instead of being scattered across near-equal hosts.
+	stickyBand = 1.25
 )
 
 type scoredCand struct {
@@ -86,25 +96,59 @@ func (r *Router) pickScoredLocked(req Request, backends []LocalBackend, localEli
 	if nl > 0 && r.rand() < trickleShare {
 		pick, why = learning[min(int(r.rand()*float64(nl)), nl-1)], "trickle"
 	} else {
-		var w [maxScored]float64
-		sum := 0.0
+		var pred [maxScored]float64
+		best := 0.0
 		for i, c := range cands {
 			ov, rate := c.ov, c.rate
 			if !c.scored {
 				ov, rate = medOv, medRate
 			}
-			pred := max(ov+rate*req.EstK+c.rttMs, 1)
-			w[i] = 1 / (pred * pred * pred)
-			sum += w[i]
-		}
-		x := r.rand() * sum
-		pick = len(cands) - 1
-		for i := range cands {
-			if x < w[i] {
-				pick = i
-				break
+			pred[i] = max(ov+rate*req.EstK+c.rttMs, 1)
+			if i == 0 || pred[i] < best {
+				best = pred[i]
 			}
-			x -= w[i]
+		}
+		limit := best * stickyBand
+		// The band: hosts near enough the best that a warm KV cache is worth
+		// more than the difference. This node first, then the session's
+		// host, else a weighted draw over the band only.
+		if cands[0].local && pred[0] <= limit {
+			pick, why = 0, "local-band"
+		} else if req.SessionKey != 0 {
+			var top uint64
+			for i, c := range cands {
+				if pred[i] > limit {
+					continue
+				}
+				name := c.rep.Node
+				if c.local {
+					name = r.c.Self
+				}
+				if h := rendezvous(req.SessionKey, name); pick < 0 || h > top {
+					pick, top = i, h
+				}
+			}
+			why = "session"
+		} else {
+			var w [maxScored]float64
+			sum := 0.0
+			for i := range cands {
+				if pred[i] <= limit {
+					w[i] = 1 / (pred[i] * pred[i] * pred[i])
+					sum += w[i]
+				}
+			}
+			x := r.rand() * sum
+			for i := range cands {
+				if w[i] == 0 {
+					continue
+				}
+				pick = i // the last band member catches rounding at the top
+				if x < w[i] {
+					break
+				}
+				x -= w[i]
+			}
 		}
 	}
 	c := cands[pick]
@@ -115,6 +159,24 @@ func (r *Router) pickScoredLocked(req Request, backends []LocalBackend, localEli
 		return r.pickLocalLocked(req, backends), true
 	}
 	return r.peerLeaseLocked(c.rep, req.Model, now), true
+}
+
+// rendezvous scores node for a session (highest random weight): the same key
+// ranks the hosts the same way on every entry node, and a host leaving the
+// band moves only its own sessions. FNV-1a over the name, seeded by the key,
+// then the splitmix64 finaliser so nearby keys scatter.
+func rendezvous(key uint64, node string) uint64 {
+	h := uint64(14695981039346656037) ^ key
+	for i := 0; i < len(node); i++ {
+		h ^= uint64(node[i])
+		h *= 1099511628211
+	}
+	h ^= h >> 30
+	h *= 0xbf58476d1ce4e5b9
+	h ^= h >> 27
+	h *= 0x94d049bb133111eb
+	h ^= h >> 31
+	return h
 }
 
 func (r *Router) rand() float64 {

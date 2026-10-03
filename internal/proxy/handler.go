@@ -266,6 +266,25 @@ type dispatch struct {
 	localBuilt                 bool
 }
 
+// sessionKey is the request's session for the scored pick's stickiness: FNV-1a
+// 64 over the first non-empty of X-Session-Affinity and X-Session-Id, 0 when
+// the client sends neither. Client headers, never stripped as mesh headers.
+func sessionKey(r *http.Request) uint64 {
+	v := r.Header.Get("X-Session-Affinity")
+	if v == "" {
+		v = r.Header.Get("X-Session-Id")
+		if v == "" {
+			return 0
+		}
+	}
+	h := uint64(14695981039346656037)
+	for i := 0; i < len(v); i++ {
+		h ^= uint64(v[i])
+		h *= 1099511628211
+	}
+	return h
+}
+
 // dispatch runs the request over the router. The rules that make it safe all
 // live here:
 //
@@ -282,7 +301,8 @@ type dispatch struct {
 //     among them makes it a 502.
 func (h *Handler) dispatch(w http.ResponseWriter, r *http.Request, d *dispatch) {
 	estK := float64(len(d.body)) / 4000 // ~4 bytes per token; the entry cannot see caches
-	lease, queued, err := h.d.Router.Acquire(r.Context(), route.Request{Model: d.model, Host: d.host, Forwarded: d.forwarded, EstK: estK})
+	session := sessionKey(r)
+	lease, queued, err := h.d.Router.Acquire(r.Context(), route.Request{Model: d.model, Host: d.host, Forwarded: d.forwarded, EstK: estK, SessionKey: session})
 	if err != nil {
 		if d.forwarded && errors.Is(err, route.ErrModelNotFound) {
 			// The origin chose this node from a report that still listed
@@ -382,7 +402,7 @@ func (h *Handler) dispatch(w http.ResponseWriter, r *http.Request, d *dispatch) 
 		tried[t.Key()] = true
 		if retries < h.d.ForwardRetry {
 			retries++
-			if next, err := h.d.Router.Pick(route.Request{Model: d.model, Host: d.host, Exclude: tried, EstK: estK}); err == nil {
+			if next, err := h.d.Router.Pick(route.Request{Model: d.model, Host: d.host, Exclude: tried, EstK: estK, SessionKey: session}); err == nil {
 				lease = next
 				continue
 			}
@@ -395,7 +415,7 @@ func (h *Handler) dispatch(w http.ResponseWriter, r *http.Request, d *dispatch) 
 			budget = -1
 		}
 		var waited time.Duration
-		lease, waited, err = h.d.Router.Acquire(r.Context(), route.Request{Model: d.model, Host: d.host, QueueBudget: budget, EstK: estK})
+		lease, waited, err = h.d.Router.Acquire(r.Context(), route.Request{Model: d.model, Host: d.host, QueueBudget: budget, EstK: estK, SessionKey: session})
 		queued += waited
 		if err != nil {
 			h.endUnserved(d, label)

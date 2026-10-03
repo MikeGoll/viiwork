@@ -58,6 +58,10 @@ type Request struct {
 	// scored choice's prediction. The entry cannot see any cache, so it
 	// assumes every token is uncached.
 	EstK float64
+	// SessionKey identifies the client session (a hash of its affinity
+	// header), 0 = none. Within the scored band it sends every turn of a
+	// session to the same host, so the turns reuse that host's KV cache.
+	SessionKey uint64
 }
 
 type resKey struct{ node, model string }

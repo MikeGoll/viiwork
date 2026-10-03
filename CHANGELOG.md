@@ -1,5 +1,31 @@
 # Changelog
 
+## v2.7.0-beta3
+
+**Performance routing keeps a session on one host.** An A/B on the fleet
+with 8 coding-agent sessions, routing by speed off and on, split two ways.
+Sessions entering through teddy, clearly the fastest host, improved: mean
+time to first token 13.0 → 9.6 s. Sessions entering through gb2, where gb1–gb4
+score about the same, got much worse: mean 16.8 → 34.9 s, p90 36 → 87 s, and
+the prompt cache hit rate fell from 90.5% to 72.7%. The random draw spread
+each session's turns across near-equal hosts, so most turns started on a cold
+KV cache. Host switches between consecutive turns of a session doubled.
+
+- **Near-equal hosts form a band.** Only hosts whose predicted time to first
+  token is within 1.25× of the best one are considered. A clearly faster host
+  still wins outright.
+- **This node first.** If this node is in the band, it serves the request
+  locally.
+- **Then the session's host.** A request carrying `X-Session-Affinity` or
+  `X-Session-Id` goes to the band member chosen by a rendezvous hash of the
+  session and the host name. Every entry node makes the same choice, so a
+  session returns to the same host while it has a free slot. When that host is
+  full the next one in the band takes the turn, and the session goes back once
+  a slot frees up.
+- **Otherwise the weighted draw, over the band only.** A slower host outside
+  the band is no longer drawn at all. The 5% trickle to unscored hosts is
+  unchanged.
+
 ## v2.7.0-beta2
 
 **Performance routing now measures llama.cpp models that answer through

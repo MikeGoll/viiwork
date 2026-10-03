@@ -154,6 +154,8 @@ type handlerFx struct {
 	exec         *pipeline.Executor
 	perf         PerfRecorder
 	usage        func(string) engine.UsageReporting
+	performance  bool           // routing.performance: the scored pick
+	rand         func() float64 // the router's draws, for the scored pick
 
 	counters *Counters
 	log      *activity.Log
@@ -170,7 +172,8 @@ func (f *handlerFx) build() *handlerFx {
 	f.t.Helper()
 	f.counters = NewCounters()
 	f.log = activity.NewLog()
-	f.router = route.New(route.Config{Self: "self", Local: &f.local, Remote: &f.reports, StaleAfter: time.Minute, QueueMax: f.queueMax, QueueTimeout: f.queueTimeout})
+	f.router = route.New(route.Config{Self: "self", Local: &f.local, Remote: &f.reports, StaleAfter: time.Minute, QueueMax: f.queueMax, QueueTimeout: f.queueTimeout,
+		Performance: f.performance, Rand: f.rand})
 	ctx, cancel := context.WithCancel(context.Background())
 	f.t.Cleanup(cancel)
 	go f.router.Run(ctx)
