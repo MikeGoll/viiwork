@@ -85,6 +85,9 @@ func gpuText(g meshapi.GPUInfo) string {
 // modelHeading is a model's line on the host screen. tok/s is per model: the
 // payload has no cumulative per-backend counter to derive a rate from.
 func modelHeading(s *State, node string, ms meshapi.ModelStatus) string {
+	if ms.Parked {
+		return fmt.Sprintf("%s · %s · down (viiwork up on this host brings it back)", ms.Name, ms.Engine)
+	}
 	ctx, tok := "—", "—"
 	if ms.Ctx > 0 {
 		ctx = strconv.FormatInt(ms.Ctx, 10)

@@ -1,8 +1,8 @@
 // Command viiwork is a viiwork 2 node: one process per machine that runs its
 // models, joins the mesh and serves the API. `viiwork alias ...` manages the
 // mesh's model aliases through a node's API, `viiwork top` watches the mesh,
-// `viiwork init` sets up a machine, and `viiwork stop` and `start` stop and
-// start its node.
+// `viiwork init` sets up a machine, `viiwork stop` and `start` stop and
+// start its node, and `viiwork down` and `up` park and unpark its models.
 package main
 
 import (
@@ -25,6 +25,7 @@ import (
 	"github.com/janit/viiwork/v2/internal/engine"
 	"github.com/janit/viiwork/v2/internal/enginesync"
 	"github.com/janit/viiwork/v2/internal/joincode"
+	"github.com/janit/viiwork/v2/internal/modelscli"
 	"github.com/janit/viiwork/v2/internal/node"
 	"github.com/janit/viiwork/v2/internal/parrot"
 	"github.com/janit/viiwork/v2/internal/release"
@@ -125,6 +126,14 @@ func run(args []string, env runEnv) int {
 	if len(args) > 0 && (args[0] == "stop" || args[0] == "start") {
 		return nodectl.Main(context.Background(), args[0], args[1:], nodectl.Env{Stdout: env.stdout, Stderr: env.stderr})
 	}
+	if len(args) > 0 && (args[0] == "down" || args[0] == "up") {
+		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+		defer stop()
+		return modelscli.Run(ctx, args[0], args[1:], updatecli.Env{
+			Stdout: env.stdout, Stderr: env.stderr, LookupEnv: env.lookupEnv, Hostname: env.hostname,
+			Plist: launchAgentPlist(),
+		})
+	}
 	if len(args) > 0 && args[0] == "init" {
 		fs := flag.NewFlagSet("init", flag.ContinueOnError)
 		fs.SetOutput(io.Discard)
@@ -145,7 +154,7 @@ func run(args []string, env runEnv) int {
 	engineReqs := fs.Bool("engine-requirements", false, "print the minimum engine versions this binary needs, as JSON, and exit")
 	buildInfo := fs.Bool("build-info", false, "print the version, the llama.cpp pin and its macOS digest as JSON, and exit")
 	fs.Usage = func() {
-		fmt.Fprintf(env.stderr, "usage: viiwork [--config path] [--version]\n       viiwork alias <command> ...\n       viiwork top [--node host:port] [--host name] [--once]\n       viiwork update [status|rollback] ...\n       viiwork join-code [--open] [--config path]\n       viiwork init\n       viiwork stop | start   (this machine's node)\n       viiwork uninstall [--yes] [--delete-models] [--keep-images] [--from-config]\n       viiwork engine-sync   (run by systemd on a Docker install; see docs/releases.md)\n\n")
+		fmt.Fprintf(env.stderr, "usage: viiwork [--config path] [--version]\n       viiwork alias <command> ...\n       viiwork top [--node host:port] [--host name] [--once]\n       viiwork update [status|rollback] ...\n       viiwork join-code [--open] [--config path]\n       viiwork init\n       viiwork stop | start   (this machine's node: it leaves the mesh, every model stops)\n       viiwork down | up [model...]   (this machine's models only: GPUs freed, the node stays in the mesh)\n       viiwork uninstall [--yes] [--delete-models] [--keep-images] [--from-config]\n       viiwork engine-sync   (run by systemd on a Docker install; see docs/releases.md)\n\n")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {

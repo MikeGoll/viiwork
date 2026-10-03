@@ -46,6 +46,9 @@ func TestWebFixture(t *testing.T) {
 		Models: []meshapi.ModelStatus{{
 			Name: "x", Engine: "llamacpp", Slots: 0, Busy: 0, Ctx: 8192,
 			Backends: []meshapi.BackendStatus{{ID: "x/0", GPUs: []int{0}, Status: meshapi.StatusUnhealthy, Phase: "respawn grace", Slots: 1, Respawns: 2, UptimeS: 40}},
+		}, {
+			// Parked by viiwork down: listed, no backends.
+			Name: "m", Engine: "llamacpp", Ctx: 16384, Parked: true, Backends: []meshapi.BackendStatus{},
 		}},
 		Power: meshapi.PowerInfo{Watts: 180, Available: true, Source: "rocm-smi"},
 		Cost:  meshapi.CostInfo{Available: false},

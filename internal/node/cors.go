@@ -164,7 +164,7 @@ func (c *CORS) apply(w http.ResponseWriter, r *http.Request) (handled bool) {
 //     node's own pages are same-origin and pass; so does every non-browser
 //     client, because only browsers send Origin (curl, SDKs, the alias CLI,
 //     member forwards and the pipeline executor send none).
-//   - The control endpoints (power, alias writes) accept only
+//   - The control endpoints (power, alias, update, models down/up) accept only
 //     Content-Type: application/json, which a browser cannot send cross-origin
 //     without a preflight — and a refused preflight is 403. This holds even
 //     for a browser old enough to omit Origin.
@@ -210,7 +210,8 @@ func (c *CORS) refusesCrossSite(r *http.Request) bool {
 func controlPath(path string) bool {
 	return path == meshapi.PathPower || path == meshapi.PathMeshPower ||
 		path == meshapi.PathAliases || strings.HasPrefix(path, meshapi.PathAliases+"/") ||
-		strings.HasPrefix(path, meshapi.PathUpdate+"/")
+		strings.HasPrefix(path, meshapi.PathUpdate+"/") ||
+		path == meshapi.PathModelsDown || path == meshapi.PathModelsUp
 }
 
 // isJSON reports whether a Content-Type header names application/json,

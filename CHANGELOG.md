@@ -1,5 +1,27 @@
 # Changelog
 
+## v2.7.1
+
+**`viiwork down` and `viiwork up`: free a host's GPUs without leaving the mesh.**
+
+- **`viiwork down [model...]` parks this machine's models**, every configured
+  one or those named. The node stops admitting requests to them, gives the
+  ones in flight `health.respawn_grace`, then stops their engines. It stays in
+  the mesh: dashboards, `viiwork top` and routing to other hosts keep working,
+  and members send those models elsewhere.
+- **`viiwork up [model...]` loads them again** from the running config through
+  the load gate and returns once they are loading.
+- Parking lasts until `viiwork up` or a restart, and survives a reload. A
+  parked model shows as `down` in `viiwork top` and on `/mesh`, and as
+  `parked: true` with no backends on `/v1/status` (additive, `omitempty`).
+- Do not run `down` while `viiwork update` waits for this host to confirm a
+  release: the parked model's backends never come back, so the update rolls
+  back.
+- `stop`/`start` take the whole node out of the mesh; `down`/`up` only its
+  models. Both new commands reach the node and load the mesh secret exactly
+  as `viiwork update` does; the node authorises them like alias writes
+  (`POST /v1/models/down`, `/v1/models/up`).
+
 ## v2.7.0
 
 **Routing follows measured speed, and a session stays on its warm cache.**

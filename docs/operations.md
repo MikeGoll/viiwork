@@ -4,6 +4,7 @@ Running a fleet: the scripts, the acceptance checker and the MCP server.
 
 - [Scripts](#scripts)
 - [Acceptance checks](#acceptance-checks)
+- [Freeing a host's GPUs: `viiwork down`](#freeing-a-hosts-gpus-viiwork-down)
 - [MCP server](#mcp-server)
 
 ## Scripts
@@ -107,6 +108,44 @@ It reads the same `/v1/mesh/stream` as `/mesh` and changes nothing. Remote
 hosts' GPU and backend figures refresh every 5 s, so their graphs are coarser
 than the entry node's. A value a host cannot report shows `—`. `NO_COLOR` is
 honoured.
+
+## Freeing a host's GPUs: `viiwork down`
+
+To use a host's cards for something else for a while without taking the host
+out of the mesh, park its models:
+
+```sh
+viiwork down                         # every model this machine runs
+viiwork down Qwen3.8-27B             # only the models named
+viiwork up                           # load them again from the running config
+```
+
+`down` stops the node admitting requests to those models, gives the ones in
+flight `health.respawn_grace` to finish, then stops their engines, which frees
+their GPUs. The node stays a member: `/mesh`, `viiwork top`, `/v1/status` and
+routing through it keep working. Members see no slots for a parked model on
+this host and send its requests elsewhere; with no other host serving it, a
+request waits in the queue and times out, as for a model whose backends are
+down. `viiwork top` and `/mesh` show a parked model as `down`, and
+`/v1/status` lists it with `parked: true` and no backends.
+
+`up` returns once the models are loading; watch them come back in
+`viiwork top`. Parking is held in memory: it survives `SIGHUP` (a parked model
+removed from the config is forgotten), and a restart, `viiwork start` or a
+reboot brings everything back. Compare `viiwork stop`, which takes the whole
+node out of the mesh.
+
+Do not park models while `viiwork update` is waiting for this host to
+confirm a new release. The confirmer waits for the backends that were healthy
+before the update to come back, and a parked model has none, so the update
+rolls back. Park after the rollout has finished, or before it starts: the
+restart that activates a release brings parked models back anyway.
+
+Run them on the machine itself. They take `--node`, `--config` and
+`--secret-env` like `viiwork update`; in a secured mesh the write must be
+signed (`sudo sh -c 'set -a; . /etc/viiwork/mesh.env; viiwork down'` on a
+Linux install), and in an open one a node accepts it only from its own
+machine.
 
 ## MCP server
 

@@ -241,6 +241,33 @@ func newCLI(env Env, node, configPath, secretEnv string) (*cli, int) {
 	return c, 0
 }
 
+// Target is one node as another write command reaches it (`viiwork down`
+// and `up`): the address and mesh secret resolved exactly as for
+// `viiwork update`, so the flags and the secret's sources are the same.
+type Target struct{ c *cli }
+
+// Connect resolves the node and the signer from --node, --config and
+// --secret-env. A non-zero code is a usage error, already reported.
+func Connect(env Env, node, configPath, secretEnv string) (*Target, int) {
+	c, code := newCLI(withDefaults(env), node, configPath, secretEnv)
+	if code != 0 {
+		return nil, code
+	}
+	return &Target{c: c}, 0
+}
+
+// Node is the node's API address.
+func (t *Target) Node() string { return t.c.node }
+
+// Signed reports whether writes carry a mesh signature.
+func (t *Target) Signed() bool { return t.c.signer != nil }
+
+// Post sends one write, signed when a secret is loaded, and decodes the
+// reply into out; a refusal comes back as an error naming the node's reason.
+func (t *Target) Post(ctx context.Context, path string, in, out any) error {
+	return t.c.post(ctx, t.c.node, path, in, out, writeTimeout)
+}
+
 // errNoUpdateAPI is a member older than the update feature.
 var errNoUpdateAPI = errors.New("no /v1/update (older than rolling updates)")
 
@@ -305,8 +332,13 @@ func (c *cli) members(ctx context.Context) (view, error) {
 		// A model counts as served wherever it is configured, healthy or
 		// not: a host whose backends are only respawning is about to serve
 		// it again, and the price of counting it is at most one more wave.
+		// A parked one (viiwork down) is not: it stays down until someone
+		// brings it up.
 		if m.State == meshapi.MemberAlive && m.Status != nil {
 			for _, ms := range m.Status.Models {
+				if ms.Parked {
+					continue
+				}
 				serves[m.Node] = append(serves[m.Node], ms.Name)
 			}
 		}

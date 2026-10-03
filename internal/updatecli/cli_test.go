@@ -34,6 +34,7 @@ type fakeNode struct {
 	stageTook time.Duration
 	activate  int      // status code for activate; 0 = 202
 	models    []string // what its status lists as served
+	parked    []string // what its status lists as parked (viiwork down)
 	drop      bool     // the GET that set it, and every one while set, gets a closed connection
 	behave    func(n *fakeNode, polls int)
 	splits    bool // once on a new release, the entry node sees it dead: it lost the mesh
@@ -193,6 +194,9 @@ func (m *fakeMesh) cluster() meshapi.ClusterResponse {
 			Status: &meshapi.NodeStatus{Node: n.name, Addr: host, APIPort: p, Ver: n.st.Running}}
 		for _, model := range n.models {
 			mem.Status.Models = append(mem.Status.Models, meshapi.ModelStatus{Name: model, Slots: 1})
+		}
+		for _, model := range n.parked {
+			mem.Status.Models = append(mem.Status.Models, meshapi.ModelStatus{Name: model, Parked: true, Backends: []meshapi.BackendStatus{}})
 		}
 		if n.dead || n.splits && n.st.Running != "v2.5.0" {
 			mem.State, mem.Status = meshapi.MemberDead, nil
@@ -738,6 +742,16 @@ func TestRolloutWavesKeepEveryModelUp(t *testing.T) {
 	m2.node("node-x").st.Enabled = false
 	if code, out, errOut := run(t, m2, Phrase+"\n", "--parallel", "3"); code != 0 || !strings.Contains(out, "wave 1: node-a, node-b, node-c\n") {
 		t.Errorf("exit %d\n%s\n%s", code, out, errOut)
+	}
+	// A third host that has the model parked (viiwork down) does not keep it up.
+	m3 := newFakeMesh(t, "node-a", "node-b", "node-c", "node-d", "node-x")
+	m3.entry = m3.node("node-d")
+	m3.node("node-a").models = []string{"qwen"}
+	m3.node("node-b").models = []string{"qwen"}
+	m3.node("node-x").parked = []string{"qwen"}
+	m3.node("node-x").st.Enabled = false
+	if code, out, errOut := run(t, m3, Phrase+"\n", "--parallel", "3"); code != 0 || strings.Contains(out, "wave 1: node-a, node-b") {
+		t.Errorf("a parked host counted as serving: exit %d\n%s\n%s", code, out, errOut)
 	}
 }
 

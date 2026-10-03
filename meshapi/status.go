@@ -56,6 +56,11 @@ type ModelStatus struct {
 	TokensTotal   uint64          `json:"tokens_total,omitempty"`
 	Perf          *PerfScore      `json:"perf,omitempty"` // v2.7; nil = no score
 	Backends      []BackendStatus `json:"backends"`
+	// Parked (v2.7.1) is a configured model taken down on this node by
+	// `viiwork down`: no backends and no slots until `viiwork up` or a
+	// restart. It tells a parked model from a broken one; absent on older
+	// nodes.
+	Parked bool `json:"parked,omitempty"`
 }
 
 // BackendStatus is one backend process of a model.

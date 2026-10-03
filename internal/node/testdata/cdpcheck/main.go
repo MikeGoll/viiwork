@@ -290,6 +290,7 @@ func main() {
 			{"backend ids", `['m/0','n/0','x/0'].every(id => document.getElementById('backendsBody').innerText.includes(id))`, "true"},
 			{"greyed dead host rows", `document.querySelectorAll('#backendsBody tr.gone').length`, "1"},
 			{"dead host named", `document.querySelector('#backendsBody tr.gone').innerText.includes('node-c')`, "true"},
+			{"parked model row", `[...document.querySelectorAll('#backendsBody tr.parked')].map(r => r.innerText.includes('node-b') && r.innerText.includes('down')).join(',')`, "true"},
 			{"alias rows", `document.querySelectorAll('#aliasesBody tr').length`, "2"},
 			{"aliases named", `['stable','legacy','retired-model'].every(s => document.getElementById('aliasesBody').innerText.includes(s))`, "true"},
 			// The table is dot | name | target | backends: the state is the dot

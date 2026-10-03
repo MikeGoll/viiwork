@@ -229,3 +229,14 @@ func TestHostLineShowsThePerformanceScore(t *testing.T) {
 		t.Fatal("no score, no rate: absent is not zero")
 	}
 }
+
+// A parked model reads as down, not as a model with no slots.
+func TestParkedModelReadsAsDown(t *testing.T) {
+	m := meshapi.ModelStatus{Name: "qwen", Engine: "llamacpp", Ctx: 512, Parked: true, Backends: []meshapi.BackendStatus{}}
+	if got := modelSummary(m); got != "qwen down" {
+		t.Errorf("summary %q, want %q", got, "qwen down")
+	}
+	if got := modelHeading(NewState(), "gb2", m); !strings.Contains(got, "qwen") || !strings.Contains(got, "down") || strings.Contains(got, "busy") {
+		t.Errorf("heading %q, want the model marked down", got)
+	}
+}

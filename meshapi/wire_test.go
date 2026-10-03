@@ -63,7 +63,7 @@ func TestV2WireFields(t *testing.T) {
 		"energy_kwh_24h", "energy_kwh_30d", "cost", "prompt_history",
 	})
 	assertFields(t, GPUInfo{}, []string{"index", "uuid", "name", "vendor", "util", "vram_used_mb", "vram_total_mb", "power_w"})
-	assertFields(t, ModelStatus{}, []string{"name", "engine", "slots", "busy", "queued", "ctx", "requests_total", "tokens_total", "perf", "backends"})
+	assertFields(t, ModelStatus{}, []string{"name", "engine", "slots", "busy", "queued", "ctx", "requests_total", "tokens_total", "perf", "backends", "parked"})
 	assertFields(t, BackendStatus{}, []string{
 		"id", "gpus", "status", "phase", "pid", "rss_mb", "slots", "busy",
 		"tok_decoded", "tok_remain", "respawns", "uptime_s",
@@ -90,6 +90,9 @@ func TestV2WireFields(t *testing.T) {
 	assertFields(t, UpdatePending{}, []string{"version", "attempts", "deadline"})
 	assertFields(t, UpdateRequest{}, []string{"version", "allow_downgrade"})
 	assertFields(t, PerfScore{}, []string{"overhead_ms", "prefill_ms_per_1k", "samples", "baseline_age_s"})
+	assertFields(t, ParkRequest{}, []string{"models"})
+	assertFields(t, ParkResponse{}, []string{"node", "models"})
+	assertFields(t, ModelPark{}, []string{"name", "parked", "changed"})
 }
 
 // Fields a node may be unable to measure must be omitempty, so "absent" never
@@ -101,7 +104,7 @@ func TestV2UnmeasurableFieldsAreOmitempty(t *testing.T) {
 	}{
 		{NodeStatus{}, []string{"host_mem_total_mb", "host_mem_used_mb", "gpus", "energy_kwh_24h", "energy_kwh_30d", "prompt_history"}},
 		{GPUInfo{}, []string{"uuid", "name", "vendor", "power_w"}},
-		{ModelStatus{}, []string{"requests_total", "tokens_total"}},
+		{ModelStatus{}, []string{"requests_total", "tokens_total", "parked"}},
 		{BackendStatus{}, []string{"gpus", "phase", "pid", "rss_mb", "tok_decoded", "tok_remain"}},
 		{PowerInfo{}, []string{"source"}},
 		{CostInfo{}, []string{"eur_per_hour", "today_eur", "breakdown"}},
@@ -228,6 +231,8 @@ func TestPathsAreFrozen(t *testing.T) {
 		{PathUpdateStage, "/v1/update/stage"},
 		{PathUpdateActivate, "/v1/update/activate"},
 		{PathUpdateRollback, "/v1/update/rollback"},
+		{PathModelsDown, "/v1/models/down"},
+		{PathModelsUp, "/v1/models/up"},
 	} {
 		if c.got != c.want {
 			t.Errorf("path changed: %q, want %q", c.got, c.want)

@@ -56,6 +56,7 @@ type ServerDeps struct {
 	ModelInfo      http.Handler      // *modelinfo.Handler; nil = /v1/model/info is 404
 	Health         func() (healthy, total int, models int)
 	Update         http.Handler // /v1/update; nil = 404
+	Park           http.Handler // /v1/models/down and /up; nil = 404
 }
 
 type server struct {
@@ -158,6 +159,12 @@ func (s *server) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 	switch {
 	case path == meshapi.PathHealth && get:
 		s.handleHealth(w)
+	case path == meshapi.PathModelsDown || path == meshapi.PathModelsUp:
+		if s.d.Park == nil {
+			http.NotFound(w, r)
+			return
+		}
+		s.d.Park.ServeHTTP(w, r)
 	case inferencePath(path):
 		s.d.Inference.ServeHTTP(w, r)
 	case path == catalog.Path && get && s.d.Catalog != nil:

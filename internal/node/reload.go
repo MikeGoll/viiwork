@@ -47,13 +47,20 @@ func (n *Node) Reload() error {
 		n.logf("reload: changes to %s need a restart and were not applied", strings.Join(restart, ", "))
 	}
 
+	// A parked model stays parked while it is configured, its new
+	// configuration included; one the file no longer has leaves the set.
+	n.applyMu.Lock()
+	defer n.applyMu.Unlock()
 	if reflect.DeepEqual(current.Models, next.Models) {
 		return nil
 	}
-	if err := n.applyModels(next.Models); err != nil {
-		n.logf("reload: applying models: %v", err)
-		return err
+	if n.modelsApplied {
+		if err := n.applyUnparkedLocked(next.Models); err != nil {
+			n.logf("reload: applying models: %v", err)
+			return err
+		}
 	}
+	n.pruneParkedLocked(next.Models)
 	n.perf.SetKeys(perfKeys(next.Models))
 	n.mu.Lock()
 	updated := *n.cfg

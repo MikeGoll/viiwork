@@ -369,6 +369,9 @@ func modelsText(ms []meshapi.ModelStatus) string {
 // modelSummary is "name busy/slots", plus the prefill rate when the host
 // publishes a performance score.
 func modelSummary(m meshapi.ModelStatus) string {
+	if m.Parked {
+		return m.Name + " down"
+	}
 	s := fmt.Sprintf("%s %d/%d", m.Name, m.Busy, m.Slots)
 	if m.Perf != nil && m.Perf.MsPer1k > 0 {
 		s += fmt.Sprintf(" %.1fs/1k", float64(m.Perf.MsPer1k)/1000)

@@ -29,6 +29,11 @@ const (
 	PathUpdateActivate = "/v1/update/activate"
 	PathUpdateRollback = "/v1/update/rollback"
 
+	// PathModelsDown and PathModelsUp (v2.7.1) park and unpark this node's
+	// models: POSTs with a ParkRequest, authorised like alias writes.
+	PathModelsDown = "/v1/models/down"
+	PathModelsUp   = "/v1/models/up"
+
 	// PathAliases is GET (list) on its own, and PUT/DELETE on
 	// PathAliases+"/<name>"; revert is POST on AliasRevertPath(name).
 	PathAliases       = "/v1/aliases"

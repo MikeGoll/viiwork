@@ -62,6 +62,11 @@ func TestRun(t *testing.T) {
 	if code, _, errOut := runWith("update", "--frobnicate"); code != 2 || !strings.Contains(errOut, "usage: viiwork update") {
 		t.Errorf("E8: exit %d, stderr %q", code, errOut)
 	}
+	for _, verb := range []string{"down", "up"} {
+		if code, _, errOut := runWith(verb, "--frobnicate"); code != 2 || !strings.Contains(errOut, "usage: viiwork down") {
+			t.Errorf("E8 %s: exit %d, stderr %q", verb, code, errOut)
+		}
+	}
 	llamaCppPin = ""
 	if code, out, _ := runWith("--build-info"); code != 0 || strings.Contains(out, "llama_cpp") || !strings.Contains(out, `"version":"v2-test"`) {
 		t.Errorf("E9 unstamped: exit %d, stdout %q", code, out)
@@ -258,7 +263,7 @@ func TestUsageMatchesTheCommands(t *testing.T) {
 	var stderr bytes.Buffer
 	run([]string{"--bogus-flag"}, runEnv{stdout: io.Discard, stderr: &stderr})
 	u := stderr.String()
-	for _, want := range []string{"viiwork init\n", "join-code [--open]", "--from-config"} {
+	for _, want := range []string{"viiwork init\n", "join-code [--open]", "--from-config", "down | up [model...]"} {
 		if !strings.Contains(u, want) {
 			t.Errorf("usage lacks %q:\n%s", want, u)
 		}

@@ -95,6 +95,13 @@ type Node struct {
 	mu  sync.Mutex
 	cfg *config.Config // the running configuration; Reload replaces Models
 
+	// applyMu orders every change to what the supervisor runs: Run's first
+	// apply, Reload and Park. It is taken before mu, never after.
+	applyMu       sync.Mutex
+	parked        map[string]bool // models parked by viiwork down; applyMu
+	modelsApplied bool            // Run has applied the models; applyMu
+	parkedView    atomic.Pointer[map[string]bool]
+
 	vendor      gpu.Vendor
 	history     *gpu.History
 	broadcaster *gpu.Broadcaster
@@ -172,7 +179,8 @@ func New(cfg *config.Config, o Options) (*Node, error) {
 		o.MagicDNS = mesh.ReadMagicDNSSuffix
 	}
 	running := *cfg
-	n := &Node{o: o, logger: log.New(o.Log, "", log.LstdFlags), cfg: &running, started: time.Now(), ready: make(chan struct{})}
+	n := &Node{o: o, logger: log.New(o.Log, "", log.LstdFlags), cfg: &running, started: time.Now(), ready: make(chan struct{}),
+		parked: map[string]bool{}}
 	n.streamCtx, n.streamCancel = context.WithCancel(context.Background())
 	n.llama = newLlamaFollow(o, cfg.Models, n.logf)
 	n.apiAddr.Store("")
@@ -286,7 +294,7 @@ func New(cfg *config.Config, o Options) (*Node, error) {
 	}
 	n.perf.SetKeys(perfKeys(cfg.Models))
 	n.router = route.New(route.Config{
-		Self: n.name, Local: route.SupervisorModels(n.sup), Remote: n.capPoller,
+		Self: n.name, Local: parkedLocal{inner: route.SupervisorModels(n.sup), n: n}, Remote: n.capPoller,
 		StaleAfter: cfg.Routing.StaleAfter.Duration, QueueMax: cfg.Routing.QueueMax,
 		QueueTimeout: cfg.Routing.QueueTimeout.Duration,
 		Performance:  cfg.Routing.PerformanceOn(),
@@ -303,7 +311,7 @@ func New(cfg *config.Config, o Options) (*Node, error) {
 		out := append([]string(nil), names...)
 		return append(out, resolverPipelines.VirtualModelNames()...)
 	}
-	served := alias.NewServedView(n.name, n.sup, n.capPoller, cfg.Routing.StaleAfter.Duration, nil)
+	served := alias.NewServedView(n.name, localCapacity{n}, n.capPoller, cfg.Routing.StaleAfter.Duration, nil)
 	n.resolver = alias.NewResolver(store, served, pipelineNames, n.logf)
 	n.aliasService = alias.NewService(store, n.resolver, func(key string, msg []byte) {
 		if m := n.mesh.Load(); m != nil {
@@ -329,7 +337,7 @@ func New(cfg *config.Config, o Options) (*Node, error) {
 		executor = pipeline.NewExecutor("http://"+selfHost, n.selfClient())
 	}
 	inference := proxy.NewHandler(proxy.Deps{
-		Self: n.name, Version: o.Version, Router: n.router, Reports: n.capPoller, Local: n.sup,
+		Self: n.name, Version: o.Version, Router: n.router, Reports: n.capPoller, Local: localCapacity{n},
 		Auth: auth, Counters: n.counters, ForwardRetry: cfg.Routing.ForwardRetry, Activity: n.activity,
 		StaleAfter: cfg.Routing.StaleAfter.Duration,
 		Pipelines:  resolverPipelines, PipelineExec: executor,
@@ -359,6 +367,7 @@ func New(cfg *config.Config, o Options) (*Node, error) {
 		GPUAvailable: func() bool { return n.collector != nil && n.collector.Available() },
 		PowerControl: n.powerCtl, CORS: cors, Health: n.health,
 		Update: updateSvc,
+		Park:   &parkHandler{auth: aliasAuth, park: n.Park},
 	})
 	n.meshOpts = n.buildMeshOptions(cfg, keys)
 	return n, nil
@@ -465,7 +474,7 @@ func (n *Node) status() meshapi.NodeStatus {
 			}
 			return netip.Addr{}
 		},
-		Started: n.started, Models: n.sup.Status, QueueLen: n.router.QueueLen, Counters: n.counters.Get,
+		Started: n.started, Models: n.modelStatuses, QueueLen: n.router.QueueLen, Counters: n.counters.Get,
 		Perf: n.perf.Score,
 		GPUs: gpus, Inventory: n.inventory, Vendor: n.vendor, Power: n.power,
 		Energy: energyReader, Cost: costReader, PromptHistory: n.activity.PromptHistoryMax(),
@@ -502,8 +511,15 @@ func (n *Node) cluster() meshapi.ClusterResponse {
 // has a supervisor with no models in it. Counting models there let /health
 // answer 200 "ok" indefinitely for a node serving nothing, which is what
 // Decision 5's 503 exists to prevent (found by the gb1 trial, 2026-09-12).
+//
+// A parked model is not counted: a node whose models are all parked serves
+// nothing by choice, like a router, and must not read as broken.
 func (n *Node) health() (healthy, total, models int) {
-	models = len(n.runningConfig().Models)
+	for _, m := range n.runningConfig().Models {
+		if !n.isParked(m.Name) {
+			models++
+		}
+	}
 	for _, m := range n.sup.Status() {
 		for _, b := range m.Backends {
 			total++
@@ -593,7 +609,7 @@ func (n *Node) Run(ctx context.Context) error {
 	}
 
 	var runErr error
-	if err := n.applyModels(cfg.Models); err != nil {
+	if err := n.applyRunning(); err != nil {
 		runErr = fmt.Errorf("applying models: %w", err)
 	} else {
 		select {

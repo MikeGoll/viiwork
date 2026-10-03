@@ -183,6 +183,7 @@
   .halt.on { border-color: var(--warn); color: var(--warn); font-weight: 600; }
   body.halted .mono-list, body.halted #backendsCard { outline: 1px solid rgba(210,153,34,0.35); }
   tr.gone td { color: var(--dimmer); }
+  tr.parked td { color: var(--dimmer); }
   .respawns { color: var(--warn); font-size: 0.72rem; }
   .perf { color: var(--dimmer); font-size: 0.72rem; }
   /* The VRAM cell carried a 46px meter as well as its numbers. In a table that
@@ -463,6 +464,18 @@ function flattenBackends(c) {
   return rows;
 }
 
+// parkedModels is every model a live host has parked with `viiwork down`:
+// it has no backends to list, so the table marks where they would be.
+function parkedModels(c) {
+  const out = [];
+  for (const h of liveHosts(c)) {
+    for (const m of (h.status.models || [])) {
+      if (m.parked) out.push({ host: h.host, model: m.name });
+    }
+  }
+  return out;
+}
+
 // goneHosts is the members that are not alive. They have no status to show,
 // but a powered-off or dead machine should stay visible rather than vanish.
 function goneHosts(c) {
@@ -477,8 +490,10 @@ function renderBackends() {
   let rows = flattenBackends(cluster);
   if (modelFilter) rows = rows.filter(r => r.model === modelFilter);
   const gone = modelFilter ? [] : goneHosts(cluster);
+  let parked = parkedModels(cluster);
+  if (modelFilter) parked = parked.filter(p => p.model === modelFilter);
 
-  if (!rows.length && !gone.length) {
+  if (!rows.length && !gone.length && !parked.length) {
     body.innerHTML = `<tr><td colspan="9" class="empty">no backends${modelFilter ? " for " + esc(modelFilter) : ""}</td></tr>`;
     $("backendSummary").textContent = "";
     return;
@@ -489,6 +504,12 @@ function renderBackends() {
   for (const r of rows) {
     if (!groups.has(key(r))) groups.set(key(r), []);
     groups.get(key(r)).push(r);
+  }
+  const parkedBy = new Map();
+  for (const p of parked) {
+    if (!groups.has(key(p))) groups.set(key(p), []);
+    if (!parkedBy.has(key(p))) parkedBy.set(key(p), []);
+    parkedBy.get(key(p)).push(p);
   }
 
   const hostWatts = new Map(hostPower(cluster).map(h => [h.host, h.watts]));
@@ -527,6 +548,10 @@ function renderBackends() {
         `<td class="num">${r.vramTotal ? `<span class="${vramFrac > 0.9 ? "bad" : vramFrac > 0.7 ? "warn" : ""}">${fmtGB(r.vramUsed)}/${fmtGB(r.vramTotal)}</span>` : "—"}</td>` +
         `<td class="num">${done ? meter(tokFrac) + r.tokDecoded + "/" + done + "t" : "—"}</td>` +
         `</tr>`;
+    }
+    for (const p of (parkedBy.get(name) || [])) {
+      html += `<tr class="parked"><td><span class="dot" title="parked: viiwork down on ${esc(p.host)}"></span></td>` +
+              `<td class="gpu">${esc(p.model)}</td><td></td><td class="host">${esc(p.host)}</td><td colspan="5">down</td></tr>`;
     }
   }
   if (gone.length) {
