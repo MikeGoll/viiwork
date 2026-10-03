@@ -342,3 +342,50 @@ func TestSessionHostWinsOverLocalInTheBand(t *testing.T) {
 	}
 	l.Release()
 }
+
+// 2026-10-03, beta5 on gb2 + gb3: after a flag change neither host had a score,
+// so routing fell back to local-first and 22% of turns crossed hosts in the
+// first five minutes. A session follows its host with no scores too.
+func TestSessionHostWithoutScores(t *testing.T) {
+	local := newFakeLocal()
+	local.add("m", newFakeBackend("m/0", 2))
+	reps := &fakeReports{reports: []capacity.Report{report("gb3", t0, time.Millisecond, meshapi.ModelCapacity{Name: "m", Slots: 2, HealthyBackends: 1})}}
+	r := newScored(local, reps, noScore, seq(0.5))
+
+	away := sessionKeyFavouring(t, "gb3", "self")
+	l, err := r.Pick(Request{Model: "m", EstK: 4, SessionKey: away})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if l.Target().Local || l.Target().Node != "gb3" {
+		t.Fatalf("picked %+v; with no scores the session still goes to its host gb3", l.Target())
+	}
+	l.Release()
+
+	home := sessionKeyFavouring(t, "self", "gb3")
+	l, err = r.Pick(Request{Model: "m", EstK: 4, SessionKey: home})
+	if err != nil || !l.Target().Local {
+		t.Fatalf("got %+v %v; the session's host is this node", l, err)
+	}
+	l.Release()
+
+	// Its host full, the session takes the other one rather than waiting.
+	full := &fakeReports{reports: []capacity.Report{report("gb3", t0, time.Millisecond, meshapi.ModelCapacity{Name: "m", Slots: 2, Busy: 2, HealthyBackends: 1})}}
+	r = newScored(local, full, noScore, seq(0.5))
+	l, err = r.Pick(Request{Model: "m", EstK: 4, SessionKey: away})
+	if err != nil || !l.Target().Local {
+		t.Fatalf("got %+v %v; with gb3 full the session is served here", l, err)
+	}
+}
+
+// routing.performance false is the old routing exactly, session or not.
+func TestPerformanceOffIgnoresTheSession(t *testing.T) {
+	local := newFakeLocal()
+	local.add("m", newFakeBackend("m/0", 2))
+	reps := &fakeReports{reports: []capacity.Report{report("gb3", t0, time.Millisecond, meshapi.ModelCapacity{Name: "m", Slots: 2, HealthyBackends: 1})}}
+	r := New(Config{Self: "self", Local: local, Remote: reps, StaleAfter: time.Hour, QueueMax: 8, QueueTimeout: time.Second, Now: func() time.Time { return t0 }})
+	l, _ := r.Pick(Request{Model: "m", EstK: 4, SessionKey: sessionKeyFavouring(t, "gb3", "self")})
+	if !l.Target().Local {
+		t.Fatal("routing.performance false keeps local-first")
+	}
+}

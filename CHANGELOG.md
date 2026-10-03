@@ -1,5 +1,44 @@
 # Changelog
 
+## v2.7.0
+
+**Routing follows measured speed, and a session stays on its warm cache.**
+Everything from v2.7.0-beta1 to beta5 below, plus one fix found in the last
+test.
+
+- Every host measures its own time to first token and publishes it in
+  `/v1/capacity`. Routing picks by predicted speed among hosts with a free
+  slot (`routing.performance`, default on; `false` is the old routing).
+- Hosts within 1.25× of the best count as equal. Among them a session's turns
+  go to one host, chosen the same way from any entry node, and inside that
+  host to one backend.
+- Scores are fitted by medians, so one slow request or a host's mix of short
+  prompts does not set its score.
+- The prompt history records coding-agent turns: their tool results as the
+  prompt, their tool calls as the output.
+- Everything from v2.6.2: parallel staging and `--parallel N` waves for
+  `viiwork update`.
+
+**New since beta5: a session follows its host before any score exists.** A
+fresh start, or a change to a model's flags, drops every host's score. With no
+score anywhere, routing fell back to local-first and ignored the session, so a
+session's turns crossed hosts until the scores came back. Now a session goes to
+its own host among those with a free slot, the same host it gets once scores
+exist. A request without a session is still served locally first.
+
+**Measured on two identical hosts** (gb2 and gb3, four Radeon VII pairs each,
+16 coding-agent sessions entering through gb2, 28 minutes):
+
+| | mean TTFT | p90 TTFT | prompt cache hits | turns that moved host / backend |
+|---|---|---|---|---|
+| beta3 | 25.0 s | 75.0 s | 82.9% | 12% / 7% |
+| beta5, once both hosts had scores | 13.8 s | 18.4 s | 94.7% | 4–8% / 0% |
+| one host alone, 8 sessions | 13.7 s | 34.3 s | 92.7% | — / 4% |
+
+With scores, two hosts carry twice the sessions at the speed one host gives
+half as many. Beta5's first fifteen minutes, before either host had a score,
+looked like beta3; that is the fix above.
+
 ## v2.7.0-beta5
 
 **A session stays on its warm cache, across hosts and inside one.** A test on

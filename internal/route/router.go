@@ -199,6 +199,13 @@ func (r *Router) pickWithReportsLocked(req Request, reports []capacity.Report) (
 			}
 			return nil, ErrNoFreeSlot
 		}
+		// No score anywhere: a session still follows its host, the same
+		// rendezvous as the scored pick, over every host with a free slot.
+		if req.SessionKey != 0 {
+			if l := r.pickSessionLocked(req, backends, localOK && admitting, reports); l != nil {
+				return l, nil
+			}
+		}
 	}
 	if localOK && admitting && (req.Host == "" || req.Host == r.c.Self) {
 		if l := r.pickLocalLocked(req, backends); l != nil {
@@ -250,6 +257,37 @@ func (r *Router) pickLocalLocked(req Request, backends []LocalBackend) *Lease {
 	}
 	b.Acquire()
 	return &Lease{r: r, backend: b, target: Target{Local: true, Node: r.c.Self, BackendID: b.ID(), Addr: b.Addr()}}
+}
+
+// pickSessionLocked sends a session to the host with the highest rendezvous
+// score among those with a free slot, this node included, before any score
+// exists. Until v2.7.0 such a request went local-first, and on a fresh start
+// or after a flag change (which drops every score) a session's turns crossed
+// hosts until the scores came back: 22% of turns in the first five minutes on
+// gb2 + gb3. Nil when no host has room.
+func (r *Router) pickSessionLocked(req Request, backends []LocalBackend, localEligible bool, reports []capacity.Report) *Lease {
+	now := r.c.Now()
+	var top uint64
+	var pick *capacity.Report
+	local := false
+	if localEligible && localHasFree(req, backends) {
+		local, top = true, rendezvous(req.SessionKey, r.c.Self)
+	}
+	for i, rep := range reports {
+		if _, free, serves := r.peerFreeLocked(req, rep, now); !serves || free <= 0 {
+			continue
+		}
+		if h := rendezvous(req.SessionKey, rep.Node); (!local && pick == nil) || h > top {
+			pick, top, local = &reports[i], h, false
+		}
+	}
+	switch {
+	case local:
+		return r.pickLocalLocked(req, backends)
+	case pick != nil:
+		return r.peerLeaseLocked(*pick, req.Model, now)
+	}
+	return nil
 }
 
 func (r *Router) pickPeerLocked(req Request, reports []capacity.Report) *Lease {
