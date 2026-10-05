@@ -1,6 +1,9 @@
 package engine
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // This file is the whole set of optional engine capabilities, kept together so
 // that it can be read at once. Each is found by type assertion at its call
@@ -119,4 +122,26 @@ func SeparatesReasoning(e Engine) bool {
 // the Spec ValidateOptions gets.
 type PerfKeyer interface {
 	PerfKey(s Spec) string
+}
+
+// WarmUpper is implemented by an engine whose server answers its probe as
+// ready before it is safe to send it work. WarmUp is how long a backend must
+// have been ready, without a break, before the node calls it healthy; until
+// then it stays in starting with phase "warming up", takes no request and
+// keeps its place in the load gate, and the wait counts against
+// startup_timeout. Zero is no warm-up. Called with the Spec the backend was
+// launched with. It applies to every start of a backend, respawns included,
+// and never to a backend that is already healthy.
+type WarmUpper interface {
+	WarmUp(s Spec) time.Duration
+}
+
+// WarmUpOf is e's warm-up for s, or zero.
+func WarmUpOf(e Engine, s Spec) time.Duration {
+	if w, ok := e.(WarmUpper); ok {
+		if d := w.WarmUp(s); d > 0 {
+			return d
+		}
+	}
+	return 0
 }

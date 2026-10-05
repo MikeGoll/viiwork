@@ -51,6 +51,7 @@ type loop struct {
 
 	quickRetryUsed bool
 	loadFailLogged bool
+	readySince     time.Time // first ready probe of the current unbroken run while starting
 
 	gpuDecided   bool
 	gpuHealthyAt time.Time
@@ -198,6 +199,7 @@ func (l *loop) launch() next {
 	port := b.port
 	b.mu.Unlock()
 	l.gpuDecided, l.gpuHealthyAt, l.gpuLastErr = false, time.Time{}, nil
+	l.readySince = time.Time{}
 	b.emit("starting on port %d (gpus %v)", port, b.gpus)
 	return toStarting
 }
@@ -253,6 +255,7 @@ func (l *loop) starting() next {
 			return toLaunch
 		}
 
+		ready = l.warmedUp(ready)
 		act := l.observe(ready, alive, 0)
 		if b.State() == StateHealthy {
 			b.setPhase("")
@@ -268,6 +271,35 @@ func (l *loop) starting() next {
 			return l.act(act, toStarting)
 		}
 	}
+}
+
+// phaseWarmingUp is the phase of a backend whose engine answers ready and
+// asks for a warm-up (engine.WarmUpper) that has not passed yet.
+const phaseWarmingUp = "warming up"
+
+// warmedUp holds a ready probe back until the engine's warm-up has passed
+// since the first probe of an unbroken ready run. A probe that is not ready
+// starts the wait again.
+func (l *loop) warmedUp(ready bool) bool {
+	b := l.b
+	if !ready {
+		l.readySince = time.Time{}
+		return false
+	}
+	b.mu.Lock()
+	spec := b.spec
+	b.mu.Unlock()
+	warm := engine.WarmUpOf(b.eng, spec)
+	if warm <= 0 {
+		return true
+	}
+	now := b.deps.Now()
+	if l.readySince.IsZero() {
+		l.readySince = now
+		b.setPhase(phaseWarmingUp)
+		b.emit("loaded, warming up for %s", warm)
+	}
+	return now.Sub(l.readySince) >= warm
 }
 
 func (b *Backend) launchTime() time.Time {

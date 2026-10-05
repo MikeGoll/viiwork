@@ -1,5 +1,29 @@
 # Changelog
 
+## v2.8.1
+
+**A Strata backend waits 30 seconds after loading before it takes work.**
+
+- **`strata: {warmup: 30s}`** is the new key, with that default; `0s` turns
+  the wait off and `10m` is the most it accepts. A backend whose model has
+  loaded shows phase `warming up`, stays in `starting`, takes no request and
+  keeps its place in the load gate until it has answered ready for that long
+  without a break. The wait counts against `startup_timeout`, and it applies
+  to every start of a backend, respawns included.
+- **Why:** on Radeon VIIs with Strata v0.1.39, a long prompt that reached a
+  backend within 30 seconds of its `/health` saying loaded failed at its
+  first checkpoint (`saving a checkpoint part failed`), the request ended in
+  an error and the backend had to load again. That happened three times; a
+  backend whose first long prompt came later read it. The cause inside Strata
+  is not known, so this is a wait and not a fix.
+- **For engine authors:** the wait is an optional capability,
+  `engine.WarmUpper` ([adding-an-engine.md](docs/adding-an-engine.md)). No
+  other engine declares one, so nothing changes for them.
+- **Measured, no code:** with three Radeon VIIs per backend the whole KV cache
+  of a 262,144-token context fits on the cards, and leaving `--kv-resident`
+  out of the Strata JSON raised three coding sessions' total output from 37
+  to 60 tokens per second ([models.md](docs/models.md#strata-one-moe-family-across-several-cards)).
+
 ## v2.8.0
 
 **A fourth engine: Strata.** `engine: strata` runs

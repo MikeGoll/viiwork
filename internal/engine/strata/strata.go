@@ -35,6 +35,7 @@ var (
 	_ engine.UsageReporter       = (*Engine)(nil)
 	_ engine.ReasoningSeparator  = (*Engine)(nil)
 	_ engine.PerfKeyer           = (*Engine)(nil)
+	_ engine.WarmUpper           = (*Engine)(nil)
 )
 
 // Engine holds no per-backend state: one is registered from init and shared
@@ -70,6 +71,22 @@ func (e *Engine) UsageReporting() engine.UsageReporting {
 // delta.reasoning_content with no <think> tags and the answer follows as
 // delta.content, in every reply that has one.
 func (e *Engine) SeparatesReasoning() bool { return true }
+
+// WarmUp is the block's `warmup`, 30 seconds unless the operator says
+// otherwise. Seen on gb3 with v0.1.39 (2026-10-05, three times): a long prompt
+// that reached a backend within 30 seconds of /health saying loaded failed at
+// its first checkpoint ("saving a checkpoint part failed") and the server lost
+// its slot, so the backend was reloaded; a backend whose first long prompt
+// came 108 seconds after loaded read it. The cause inside Strata is not known,
+// so this is a wait, not a fix. Options that do not validate give no warm-up:
+// Command is what refuses them.
+func (e *Engine) WarmUp(s engine.Spec) time.Duration {
+	opts, err := options("model", s)
+	if err != nil {
+		return 0
+	}
+	return opts.Warmup
+}
 
 // PerfKey is the content of the Strata JSON: the pack, the KV format and the
 // layer split that decide a backend's speed are all in there, and the node's

@@ -508,3 +508,48 @@ func startModel(t *testing.T, h *loopHarness, model *Model) {
 		model.drain(0)
 	})
 }
+
+// An engine that asks for a warm-up keeps its backend in starting, holding
+// the load gate, until it has been ready that long.
+func TestLoopL22WarmUp(t *testing.T) {
+	h := newHarness(t)
+	model := fakeModel("l22", []int{0}, "ready_after=100ms", "warmup=900ms")
+	model.Engine = "fake-warm"
+	m, _ := h.start(model)
+	b := m.Backends()[0]
+	within(t, 2*time.Second, "warm-up phase", func() bool { return b.Phase() == "warming up" })
+	warming := time.Now()
+	if b.State() != StateStarting {
+		t.Fatalf("state while warming up = %v, want starting", b.State())
+	}
+	// a wait that times out gives its place up, so this ticket is spent here
+	if tk := h.gate.enqueue(); granted(t, tk, 300*time.Millisecond) {
+		tk.release()
+		t.Error("a backend that is warming up must keep its load ticket")
+	}
+	waitHealthy(t, b, 3*time.Second)
+	if d := time.Since(warming); d < 500*time.Millisecond {
+		t.Errorf("healthy %v after the warm-up began, want about 900ms", d)
+	}
+	if b.Phase() != "" {
+		t.Errorf("phase once healthy = %q, want none", b.Phase())
+	}
+	if n := h.events.count("warming up for"); n != 1 {
+		t.Errorf("%d warm-up events, want 1", n)
+	}
+	if !h.freshTicketGranted() {
+		t.Error("a warmed-up backend must release its load ticket")
+	}
+}
+
+// A warm-up of zero changes nothing: ready is healthy.
+func TestLoopL23NoWarmUp(t *testing.T) {
+	h := newHarness(t)
+	model := fakeModel("l23", []int{0}, "ready_after=100ms")
+	model.Engine = "fake-warm"
+	m, _ := h.start(model)
+	waitHealthy(t, m.Backends()[0], 2*time.Second)
+	if h.events.has("warming up") {
+		t.Error("no warm-up was asked for, yet one was announced")
+	}
+}

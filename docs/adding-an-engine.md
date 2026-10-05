@@ -222,6 +222,15 @@ type ReasoningSeparator interface {
 type PerfKeyer interface {
     PerfKey(s Spec) string
 }
+
+// WarmUpper is implemented by an engine whose server answers its probe as
+// ready before it is safe to send it work. WarmUp is how long a backend
+// must have been ready, without a break, before the node calls it healthy;
+// until then it stays in starting with phase "warming up" and keeps its
+// place in the load gate. Zero is no warm-up.
+type WarmUpper interface {
+    WarmUp(s Spec) time.Duration
+}
 ```
 
 `ReasoningSeparator` decides what a client sees when it streams without

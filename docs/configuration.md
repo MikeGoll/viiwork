@@ -87,8 +87,10 @@ node, because a reload (SIGHUP) relaunches only models whose entry in
 `viiwork.yaml` changed. Keep the JSON where a backend cannot write it; it names
 the program the server runs. `source:` is not supported for this engine.
 
-The `strata:` block has two keys: `dir`, the Strata checkout (required, an
-absolute path), and `python` (default `python3`).
+The `strata:` block has three keys: `dir`, the Strata checkout (required, an
+absolute path), `python` (default `python3`) and `warmup` (default `30s`,
+`0s` to turn it off, at most `10m`): how long a backend waits after its model
+has loaded before the node sends it work. It shows as phase `warming up`.
 Engine tuning stays in the JSON's `args`, where upstream puts it. See
 [models.md](models.md#strata-one-moe-family-across-several-cards).
 

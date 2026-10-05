@@ -170,6 +170,7 @@ models:
   #   strata:
   #     dir: /opt/strata       # the Strata checkout; required, absolute
   #     python: python3        # default; /opt/strata/.venv/bin/python in the CUDA image
+  #     warmup: 30s            # default; the wait between loaded and the first request (0s: none)
 
   # A model fetched and seeded by the host's viiwork-parrot instead of a local
   # file (docs/models.md). Set path or source, not both.

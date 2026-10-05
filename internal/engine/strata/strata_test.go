@@ -234,6 +234,11 @@ func TestValidateOptions(t *testing.T) {
 		// Python resolves a relative directory against wherever the node
 		// happened to be started.
 		{"relative dir", "dir: strata\n", "models[3].strata.dir"},
+		{"warmup", "dir: /opt/strata\nwarmup: 45s\n", ""},
+		{"warmup off", "dir: /opt/strata\nwarmup: 0s\n", ""},
+		{"negative warmup", "dir: /opt/strata\nwarmup: -1s\n", "models[3].strata.warmup"},
+		{"warmup too long", "dir: /opt/strata\nwarmup: 30m\n", "models[3].strata.warmup"},
+		{"warmup without a unit", "dir: /opt/strata\nwarmup: soon\n", "models[3].strata: warmup"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := e.ValidateOptions("models[3]", spec(t, base, tc.block))
@@ -405,5 +410,29 @@ func TestPerfKeyIsTheConfigFilesContent(t *testing.T) {
 	// A file that cannot be read adds nothing; Command is what refuses it.
 	if k := e.PerfKey(engine.Spec{Path: filepath.Join(t.TempDir(), "absent.json")}); k != "" {
 		t.Errorf("an unreadable file gave key %q", k)
+	}
+}
+
+func TestWarmUp(t *testing.T) {
+	e := New()
+	base := engine.Spec{Name: "m", Path: "/x.json", GPUs: []int{0, 1}, Context: 4096, Parallel: 1}
+	for _, tc := range []struct {
+		name, block string
+		want        time.Duration
+	}{
+		{"default", "dir: /opt/strata\n", 30 * time.Second},
+		{"set", "dir: /opt/strata\nwarmup: 45s\n", 45 * time.Second},
+		{"off", "dir: /opt/strata\nwarmup: 0s\n", 0},
+		// Command refuses this block; a warm-up read from it would be a guess.
+		{"invalid block", "warmup: 45s\n", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := e.WarmUp(spec(t, base, tc.block)); got != tc.want {
+				t.Errorf("WarmUp = %s, want %s", got, tc.want)
+			}
+			if got := engine.WarmUpOf(e, spec(t, base, tc.block)); got != tc.want {
+				t.Errorf("WarmUpOf = %s, want %s", got, tc.want)
+			}
+		})
 	}
 }

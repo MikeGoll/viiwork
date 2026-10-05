@@ -182,14 +182,25 @@ func (f *fakeProgressEngine) LoadProgress(ctx context.Context, _ engine.Spec, ad
 	return engine.Load{Slots: b.Slots, Busy: b.Busy}, b.Decoded, b.Remain, err
 }
 
+// fakeWarmEngine asks for the warm-up its model's args name
+// (engine.WarmUpper): warmup=<duration>.
+type fakeWarmEngine struct{ fakeEngine }
+
+func (f *fakeWarmEngine) WarmUp(s engine.Spec) time.Duration {
+	d, _ := time.ParseDuration(fakeArgs(s.Args)["warmup"])
+	return d
+}
+
 var (
 	_ engine.Engine              = (*fakeEngine)(nil)
 	_ engine.TokenProgressReader = (*fakeProgressEngine)(nil)
+	_ engine.WarmUpper           = (*fakeWarmEngine)(nil)
 )
 
 func init() {
 	engine.Register(&fakeEngine{name: "fake", client: &http.Client{}})
 	engine.Register(&fakeProgressEngine{fakeEngine{name: "fake-progress", client: &http.Client{}}})
+	engine.Register(&fakeWarmEngine{fakeEngine{name: "fake-warm", client: &http.Client{}}})
 	helperModes["serve"] = serveFake
 	helperModes["exit1"] = func() { os.Exit(1) }
 }

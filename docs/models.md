@@ -156,6 +156,7 @@ models:
     strata:
       dir: /opt/strata               # the Strata checkout; required
       python: python3                # default
+      warmup: 30s                    # default
 ```
 
 - **One JSON serves every backend of the model.** The node passes host, port
@@ -176,6 +177,18 @@ models:
   36 GB. Without it one instance held about 27 GB resident.
 - **`--trim-stage-weights` is what fits the Coder on two cards.** Without it
   90% of the experts were resident and decode fell from 56 to 21 tok/s.
+- **With three cards per backend, leave `--kv-resident` out.** The whole KV
+  cache of a 262,144-token context is about 1 GiB at `--kv int8`, and three
+  Radeon VIIs have the room. On gb3 (2026-10-05, three backends of three
+  cards, three coding sessions for 25 minutes) total output rose from 37 to 60
+  tok/s and decode at 40 to 80 thousand tokens of context from 31 to 57 tok/s;
+  a 250,000-token cold prompt was read at 676 tok/s and left about 850 MiB
+  free on the fullest card. `--prefill auto` was slower than `--prefill 4096`
+  there: it borrowed expert-cache slots for its larger chunks and prompt
+  reading fell to between a quarter and a half.
+- **A backend waits 30 seconds after loading** (`strata: {warmup: 30s}`, phase
+  `warming up`). A long prompt that reached a v0.1.39 backend sooner than that
+  failed at its first checkpoint and cost a reload.
 
 ### Measured on Radeon VII
 
