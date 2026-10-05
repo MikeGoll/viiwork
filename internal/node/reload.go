@@ -52,6 +52,10 @@ func (n *Node) Reload() error {
 	n.applyMu.Lock()
 	defer n.applyMu.Unlock()
 	if reflect.DeepEqual(current.Models, next.Models) {
+		// The models did not change, but a file one of them names may have
+		// (an engine's PerfKey reads it): the keys are read again, so a
+		// baseline measured under the old file is dropped.
+		n.perf.SetKeys(perfKeys(next.Models))
 		return nil
 	}
 	if n.modelsApplied {

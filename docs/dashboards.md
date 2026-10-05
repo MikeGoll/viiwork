@@ -102,6 +102,13 @@ memory**, evicted oldest-first. Nothing is written to disk and nothing survives 
 restart — this is a debugging aid, not an audit log. Prompt and output are each
 truncated at 50 000 characters.
 
+The `/prompt` page's header shows the request's wall time and, when the node
+saw a token count, the reply's size and average rate: `296 tokens · 57.5 tok/s`.
+The rate is generation alone, from the first token to the end. For a plain
+(non-streamed) reply, or a request another node executed, the node saw no
+first token; the rate is then over the whole request, prompt reading included,
+and says so.
+
 The depth is configurable:
 
 ```yaml

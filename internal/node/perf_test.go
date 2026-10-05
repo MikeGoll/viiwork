@@ -58,3 +58,20 @@ func TestCorruptPerfFileDoesNotStopTheNode(t *testing.T) {
 		t.Errorf("the corrupt file must be logged; log = %q", logs.String())
 	}
 }
+
+// A Strata model's speed is decided inside its JSON config (pack, KV format,
+// layer split), which the node's entry only names. The engine adds the file's
+// content to the key, so editing it drops the baseline like an args change.
+func TestPerfKeysFollowAnEnginesOwnConfigFile(t *testing.T) {
+	conf := filepath.Join(t.TempDir(), "strata.json")
+	m := config.Model{Name: "m", Engine: "strata", Path: conf, GPUs: []int{0, 1}}
+	writeFile(t, conf, `{"args": ["--kv", "int8"]}`)
+	k := perfKeys([]config.Model{m})["m"]
+	if perfKeys([]config.Model{m})["m"] != k {
+		t.Error("an unchanged file must keep the baseline")
+	}
+	writeFile(t, conf, `{"args": ["--kv", "q4_0"]}`)
+	if perfKeys([]config.Model{m})["m"] == k {
+		t.Error("a changed config file must drop the baseline")
+	}
+}

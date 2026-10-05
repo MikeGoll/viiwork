@@ -237,6 +237,11 @@ func rewriteThinkResponse(body []byte) []byte {
 		if !hasReasoning {
 			continue
 		}
+		// A tool call is the answer: reasoning in front of one is dropped,
+		// as the stream drops it, not moved into content beside the call.
+		if calls, _ := msg["tool_calls"].([]any); len(calls) > 0 {
+			continue
+		}
 
 		if reasoning == "" {
 			delete(msg, "reasoning_content")
@@ -335,6 +340,11 @@ func streamThinkDisabled(w http.ResponseWriter, body io.Reader, cancel func()) (
 				cancel()
 				return true, nil
 			}
+			// A keep-alive comment is all a client sees while thinking is
+			// suppressed: it must leave now, not with the next chunk.
+			if len(line) > 0 {
+				f.Flush()
+			}
 			continue
 		}
 
@@ -387,6 +397,9 @@ func streamThinkDisabled(w http.ResponseWriter, body io.Reader, cancel func()) (
 				probe.Choices[0].Delta.Content == nil &&
 				(probe.Choices[0].FinishReason == nil || *probe.Choices[0].FinishReason == "") {
 				reasoning := *probe.Choices[0].Delta.ReasoningContent
+				if reasoning != "" {
+					noteGenerated(w)
+				}
 				// Mirrors the else-branch of the in-think-block case below.
 				if thinkBuf.Len()+len(reasoning) <= maxThinkBufSize {
 					thinkBuf.WriteString(reasoning)
@@ -465,6 +478,11 @@ func streamThinkDisabled(w http.ResponseWriter, body io.Reader, cancel func()) (
 			}
 
 			reasoning, hasReasoning := delta["reasoning_content"].(string)
+			if reasoning != "" {
+				// Generated, whether it is then suppressed or renamed: the
+				// reply's token count includes it, so its time must too.
+				noteGenerated(w)
+			}
 			if !hasReasoning {
 				// No reasoning_content — check for finish_reason with unclosed think
 				if fr, _ := cm["finish_reason"].(string); fr != "" && inThinkBlock && thinkBuf.Len() > 0 {

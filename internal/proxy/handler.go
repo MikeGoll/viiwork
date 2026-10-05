@@ -74,6 +74,10 @@ type Deps struct {
 	// Usage says how a model's engine reports usage. nil = the zero value:
 	// ask for usage, and treat an absent cached_tokens as unknown.
 	Usage func(model string) engine.UsageReporting
+	// SeparateReasoning says whether a model's engine streams reasoning apart
+	// from the answer (engine.ReasoningSeparator). nil = no: untagged
+	// reasoning is renamed to content, the rule llama-server needs.
+	SeparateReasoning func(model string) bool
 }
 
 // PerfRecorder is *perf.Tracker as the proxy uses it.
@@ -245,7 +249,7 @@ func (h *Handler) handleInference(w http.ResponseWriter, r *http.Request, dialec
 		h.d.Activity.StorePrompt(d.rid, historyModel, extractPromptText(body))
 		// Deferred, so a response aborted by panic is recorded too.
 		defer func() {
-			h.d.Activity.StoreOutput(d.rid, historyModel, capture.Output(), time.Since(start).Milliseconds())
+			recordReply(h.d.Activity, d.rid, historyModel, capture.Output(), time.Since(start), d.outTokens, d.genMS)
 		}()
 	}
 	h.dispatch(w, r, d)
@@ -257,7 +261,8 @@ type dispatch struct {
 	model, alias, host, taskID string
 	body                       []byte
 	forwarded, thinkDisabled   bool
-	record                     bool // emit activity events (the origin only)
+	outTokens, genMS           int64 // the reply's completion tokens and generation time, 0 = not known
+	record                     bool  // emit activity events (the origin only)
 	rid                        int64
 	start                      time.Time
 	capture                    *captureWriter
@@ -342,6 +347,15 @@ func (h *Handler) dispatch(w http.ResponseWriter, r *http.Request, d *dispatch) 
 
 		if res.Outcome == outcomeServed {
 			if d.record {
+				// For the /prompt page's average rate. The response is
+				// complete, so the capture's usage decode sees all of it.
+				d.outTokens, _ = d.capture.CompletionTokens()
+				if n, ok := completionTokensFromEvent(res.StrippedUsage); ok {
+					d.outTokens = n
+				}
+				if !res.GenStart.IsZero() {
+					d.genMS = time.Since(res.GenStart).Milliseconds()
+				}
 				elapsed := time.Since(d.start).Round(time.Millisecond)
 				msg := meshapi.RequestDone(d.model, label, elapsed)
 				if res.Aborted || res.Truncated {
@@ -489,7 +503,8 @@ func (h *Handler) attempt(w http.ResponseWriter, r *http.Request, lease *route.L
 	if t.Local {
 		body, strip := h.localBodyFor(d)
 		granted := time.Now()
-		res = serveLocal(w, r, body, lease.Backend(), d.model, h.d.Self, d.thinkDisabled, strip)
+		separate := h.d.SeparateReasoning != nil && h.d.SeparateReasoning(d.model)
+		res = serveLocal(w, r, body, lease.Backend(), d.model, h.d.Self, d.thinkDisabled, strip, separate)
 		res.Granted = granted
 		return res
 	}
@@ -654,4 +669,15 @@ func (h *Handler) handleCapacity(w http.ResponseWriter) {
 		models[i] = m
 	}
 	httpjson.Write(w, http.StatusOK, meshapi.CapacityResponse{Node: h.d.Self, Ver: h.d.Version, Models: models})
+}
+
+// recordReply stores a finished request's output with its times and token
+// count. A request with no output — the client gave up first — records none
+// of them: StoreOutput keeps no empty output, and a generation time beside no
+// output and no elapsed time describes nothing.
+func recordReply(l *activity.Log, rid int64, model, output string, elapsed time.Duration, outTokens, genMS int64) {
+	l.StoreOutput(rid, model, output, elapsed.Milliseconds())
+	if output != "" {
+		l.StoreUsage(rid, outTokens, genMS)
+	}
 }

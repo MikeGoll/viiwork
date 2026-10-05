@@ -74,6 +74,12 @@ func (l *Log) StoreOutput(rid int64, model, output string, elapsedMS int64) {
 	l.prompts.StoreOutput(rid, time.Now().Unix(), model, output, elapsedMS)
 }
 
+// StoreUsage records the reply's token count and generation time for a
+// request, after StoreOutput. Zeros mean "not known".
+func (l *Log) StoreUsage(rid, outputTokens, genMS int64) {
+	l.prompts.StoreUsage(rid, outputTokens, genMS)
+}
+
 // PromptHistoryMax reports the prompt store's configured capacity.
 func (l *Log) PromptHistoryMax() int { return l.prompts.Max() }
 

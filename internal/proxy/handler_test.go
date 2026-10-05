@@ -154,6 +154,7 @@ type handlerFx struct {
 	exec         *pipeline.Executor
 	perf         PerfRecorder
 	usage        func(string) engine.UsageReporting
+	separate     func(string) bool
 	performance  bool           // routing.performance: the scored pick
 	rand         func() float64 // the router's draws, for the scored pick
 
@@ -178,21 +179,22 @@ func (f *handlerFx) build() *handlerFx {
 	f.t.Cleanup(cancel)
 	go f.router.Run(ctx)
 	f.h = NewHandler(Deps{
-		Self:         "self",
-		Version:      "v-test",
-		Router:       f.router,
-		Reports:      &f.reports,
-		Local:        f.capacity,
-		Auth:         mustAuth(f.t, "self", nil, nil, f.members),
-		Counters:     f.counters,
-		ForwardRetry: f.forwardRetry,
-		Activity:     f.log,
-		Pipelines:    f.pipelines,
-		PipelineExec: f.exec,
-		Resolve:      f.resolve,
-		ExtraModels:  f.extra,
-		Perf:         f.perf,
-		Usage:        f.usage,
+		Self:              "self",
+		Version:           "v-test",
+		Router:            f.router,
+		Reports:           &f.reports,
+		Local:             f.capacity,
+		Auth:              mustAuth(f.t, "self", nil, nil, f.members),
+		Counters:          f.counters,
+		ForwardRetry:      f.forwardRetry,
+		Activity:          f.log,
+		Pipelines:         f.pipelines,
+		PipelineExec:      f.exec,
+		Resolve:           f.resolve,
+		ExtraModels:       f.extra,
+		Perf:              f.perf,
+		Usage:             f.usage,
+		SeparateReasoning: f.separate,
 	})
 	return f
 }

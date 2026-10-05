@@ -90,3 +90,33 @@ func UsageOf(e Engine) UsageReporting {
 	}
 	return UsageReporting{}
 }
+
+// ReasoningSeparator is implemented by an engine whose streamed responses keep
+// reasoning apart from the answer: reasoning arrives as
+// delta.reasoning_content with no <think> tags, and the answer follows as
+// delta.content. Such a stream needs no rewriting, and for a client that did
+// not ask for thinking the proxy passes it through as it is — the client
+// shows the reasoning field or ignores it — instead of renaming reasoning to
+// content, the rule for every other engine, written for a llama-server that
+// may put its whole answer in reasoning_content. Declare it only for a server
+// that always writes the answer to content.
+type ReasoningSeparator interface {
+	SeparatesReasoning() bool
+}
+
+// SeparatesReasoning reports whether e declares a separate reasoning channel.
+func SeparatesReasoning(e Engine) bool {
+	r, ok := e.(ReasoningSeparator)
+	return ok && r.SeparatesReasoning()
+}
+
+// PerfKeyer is implemented by an engine whose model speed depends on
+// something the node's model entry does not show — a config file of the
+// engine's own that the entry only names. PerfKey returns a short string that
+// changes when that something does; the node adds it to the key its saved
+// performance baseline is filed under, so the change drops the baseline as a
+// change of args does. "" adds nothing. Called at start and on reload, with
+// the Spec ValidateOptions gets.
+type PerfKeyer interface {
+	PerfKey(s Spec) string
+}

@@ -70,6 +70,7 @@ type measureWriter struct {
 	strip    bool
 	carry    []byte    // strip mode: bytes of an event not yet complete
 	firstAt  time.Time // when the first content chunk was written; zero = never
+	genAt    time.Time // first generated token, written or not; zero = same as firstAt
 	stripped []byte    // the usage-only event removed for the client, if any
 	// edge holds the newest bytes written before the first token, so a key
 	// split across writes is still seen. The think-off stream writes a
@@ -100,6 +101,24 @@ func newMeasureWriter(w http.ResponseWriter, strip bool, now func() time.Time) (
 }
 
 func (m *measureWriter) Unwrap() http.ResponseWriter { return m.ResponseWriter }
+
+// noteGenerated records that the backend generated a token the client was not
+// sent: reasoning inside a <think> block that a think-off stream suppresses.
+// genAt is when generation began, which is what the reply's token count is
+// measured over.
+func (m *measureWriter) noteGenerated() {
+	if m.genAt.IsZero() {
+		m.genAt = m.now()
+	}
+}
+
+// noteGenerated tells w's measureWriter, if it is one, about a token that was
+// generated and not written.
+func noteGenerated(w http.ResponseWriter) {
+	if n, ok := w.(interface{ noteGenerated() }); ok {
+		n.noteGenerated()
+	}
+}
 
 func (m *measureWriter) Write(p []byte) (int, error) {
 	if m.firstAt.IsZero() && m.seesToken(p) {
@@ -164,10 +183,12 @@ func (m *measureWriter) finish() error {
 }
 
 var (
-	sseEventEnd   = []byte("\n\n")
-	emptyChoices  = []byte(`"choices":[]`)
-	tokenTextKeys = [][]byte{[]byte(`"content":"`), []byte(`"reasoning_content":"`), []byte(`"text":"`)}
-	toolCallsKey  = []byte(`"tool_calls":[`)
+	sseEventEnd  = []byte("\n\n")
+	emptyChoices = []byte(`"choices":[]`)
+	// Keys end at the colon: what follows may be preceded by a space. Go and
+	// C++ servers write compact JSON, a Python one (Strata) writes `": "`.
+	tokenTextKeys = [][]byte{[]byte(`"content":`), []byte(`"reasoning_content":`), []byte(`"text":`)}
+	toolCallsKey  = []byte(`"tool_calls":`)
 )
 
 func isUsageOnlyEvent(ev []byte) bool {
@@ -184,7 +205,11 @@ func hasTokenText(p []byte) bool {
 		if i < 0 {
 			break
 		}
-		rest = bytes.TrimLeft(rest[i+len(toolCallsKey):], " \t\r\n")
+		rest = bytes.TrimLeft(rest[i+len(toolCallsKey):], jsonSpace)
+		if len(rest) == 0 || rest[0] != '[' {
+			continue
+		}
+		rest = bytes.TrimLeft(rest[1:], jsonSpace)
 		// An empty array is no call: counting it would measure a TTFT of
 		// about zero and make the host look free.
 		if len(rest) > 0 && rest[0] != ']' {
@@ -197,11 +222,14 @@ func hasTokenText(p []byte) bool {
 			if i < 0 {
 				break
 			}
-			rest = rest[i+len(k):]
-			if len(rest) > 0 && rest[0] != '"' {
+			rest = bytes.TrimLeft(rest[i+len(k):], jsonSpace)
+			// A string with at least one byte in it; null and "" are not text.
+			if len(rest) > 1 && rest[0] == '"' && rest[1] != '"' {
 				return true
 			}
 		}
 	}
 	return false
 }
+
+const jsonSpace = " \t\r\n"

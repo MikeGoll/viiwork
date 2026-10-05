@@ -55,16 +55,42 @@ was llama.cpp's total, divided across slots — carrying the old number over
 multiplies VRAM use by `parallel`.
 
 The engine named in `engine:` owns the YAML block below it (`llamacpp:`, `vllm:`,
-`freetoken:`); see [Engines](../README.md#engines) in the README and
+`freetoken:`, `strata:`); see [Engines](../README.md#engines) in the README and
 [adding-an-engine.md](adding-an-engine.md).
 
 `startup_timeout` is per model, and its default comes from the engine: **10
 minutes** for llama.cpp, **20** for vLLM, **30** for FreeToken, which fills a GPU
-expert cache from host memory before it serves. Size it from your observed
+expert cache from host memory before it serves, and **30** for Strata. Size it from your observed
 cold-load time: a backend
 that has not answered by then is given up on and respawned, discarding whatever
 it had already placed in VRAM. See [models.md](models.md) for both the gfx906
 measurement behind that rule and the FreeToken offload case.
+
+**For `engine: strata`, `path` is not a weights file.** It is Strata's own JSON
+config, the file upstream's `setup.py` writes, and one file serves every backend
+of the model: the node passes host, port and cards as flags, so the file's
+`host`, `port` and `gpu` are ignored. Strata has no flag for the model name, the
+context or the slot count, so a backend refuses to start unless the file agrees
+with the `models[]` entry:
+
+| In the Strata JSON | Must equal |
+|---|---|
+| `model_name`, or one of `aliases` | `name` |
+| `--max-context` in `args` | `context` |
+| `parallel` | absent or 1, and the entry's `parallel` must be 1: Strata v0.1.39 reports one slot whatever its own `parallel` says |
+| `lazy_load`, `idle_unload_s` | off — an unloaded server looks dead to the node |
+| `api_key` | not set — the node probes and forwards without a key, and the backend listens on loopback only |
+
+The error names the key that disagrees. The file is read when a backend
+launches: after editing it, `viiwork down` and `up` the model or restart the
+node, because a reload (SIGHUP) relaunches only models whose entry in
+`viiwork.yaml` changed. Keep the JSON where a backend cannot write it; it names
+the program the server runs. `source:` is not supported for this engine.
+
+The `strata:` block has two keys: `dir`, the Strata checkout (required, an
+absolute path), and `python` (default `python3`).
+Engine tuning stays in the JSON's `args`, where upstream puts it. See
+[models.md](models.md#strata-one-moe-family-across-several-cards).
 
 ## Tensor-split mode
 

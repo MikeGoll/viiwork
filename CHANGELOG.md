@@ -1,5 +1,86 @@
 # Changelog
 
+## v2.8.0
+
+**A fourth engine: Strata.** `engine: strata` runs
+[Strata](https://github.com/Niko1221/Strata) (Qwen3.8-Flash-Next, its layers
+split across a backend's cards) as an ordinary model on the mesh.
+
+- **`models[].path` is Strata's own JSON config**, written by the operator or
+  by upstream's `setup.py`. One file serves every backend of the model: the
+  node passes host, port and cards as flags. The model's block is
+  `strata: {dir: <the Strata checkout>, python: python3}`.
+- **A backend refuses to start when the file disagrees with the node**, and
+  the error names the key: the model's name must be `model_name` or one of
+  `aliases`, `--max-context` in `args` must equal `context` and be written as
+  two arguments (Strata does not read `--max-context=N`), and `parallel`,
+  `lazy_load`, `idle_unload_s` and `api_key` must be off. The file is read at
+  launch; after editing it, `viiwork down` and `up` the model.
+- **`parallel` must be 1.** Strata v0.1.39 reports one slot whatever its own
+  `parallel` says.
+- **Cards:** on Radeon the engine numbers them inside the node's pin; on
+  NVIDIA it passes the real card numbers, because Strata's server sets
+  `CUDA_VISIBLE_DEVICES` itself.
+- **A streamed reply is passed through as the server sent it**: reasoning in
+  `delta.reasoning_content`, the answer in `delta.content`, whatever `think`
+  says. The `/chat` page shows the reasoning as it arrives, and a client that
+  does not know the field ignores it. The plain (non-streamed) reply drops
+  the reasoning, and other engines keep the rule they had.
+- **Editing a Strata JSON drops the model's saved performance baseline**, as
+  an `args` change does: the pack, KV format and layer split that decide its
+  speed live in that file. The file is read again at start and on reload.
+- **Images:** `make docker-strata` (gfx906, with the two-line HIP compile fix
+  v0.1.39 needs) and `make docker-strata-cuda` (on upstream's own image).
+  Serving was verified on ten Radeon VIIs, and the CUDA image on three RTX
+  A4000 at the model's full 262,144-token context: a 258,663-token cold
+  prompt answered in 88.5 s, and four minutes each of steady load, growing
+  sessions and overload on one slot gave no error other than the 429 an
+  overfull queue is meant to return. A killed backend was respawned and
+  serving again in 23 s.
+- Known limit: Strata's server ends a streamed reply by closing the
+  connection, so a stream cut short by a backend that died ends cleanly
+  instead of as an error. A complete stream ends with `data: [DONE]`.
+
+**The `/prompt` page shows the reply's size and average tok/s**:
+`296 tokens · 57.5 tok/s`, measured from the first generated token to the
+end, thinking included even when the reasoning is not sent. Where the node saw
+no first token (a plain reply, or a request another node executed) the rate is
+over the whole request and says so.
+
+**Engine pins: llama.cpp b11371 and vLLM v0.30.0.** b11371 replaced
+`--no-mmap` with `--load-mode none`; the node reads the binary's `--help` and
+generates whichever the binary takes.
+
+- An operator's own `--no-mmap` in `args` is passed as `--load-mode none` to a
+  build that no longer reads `--no-mmap` (b11371), instead of letting the
+  backend exit at argument parsing.
+- Respawns that ask about one binary at the same moment share one `--help`.
+- A `--help` that cannot be read is not remembered: the binary is asked again
+  after 30 seconds, and until then the operator's flags are left as written.
+
+**Thinking**
+
+- A plain reply whose answer is a tool call no longer carries the model's
+  reasoning in `content` beside the call.
+- Keep-alive comments from a backend are flushed to the client as they arrive
+  while thinking is suppressed.
+
+**Fixed**
+
+- A backend whose server writes JSON with a space after the colon (a Python
+  server, Strata among them) never marked a first token, so its host never
+  earned a performance score.
+
+**Changed**
+
+- `memberlist` v0.7.0.
+- For engine authors: `enginetest.Case.NameInConfig`, for an engine whose
+  server takes the model name from a config file, and two optional
+  capabilities, `ReasoningSeparator` and `PerfKeyer`
+  (`docs/adding-an-engine.md`).
+- For API consumers: `PromptEntry` gains `output_tokens` and `gen_ms`, both
+  omitted when not known.
+
 ## v2.7.2
 
 **The host's `viiwork` CLI follows the release.** `viiwork update` moved the

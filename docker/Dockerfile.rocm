@@ -3,15 +3,21 @@
 FROM rocm/dev-ubuntu-24.04:6.2.4-complete AS llama-build
 RUN apt-get update && apt-get install -y cmake git
 # Pin llama.cpp to a known-good release to prevent upstream breakage.
-# b10437 is what the reference fleet runs (all 5 hosts, since 2026-08-17).
+# b11371 (2026-10-03) is the newest build with upstream server-cuda and
+# server-vulkan images, so every viiwork llama.cpp image sits on one build.
 # It carries hybrid DeltaNet (Qwen3.5/3.6 arches) and MTP speculative decoding
 # (PR #22673 + follow-ups #23198, #23237), and is >= the b10430 the Qwen3.8
 # quants were cut with.
 #
+# b11371 no longer reads --mmap/--no-mmap (or --mlock, --direct-io): the one
+# spelling is --load-mode. The node generates whichever the binary's --help
+# lists, and passes an operator's own `--no-mmap` in models[].args as
+# `--load-mode none` to a build that no longer reads it.
+#
 # Do not drop this below b10430: the previous b9222 pin cannot load Qwen3.8-27B,
 # which the README recommends, and fails at load with "unknown model
 # architecture" rather than anything self-explanatory.
-ARG LLAMA_CPP_VERSION=b10437
+ARG LLAMA_CPP_VERSION=b11371
 RUN git clone --branch ${LLAMA_CPP_VERSION} --depth 1 \
     https://github.com/ggml-org/llama.cpp /llama.cpp
 WORKDIR /llama.cpp

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -194,15 +195,34 @@ func TestCommandNoMmap(t *testing.T) {
 		{"exactly 80% of RAM", "", 100 * gib, 80 * gib, nil, true},
 		{"79% of RAM", "", 100 * gib, 79 * gib, nil, false},
 		{"operator --mmap", "    args: [\"--mmap\"]\n", 46 * gib, 100 * gib, nil, false},
+		{"operator --load-mode", "    args: [\"--load-mode\", \"mmap\"]\n", 46 * gib, 100 * gib, nil, false},
 		{"RAM unknown", "", 0, 100 * gib, nil, false},
 		{"size lookup fails", "", 46 * gib, 0, errors.New("stat: permission denied"), false},
 	}
 	for _, tc := range cases {
 		m := parseModel(t, base+tc.args)
 		cmd := command(t, testEngine(16, tc.ram, tc.model, tc.sizeErr), m, 0)
-		if got := slices.Contains(cmd.Args, "--no-mmap"); got != tc.want {
-			t.Errorf("%s: --no-mmap present = %v, want %v (args %v)", tc.name, got, tc.want, cmd.Args)
+		mode, _ := flagValue(cmd.Args, "--load-mode")
+		if got := mode == "none"; got != tc.want || slices.Contains(cmd.Args, "--no-mmap") {
+			t.Errorf("%s: --load-mode none present = %v, want %v (args %v)", tc.name, got, tc.want, cmd.Args)
 		}
+	}
+
+	// A build older than --load-mode gets the spelling it reads.
+	e := testEngine(16, 46*gib, 100*gib, nil)
+	e.help = func(string) helpFacts { return helpFacts{levelLogs: true, noMmap: true} }
+	cmd := command(t, e, parseModel(t, base), 0)
+	if !slices.Contains(cmd.Args, "--no-mmap") || slices.Contains(cmd.Args, "--load-mode") {
+		t.Errorf("old build: want --no-mmap only (args %v)", cmd.Args)
+	}
+}
+
+func TestLoadModeFlag(t *testing.T) {
+	if !loadModeFlag("-lm,   --load-mode MODE                 model loading mode (default: auto)") {
+		t.Error("--load-mode not recognised in a current --help")
+	}
+	if loadModeFlag("--mmap, --no-mmap                       whether to memory-map model") {
+		t.Error("--load-mode invented for a build without it")
 	}
 }
 
@@ -330,7 +350,10 @@ func TestOlderBuildsKeepLogsDisabled(t *testing.T) {
 `)
 	e := testEngine(16, 247*gib, 9*gib, nil)
 	var asked []string
-	e.levelLogs = func(binary string) bool { asked = append(asked, binary); return false }
+	e.help = func(binary string) helpFacts {
+		asked = append(asked, binary)
+		return helpFacts{noMmap: true}
+	}
 	args := command(t, e, m, 0).Args
 	if !slices.Contains(args, "--log-disable") || slices.Contains(args, "--log-verbosity") {
 		t.Errorf("an older build: %v", args)
@@ -345,5 +368,148 @@ func TestLevelListDetection(t *testing.T) {
 	oldHelp := "-lv,   --verbosity, --log-verbosity N   set the verbosity threshold. messages with a higher verbosity will be ignored.\n"
 	if !levelList(newHelp) || levelList(oldHelp) || levelList("") {
 		t.Error("levelList misreads a --help")
+	}
+}
+
+// helpBinary is a stand-in llama-server whose --help prints text.
+func helpBinary(t *testing.T, text string) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "llama-server")
+	if err := os.WriteFile(p, []byte("#!/bin/sh\ncat <<'EOF'\n"+text+"\nEOF\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func TestHelpFactsFromTheBinary(t *testing.T) {
+	for _, tc := range []struct {
+		name, help string
+		want       helpFacts
+	}{
+		{"b10437: both spellings", "--no-mmap\n--load-mode MODE\n--log-verbosity N\n  - 1: error", helpFacts{levelLogs: true, loadMode: true, noMmap: true}},
+		{"b11371: the new one only", "--load-mode MODE\n  - 1: error", helpFacts{levelLogs: true, loadMode: true}},
+		{"an old build", "--no-mmap\n--log-disable", helpFacts{noMmap: true}},
+	} {
+		if got := cachedHelp(helpBinary(t, tc.help)); got != tc.want {
+			t.Errorf("%s: %+v, want %+v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// A --help that could not be read says nothing about the binary. It must not
+// be remembered, and what is assumed meanwhile is the pinned build's spelling:
+// b11371 exits on --no-mmap, so "unknown" read as "old" kills every large
+// model on every respawn until the node restarts.
+func TestUnreadableHelpIsNotCachedAndAssumesThePinnedBuild(t *testing.T) {
+	defer func(d time.Duration) { helpRetry = d }(helpRetry)
+	helpRetry = 0 // ask again at once: this test repairs the binary between calls
+	p := filepath.Join(t.TempDir(), "llama-server")
+	if got := cachedHelp(p); !got.loadMode {
+		t.Errorf("a missing binary read as an old build: %+v", got)
+	}
+	if err := os.WriteFile(p, []byte("#!/bin/sh\nexit 127\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := cachedHelp(p); !got.loadMode {
+		t.Errorf("a binary that printed nothing read as an old build: %+v", got)
+	}
+	if err := os.WriteFile(p, []byte("#!/bin/sh\necho ' --no-mmap'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := cachedHelp(p); got.loadMode {
+		t.Errorf("the failure was remembered: a binary that now lists only --no-mmap read as %+v", got)
+	}
+}
+
+func TestHelpOutputIsBounded(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "llama-server")
+	if err := os.WriteFile(p, []byte("#!/bin/sh\necho ' --no-mmap'\nhead -c 8000000 /dev/zero\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	out := helpOutput(p)
+	if len(out) > helpLimit {
+		t.Errorf("kept %d bytes of --help, limit %d", len(out), helpLimit)
+	}
+}
+
+// An operator's own --no-mmap was valid on b10437 and makes b11371 exit at
+// argument parsing: the image moves under a config that did not change, and
+// the only clue is llama-server's stderr. The node already knows what the
+// binary reads, so it passes the spelling the binary takes.
+func TestOperatorNoMmapFollowsTheBinary(t *testing.T) {
+	m := parseModel(t, `  - name: m
+    engine: llamacpp
+    path: /models/m.gguf
+    gpus: [0]
+    context: 4096
+    parallel: 1
+    args: ["--no-mmap", "--mlock"]
+`)
+	for _, tc := range []struct {
+		name  string
+		facts helpFacts
+		want  []string // the tail of the command line
+	}{
+		{"b11371 has no --no-mmap", helpFacts{levelLogs: true, loadMode: true}, []string{"--load-mode", "none", "--mlock"}},
+		{"b10437 reads both", helpFacts{levelLogs: true, loadMode: true, noMmap: true}, []string{"--no-mmap", "--mlock"}},
+		{"an old build", helpFacts{noMmap: true}, []string{"--no-mmap", "--mlock"}},
+	} {
+		e := testEngine(16, 247*gib, 9*gib, nil)
+		e.help = func(string) helpFacts { return tc.facts }
+		args := command(t, e, m, 0).Args
+		if n := len(args) - len(tc.want); n < 0 || !slices.Equal(args[n:], tc.want) {
+			t.Errorf("%s: args end %v, want %v", tc.name, args, tc.want)
+		}
+	}
+}
+
+// Respawns of one model can ask about one binary at the same moment. One
+// --help answers them all.
+func TestConcurrentHelpRunsTheBinaryOnce(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "llama-server")
+	runs := filepath.Join(dir, "runs")
+	script := "#!/bin/sh\necho run >> " + runs + "\nsleep 0.2\necho ' --load-mode MODE'\n"
+	if err := os.WriteFile(p, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if !cachedHelp(p).loadMode {
+				t.Error("a caller got the answer of a failed probe")
+			}
+		}()
+	}
+	wg.Wait()
+	b, _ := os.ReadFile(runs)
+	if n := strings.Count(string(b), "run"); n != 1 {
+		t.Errorf("--help ran %d times for 8 concurrent callers", n)
+	}
+}
+
+// Not knowing what a binary reads is no evidence that it stopped reading
+// --no-mmap: the operator's flag is translated only when --help showed it gone.
+func TestUnreadableHelpLeavesTheOperatorsFlagAlone(t *testing.T) {
+	if f := cachedHelp(filepath.Join(t.TempDir(), "absent")); !f.loadMode || !f.noMmap {
+		t.Errorf("an unreadable --help must read as: generate --load-mode, leave --no-mmap alone; got %+v", f)
+	}
+}
+
+// A binary whose --help fails is not asked again on every launch: N backends
+// of it would each wait out the probe in turn.
+func TestFailedHelpIsNotRetriedAtOnce(t *testing.T) {
+	dir := t.TempDir()
+	p, runs := filepath.Join(dir, "llama-server"), filepath.Join(dir, "runs")
+	if err := os.WriteFile(p, []byte("#!/bin/sh\necho run >> "+runs+"\nexit 127\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cachedHelp(p)
+	cachedHelp(p)
+	b, _ := os.ReadFile(runs)
+	if n := strings.Count(string(b), "run"); n != 1 {
+		t.Errorf("a failing --help ran %d times for two calls in a row", n)
 	}
 }

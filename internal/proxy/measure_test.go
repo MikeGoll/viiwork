@@ -102,6 +102,16 @@ func TestFirstTokenDetection(t *testing.T) {
 		{`data: {"choices":[{"delta":{"tool_calls":[ ]}}]}`, false},
 		{`data: {"choices":[{"delta":{"tool_calls":[],"content":"hi"}}]}`, true},
 		{`data: {"choices":[{"delta":{"content":null}}]}`, false},
+		// A Python server writes a space after every colon and comma (Strata,
+		// captured on gb3). Without these the first token was never seen and
+		// the host never earned a performance score.
+		{`data: {"choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": null}]}`, false},
+		{`data: {"choices": [{"index": 0, "delta": {"content": " sea"}, "finish_reason": null}]}`, true},
+		{`data: {"choices": [{"index": 0, "delta": {"reasoning_content": "We"}, "finish_reason": null}]}`, true},
+		{`data: {"choices": [{"text": "hi"}]}`, true},
+		{`data: {"choices": [{"delta": {"content": null}}]}`, false},
+		{`data: {"choices": [{"delta": {"tool_calls": [{"index": 0}]}}]}`, true},
+		{`data: {"choices": [{"delta": {"tool_calls": []}}]}`, false},
 	}
 	for _, tc := range cases {
 		rec := httptest.NewRecorder()
@@ -152,6 +162,9 @@ func TestFirstTokenAcrossWrites(t *testing.T) {
 		{"empty value split", []string{`data: {"choices":[{"delta":{"content"`, `:""}}]}`}, false},
 		{"tool call split", []string{`{"delta":{"tool_calls"`, `:[{"index":0}]}}`}, true},
 		{"empty tool calls split", []string{`{"delta":{"tool_calls"`, `:[]}}`}, false},
+		{"spaced, one byte at a time", strings.Split(`data: {"choices": [{"delta": {"content": "Okay"}}]}`, ""), true},
+		{"spaced, split after the colon", []string{`data: {"choices": [{"delta": {"content":`, ` "Okay"}}]}`}, true},
+		{"spaced empty value split", []string{`data: {"choices": [{"delta": {"content":`, ` ""}}]}`}, false},
 	}
 	for _, tc := range cases {
 		w, m := newMeasureWriter(httptest.NewRecorder(), false, time.Now)

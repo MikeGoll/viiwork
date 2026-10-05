@@ -343,6 +343,7 @@ func New(cfg *config.Config, o Options) (*Node, error) {
 		Pipelines:  resolverPipelines, PipelineExec: executor,
 		Resolve: n.resolver.Resolve, ExtraModels: n.resolver.ModelEntries,
 		Perf: n.perf, PublishPerf: cfg.Routing.PerformanceOn(), Usage: n.usageReporting,
+		SeparateReasoning: n.separatesReasoning,
 	})
 
 	// 8. Member statuses and chassis power control.

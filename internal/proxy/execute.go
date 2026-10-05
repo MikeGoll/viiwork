@@ -43,8 +43,11 @@ type execResult struct {
 	// the local lease was granted; FirstToken when the first content chunk
 	// went to the client (zero = never); StrippedUsage the usage-only event
 	// removed for a client that did not ask for usage.
-	Granted       time.Time
-	FirstToken    time.Time
+	Granted    time.Time
+	FirstToken time.Time
+	// GenStart is when the backend began generating: FirstToken, or earlier
+	// when reasoning was generated and kept from the client.
+	GenStart      time.Time
 	StrippedUsage []byte
 }
 
@@ -211,7 +214,7 @@ func varyWithoutOrigin(values []string) []string {
 // client unless a response the client should see arrived: a transport failure
 // or a 429/503 from the engine is retryable, and a hard socket failure also
 // tells the backend's supervision loop to probe at once.
-func serveLocal(w http.ResponseWriter, r *http.Request, body []byte, b route.LocalBackend, model, self string, thinkDisabled, strip bool) execResult {
+func serveLocal(w http.ResponseWriter, r *http.Request, body []byte, b route.LocalBackend, model, self string, thinkDisabled, strip, separateReasoning bool) execResult {
 	addr := b.Addr()
 	if addr == "" {
 		return refused("backend %s has no running process", b.ID())
@@ -280,9 +283,18 @@ func serveLocal(w http.ResponseWriter, r *http.Request, body []byte, b route.Loc
 	w.WriteHeader(resp.StatusCode)
 	var clientGone bool
 	var upstreamErr error
-	if thinkDisabled {
+	switch {
+	case thinkDisabled && separateReasoning:
+		// The engine already keeps reasoning out of content, in its own
+		// field: there is nothing to rewrite. A client that shows
+		// reasoning_content shows the thinking as it happens; one that does
+		// not ignores the field and reads the answer. Holding it back would
+		// leave an interactive client with a blank screen for as long as
+		// the model thinks.
+		clientGone, upstreamErr = stream(w, resp.Body, cancel)
+	case thinkDisabled:
 		clientGone, upstreamErr = streamThinkDisabled(w, resp.Body, cancel)
-	} else {
+	default:
 		clientGone, upstreamErr = stream(w, resp.Body, cancel)
 	}
 	if err := meter.finish(); err != nil {
@@ -294,6 +306,10 @@ func serveLocal(w http.ResponseWriter, r *http.Request, body []byte, b route.Loc
 		// contains "content", but its first byte arrives after generation ends.
 		// Read here, after streaming completed: firstAt is not synchronised.
 		res.FirstToken = meter.firstAt
+		res.GenStart = meter.firstAt
+		if !meter.genAt.IsZero() && (res.GenStart.IsZero() || meter.genAt.Before(res.GenStart)) {
+			res.GenStart = meter.genAt
+		}
 	}
 	res.StrippedUsage = meter.stripped
 	return res

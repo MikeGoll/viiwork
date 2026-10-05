@@ -13,6 +13,7 @@
 //   - The package is stdlib-only and imports nothing from internal/, because
 //     viiwork-gateway imports it from another module.
 //
-// Event, MeshEvent, PromptEntry and the activity message helpers are carried
-// over from v1 unchanged.
+// Event, MeshEvent and the activity message helpers are carried over from v1
+// unchanged. PromptEntry gained output_tokens and gen_ms in v2.8.0, both
+// omitted when not known.
 package meshapi

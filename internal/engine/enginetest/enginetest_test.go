@@ -72,3 +72,28 @@ func TestKitCatchesViolations(t *testing.T) {
 func indent(b []byte) string {
 	return "\t" + strings.ReplaceAll(strings.TrimSpace(string(b)), "\n", "\n\t")
 }
+
+// NameInConfig excuses ONE rule. The broken engine violates every rule, so
+// with the opt-out set the name complaint must go and the others must stay.
+func TestNameInConfigSkipsOnlyTheNameRule(t *testing.T) {
+	if os.Getenv("ENGINETEST_RUN_BROKEN") == "nameinconfig" {
+		Run(t, brokenEngine{}, Case{Name: "broken", Spec: engine.Spec{GPUs: []int{0}}, NameInConfig: true})
+		return
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=TestNameInConfigSkipsOnlyTheNameRule", "-test.v")
+	cmd.Env = append(os.Environ(), "ENGINETEST_RUN_BROKEN=nameinconfig")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("the kit passed the broken engine:\n%s", out)
+	}
+	if bytes.Contains(out, []byte("does not contain the model name")) {
+		t.Errorf("NameInConfig did not skip the name rule\n%s", indent(out))
+	}
+	// The rule did not go away: an engine that claims the name is in its
+	// config file must refuse a name that file does not carry.
+	for _, want := range []string{"does not bind 127.0.0.1", "must be appended LAST", "accepted a model name"} {
+		if !bytes.Contains(out, []byte(want)) {
+			t.Errorf("NameInConfig also skipped %q\n%s", want, indent(out))
+		}
+	}
+}

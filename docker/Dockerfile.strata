@@ -1,0 +1,78 @@
+# viiwork on Strata, for gfx906 (Radeon VII, Instinct MI50 / MI60).
+#
+# Named for the engine. The CUDA build is the sibling Dockerfile.strata-cuda;
+# they are two files because the engine is compiled differently for each.
+#
+# AMD's ROCm no longer ships gfx906 libraries, so the base is the community
+# image upstream itself documents (docs/AMD_HIP.md, "gfx906"). Strata v0.1.39
+# does not compile for gfx906 as released: docker/strata/gfx906-<version>.patch
+# carries two fixes to strata_hip.h (cudaFuncSetAttribute as a template
+# function, and an alias for the shared-memory carveout attribute). Not
+# reported upstream as of 2026-10-04.
+#
+# WHAT AN OPERATOR WILL NOT GUESS:
+#   - The model is not in the image. Mount the pack, the GGUF shards and the
+#     MTP layer, and write the Strata JSON config that models[].path names.
+#   - With STRATA_ARENA_MMAP=1 the first start writes a 24 GB experts.bin INTO
+#     THE PACK, as root, and takes about 6 minutes instead of 3.5. The pack
+#     volume must be writable, and the JSON's args need --pcie-frac 0.
+#   - Backends of one model share that file; two loaded used 36 GB of RAM.
+#   - The Strata JSON that models[].path names must point INTO THIS IMAGE:
+#       "exe": "/opt/strata/build-906/strata", "cwd": "/opt/strata",
+#     and the model's block is `strata: {dir: /opt/strata}`. An engine binary
+#     mounted from the host was built against that host's ROCm, not this one.
+#   - The image has no group named `render`: give the container the host's
+#     render group by number (docker/compose.strata.yaml).
+
+# Global scope, so the runtime stage's FROM can read it.
+ARG STRATA_ROCM_BASE=mixa3607/rocm-gfx906:7.14-complete@sha256:622c025824d465faa0f5e59eea4f723845032011df273c3b11e25031965fc428
+
+# Stage 1: Build viiwork.
+FROM golang:1.27.1 AS go-build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+ARG VERSION=dev
+RUN CGO_ENABLED=0 go build -ldflags "-X main.version=${VERSION}" -o /viiwork ./cmd/viiwork
+
+# Stage 2: Strata, built for gfx906, and the runtime.
+FROM ${STRATA_ROCM_BASE}
+ARG STRATA_VERSION=v0.1.39
+ARG STRATA_COMMIT=6f32ec070f23ced9f50e704d854d775da52591ab
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential ca-certificates cmake curl git ipmitool ninja-build \
+        python3 python3-pip \
+    && rm -rf /var/lib/apt/lists/*
+
+# The tag is checked against the pinned commit: what is cloned here is built
+# and run as root on a node with the host's PID namespace.
+RUN git clone --depth 1 --branch ${STRATA_VERSION} https://github.com/Niko1221/Strata /opt/strata \
+    && test "$(git -C /opt/strata rev-parse HEAD)" = "${STRATA_COMMIT}"
+COPY docker/strata/gfx906-${STRATA_VERSION}.patch /tmp/gfx906.patch
+WORKDIR /opt/strata
+RUN git apply /tmp/gfx906.patch \
+    && pip3 install --no-cache-dir --break-system-packages -r requirements.txt
+
+# llama.cpp at upstream's pinned commit (setup.get_llama_cpp fetches it and
+# returns its path), then the engine exactly as docs/AMD_HIP.md builds it.
+RUN LLAMA="$(python3 -c 'import setup; print(setup.get_llama_cpp())' | tail -n 1)" \
+    && test -d "$LLAMA/ggml" \
+    && cmake -S . -B build-906 -G Ninja \
+        -DSTRATA_HIP_GFX906=ON -DCMAKE_HIP_ARCHITECTURES=gfx906 \
+        -DSTRATA_BUILD_TESTS=OFF -DSTRATA_GGML_DIR="$LLAMA" \
+        -DCMAKE_C_COMPILER=/opt/rocm/llvm/bin/clang \
+        -DCMAKE_CXX_COMPILER=/opt/rocm/llvm/bin/clang++ \
+    && ninja -C build-906 strata \
+    && test -x build-906/strata
+
+COPY --from=go-build /viiwork /usr/local/bin/
+
+# On some boards the runtime refuses the card without it.
+ENV HSA_OVERRIDE_GFX_VERSION=9.0.6
+
+WORKDIR /
+EXPOSE 8086/tcp 7946/tcp 7946/udp
+CMD ["viiwork", "--config", "/etc/viiwork/viiwork.yaml"]

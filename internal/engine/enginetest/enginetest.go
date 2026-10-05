@@ -27,10 +27,17 @@ import (
 // Case is one Spec an engine should accept. Options is the engine's block as
 // an operator would write it, so a case reads like the config file it stands
 // for; it is parsed into Spec.Options.
+//
+// NameInConfig is for an engine whose inference server has no flag for the
+// model name and reads it from a config file instead (Strata). The rule that
+// a backend answers to Spec.Name is then checked where such an engine can
+// enforce it: Command must refuse the same case under a name its config file
+// does not carry, instead of putting the name on the command line.
 type Case struct {
-	Name    string
-	Spec    engine.Spec
-	Options string
+	Name         string
+	Spec         engine.Spec
+	Options      string
+	NameInConfig bool
 }
 
 // sentinel is appended to every case's Args. Engines must put the operator's
@@ -93,7 +100,13 @@ func checkCommand(t *testing.T, e engine.Engine, c Case) {
 	if strings.TrimSpace(cmd.Path) == "" {
 		t.Error("Command.Path is empty: there is nothing to execute")
 	}
-	if !slices.Contains(cmd.Args, spec.Name) {
+	if c.NameInConfig {
+		other := spec
+		other.Name = spec.Name + "-not-in-the-config-file"
+		if _, err := command(e, other); err == nil {
+			t.Errorf("Command accepted a model name its config file does not carry (%q): a backend that does not answer to its name is unreachable through the mesh", other.Name)
+		}
+	} else if !slices.Contains(cmd.Args, spec.Name) {
 		t.Errorf("Command.Args does not contain the model name %q: a backend that does not answer to it is unreachable through the mesh\nargs: %v", spec.Name, cmd.Args)
 	}
 	if !containsSubstring(cmd.Args, "127.0.0.1") {

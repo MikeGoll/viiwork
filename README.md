@@ -16,7 +16,7 @@ aging-but-capable GPUs into a practical inference cluster.
 That fleet is still the reference deployment, but viiwork runs on anything from
 one gaming GPU to racks of cards — AMD, NVIDIA or an Apple Silicon Mac, all in
 one mesh. It doesn't do inference itself: it drives existing engines —
-llama.cpp, vLLM and FreeToken — and turns them into one fleet. Each node's
+llama.cpp, vLLM, FreeToken and Strata — and turns them into one fleet. Each node's
 GPU resources are available from any endpoint.
 
 ## What you get
@@ -24,7 +24,7 @@ GPU resources are available from any endpoint.
 | | |
 |---|---|
 | One API per machine | Every model on the box on port 8086 → [configuration](docs/configuration.md) |
-| Three engines | llama.cpp, vLLM, FreeToken side by side → [models](docs/models.md) |
+| Four engines | llama.cpp, vLLM, FreeToken, Strata side by side → [models](docs/models.md) |
 | Self-assembling mesh | No peer lists; routes to whoever has a free slot → [mesh](docs/mesh.md) |
 | Aliases | Stable names like `stable-coder`, switched once for the fleet → [aliases](docs/mesh.md#aliases) |
 | Dashboards | Models, jobs, backends, prompts, power → [dashboards](docs/dashboards.md) |
@@ -147,8 +147,9 @@ models:
 | `llamacpp` | `llama-server` (reference) | CPU or GPU |
 | `vllm` | `vllm serve` | tensor-parallel across its cards |
 | `freetoken` | `ft serve` | one card per process, MoE experts in host RAM |
+| `strata` | `python -m serve.server` (Strata) | one model family, layers split across a backend's cards |
 
-All three can run on one node. Adding an engine is one package plus one line.
+All four can run on one node. Adding an engine is one package plus one line.
 → [docs/adding-an-engine.md](docs/adding-an-engine.md)
 
 ## Models and hardware
@@ -156,6 +157,9 @@ All three can run on one node. Adding an engine is one package plus one line.
 - **gfx906 rule:** a dense model that doesn't fit one card costs ~3× throughput
 - **FreeToken exception:** big sparse MoE models on a single card, at the cost
   of load time
+- **Strata:** one sparse MoE family (Qwen3.8-Flash-Next) with its layers split
+  across a backend's cards and the experts in host RAM; runs on gfx906 →
+  [models](docs/models.md#strata-one-moe-family-across-several-cards)
 
 What the Radeon VII hosts serve today:
 
@@ -196,6 +200,8 @@ driving the fleet. → [docs/security.md](docs/security.md)
 | `viiwork` | `llamacpp` on ROCm / gfx906 | `make docker` |
 | `viiwork-vllm` | `vllm` | `make docker-vllm` |
 | `viiwork-freetoken` | `freetoken` | `make docker-freetoken` |
+| `viiwork-strata` | `strata` on ROCm / gfx906 | `make docker-strata` |
+| `viiwork-strata-cuda` | `strata` on CUDA | `make docker-strata-cuda` |
 
 Releases also ship signed static binaries for linux/amd64, linux/arm64 and
 darwin/arm64. → [BUILDS.md](BUILDS.md) · [docs/releases.md](docs/releases.md)

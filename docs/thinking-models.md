@@ -65,6 +65,10 @@ the backend sent it, `reasoning_content` and all.
 | `false` | Think blocks stripped, answer in `content` | Think tokens suppressed, answer streamed as `delta.content` |
 | `true` | Transparent passthrough | Transparent passthrough |
 
+An engine that keeps reasoning in its own field is the exception when
+streaming: its stream is passed through whatever `think` says. Today that is
+[Strata](#strata).
+
 ## Diagnosing "the model is dumping its monologue into content"
 
 If a response arrives as raw reasoning prose ("Okay, the user is asking...")
@@ -124,3 +128,21 @@ completion_tokens 1767, content ~100 tokens  ->  ~1667 spent thinking
 ```
 
 Worth checking before concluding a model is slow — decode rate may be fine.
+
+## Strata
+
+Strata sends reasoning as `reasoning_content` and uses no `<think>` tags, and
+its answer always follows as `content`. Its engine declares that
+(`engine.ReasoningSeparator`), so the "models without think tags" rule above
+does not apply to it. With `think` unset:
+
+- A plain (non-streamed) reply drops the reasoning and returns the answer.
+- A **streamed** reply is passed through as the server sent it: the reasoning
+  arrives in `delta.reasoning_content` and the answer in `delta.content`. A
+  client that shows `reasoning_content` (the `/chat` page does) shows the
+  thinking as it happens; one that does not ignores the field. Either way
+  `content` holds the answer and nothing else.
+
+`"think": true` gives the same stream. To avoid thinking altogether, send
+`"reasoning_effort": "none"`; to bound it for every client, set
+`"reasoning_budget_tokens"` in the Strata JSON.

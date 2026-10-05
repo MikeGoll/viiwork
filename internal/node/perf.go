@@ -19,6 +19,13 @@ func perfKeys(models []config.Model) map[string]string {
 	for _, m := range models {
 		h := sha256.New()
 		fmt.Fprintf(h, "%s\x00%s\x00%s\x00%v\x00%d\x00%q", m.Engine, m.Path, m.Source, m.GPUs, m.GPUsPerBackend, m.Args)
+		// What an engine says also makes its speed (engine.PerfKeyer): a
+		// config file of its own that the entry only names.
+		if e, ok := engine.Lookup(m.Engine); ok {
+			if k, ok := e.(engine.PerfKeyer); ok {
+				fmt.Fprintf(h, "\x00%s", k.PerfKey(config.ModelSpec(m)))
+			}
+		}
 		keys[m.Name] = hex.EncodeToString(h.Sum(nil)[:8])
 	}
 	return keys
@@ -35,6 +42,18 @@ func (n *Node) usageReporting(model string) engine.UsageReporting {
 		}
 	}
 	return engine.UsageReporting{}
+}
+
+// separatesReasoning reports whether the engine serving model streams
+// reasoning apart from the answer.
+func (n *Node) separatesReasoning(model string) bool {
+	for _, m := range n.runningConfig().Models {
+		if m.Name == model {
+			e, ok := engine.Lookup(m.Engine)
+			return ok && engine.SeparatesReasoning(e)
+		}
+	}
+	return false
 }
 
 // perfSaveLoop writes changed baselines once a minute and once at stop. A

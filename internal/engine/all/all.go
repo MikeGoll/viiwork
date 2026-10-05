@@ -11,5 +11,6 @@ package all
 import (
 	_ "github.com/janit/viiwork/v2/internal/engine/freetoken" // FreeToken
 	_ "github.com/janit/viiwork/v2/internal/engine/llamacpp"  // llama.cpp, the reference engine
+	_ "github.com/janit/viiwork/v2/internal/engine/strata"    // Strata
 	_ "github.com/janit/viiwork/v2/internal/engine/vllm"      // vLLM
 )

@@ -82,7 +82,7 @@ func TestV2WireFields(t *testing.T) {
 	assertFields(t, ErrorBody{}, []string{"message", "type"})
 	assertFields(t, Event{}, []string{"t", "type", "message", "gpu_id", "rid", "task_id", "replay"})
 	assertFields(t, MeshEvent{}, []string{"t", "type", "message", "gpu_id", "rid", "task_id", "replay", "node_id", "hostname", "addr"})
-	assertFields(t, PromptEntry{}, []string{"rid", "t", "model", "prompt", "output", "elapsed_ms"})
+	assertFields(t, PromptEntry{}, []string{"rid", "t", "model", "prompt", "output", "elapsed_ms", "output_tokens", "gen_ms"})
 	assertFields(t, FleetCapacityResponse{}, []string{"view", "ver", "stale_after_s", "models", "resolved_from"})
 	assertFields(t, FleetModel{}, []string{"name", "engine", "slots", "busy", "free", "queued", "ctx", "hosts"})
 	assertFields(t, FleetHost{}, []string{"node", "api", "slots", "busy", "free", "ctx", "age_ms", "stale"})

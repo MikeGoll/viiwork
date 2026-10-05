@@ -141,3 +141,25 @@ func TestPromptStoreConcurrent(t *testing.T) {
 		t.Errorf("store holds %d entries, above its cap of %d", got, p.Max())
 	}
 }
+
+// Token count and generation time arrive once the response is complete. They
+// attach to the entry and leave what is there alone; unknown stays absent.
+func TestPromptStoreUsageAttaches(t *testing.T) {
+	p := NewPromptStore(10)
+	p.Store(1, 100, "m", "the prompt")
+	p.StoreOutput(1, 101, "m", "the answer", 1234)
+	p.StoreUsage(1, 196, 5367)
+	e, _ := p.Get(1)
+	if e.OutputTokens != 196 || e.GenMS != 5367 || e.Output != "the answer" || e.ElapsedMS != 1234 {
+		t.Errorf("usage should attach beside the output: %+v", e)
+	}
+	// Nothing known: nothing recorded, and no entry is made for it.
+	p.StoreUsage(1, 0, 0)
+	p.StoreUsage(9, 10, 10)
+	if e, _ := p.Get(1); e.OutputTokens != 196 || e.GenMS != 5367 {
+		t.Errorf("an unknown usage must not erase a known one: %+v", e)
+	}
+	if _, ok := p.Get(9); ok {
+		t.Error("usage alone must not create an entry")
+	}
+}

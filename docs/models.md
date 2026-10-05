@@ -17,9 +17,13 @@ fleet's `freetoken` lane breaks it deliberately: a sparse MoE far larger than on
 card's VRAM runs on a *single* GPU by keeping only the hot experts resident and
 streaming the rest from host memory. See
 [Large models on one card](#large-models-on-one-card-freetoken-and-moe-offload).
+The `strata` engine does the same for one model family on gfx906 itself, with
+the layers split across a backend's cards: see
+[Strata](#strata-one-moe-family-across-several-cards).
 
 - [What the reference fleet runs today](#what-the-reference-fleet-runs-today)
 - [Large models on one card: FreeToken and MoE offload](#large-models-on-one-card-freetoken-and-moe-offload)
+- [Strata: one MoE family across several cards](#strata-one-moe-family-across-several-cards)
 - [Models from viiwork-parrot](#models-from-viiwork-parrot)
 - [Tuning rules measured on gfx906](#tuning-rules-measured-on-gfx906)
 - [Validated production deployments](#validated-production-deployments)
@@ -54,7 +58,8 @@ Aliases are mesh-wide and resolve on whichever node a request reaches; see
 
 Those five are the ROCm hosts. The fleet also runs `vllm` on one host and
 `freetoken` on two — all three engines in one mesh behind one API, which is what
-v2.2.0 is.
+v2.2.0 is. `strata` is the fourth engine, added later; it has run on one
+ten-card Radeon VII host (below).
 
 ## Large models on one card: FreeToken and MoE offload
 
@@ -124,6 +129,96 @@ Everything else — dtype, attention backend, MoE cache size, KV capacity, page
 size, CUDA-graph sizes — FreeToken resolves from the checkpoint and the card, and
 does it better than a config file can. That is why the `freetoken:` block is four
 keys; anything else belongs in `models[].args`.
+
+## Strata: one MoE family across several cards
+
+[Strata](https://github.com/Niko1221/Strata) (MIT) serves one model family,
+Qwen3.8-Flash-Next (a 125B-parameter sparse MoE) in several sizes and
+fine-tunes. Like FreeToken it keeps the experts in host memory and the hot ones
+on the card; unlike FreeToken a backend spans **several cards through a layer
+split**, and it has a gfx906 build, so it runs on the Radeon VII hosts.
+
+Each backend is a Python server that starts the C++ engine from a JSON config.
+viiwork launches and probes the Python server; **`path` is that JSON file, not
+the weights**:
+
+```yaml
+models:
+  - name: qwen3.8-flash-next-coder
+    engine: strata
+    path: /s/run/strata-coder.json   # Strata's own JSON config
+    gpus: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+    gpus_per_backend: 5              # two backends of five cards
+    context: 131072                  # per slot
+    parallel: 1
+    startup_timeout: 45m
+    env: {STRATA_ARENA_MMAP: "1"}    # needs --pcie-frac 0 in the JSON's args
+    strata:
+      dir: /opt/strata               # the Strata checkout; required
+      python: python3                # default
+```
+
+- **One JSON serves every backend of the model.** The node passes host, port
+  and cards as flags; the file's `host`, `port` and `gpu` are ignored. Leave
+  `layer_split` out and Strata splits the layers itself; the measurements below
+  used explicit split points.
+- **The file must agree with the entry**, or the backend refuses to start and
+  names the key: `model_name` (or an alias) with `name`, `--max-context` with
+  `context`, and `lazy_load`, `idle_unload_s` and `api_key` off. See
+  [configuration.md](configuration.md#models).
+- **`parallel` must be 1.** Strata v0.1.39 reports one slot whatever its own
+  `parallel` says, so the node refuses more. Capacity comes from more backends.
+- **Preparing the model is upstream's job.** The pack, the GGUF shards and the
+  MTP layer come from Strata's own `setup.py`; viiwork does not fetch or build
+  them. Images and their traps are in [BUILDS.md](../BUILDS.md).
+- **Host RAM is part of the budget.** With `STRATA_ARENA_MMAP=1` the backends
+  of one model share one 24 GB mapped expert file; two backends loaded used
+  36 GB. Without it one instance held about 27 GB resident.
+- **`--trim-stage-weights` is what fits the Coder on two cards.** Without it
+  90% of the experts were resident and decode fell from 56 to 21 tok/s.
+
+### Measured on Radeon VII
+
+The Coder (IQ1_M quant, 54 GB), 131,072 context, one slot per backend, on a
+ten-card Radeon VII host with a 4-core EPYC 3151. Upstream's `benchmark.py`,
+fresh prompts, 256-token outputs, Strata v0.1.39.
+
+| Cards per backend | Prompt read tok/s (4K / 32K / 128K) | Decode tok/s (4K / 32K / 128K) | Time to first token, s |
+|---|---|---|---|
+| 2 | 124 / 265 / 254 | 48 / 42 / 37 | 33 / 124 / 505 |
+| 4 | 282 / 747 / not run | 44 / 37 / not run | 15 / 44 / not run |
+| 8 | 192 / 750 / 896 | 36 / 32 / 30 | 21 / 44 / 143 |
+| 5, with a second five-card backend loaded | 212 / ~710 / 640–694 | 34 / 28–30 / 33 | 19 / 46 / 185–200 |
+
+The two-card row is three runs per length, the four-card row two, the others
+one. More cards read a long prompt faster and decode slower. **A cold 128K
+prompt takes minutes to the first token** on any of these layouts, so size
+`routing.queue_timeout` and client timeouts for it.
+
+Under viiwork, on the same host as two backends of five cards:
+
+- Both backends were healthy about 10 minutes after start; loads are serial,
+  3.5 minutes each, about 6 on the first start that writes the mapped expert
+  file.
+- Pinning holds: each backend's engine processes sat on its own five cards.
+- `/health` and `/slots` answered in 1 to 2 ms throughout a 41,409-token cold
+  prompt, so a long prefill does not trip the health ladder.
+- A repeated prompt reports `cached_tokens` in `usage`.
+- Thinking: a stream carries the reasoning in `reasoning_content`, apart from
+  the answer; see [thinking-models.md](thinking-models.md#strata).
+- The CUDA image served under viiwork on three RTX A4000 (2026-10-04) at the
+  model's full 262,144-token context: a 258,663-token cold prompt answered
+  correctly in 88.5 s (about 2,900 tok/s prompt reading, about 60 tok/s
+  decode), `/v1/status` answering within 15 ms throughout, and a prompt over
+  the limit refused with a 400.
+
+Known gaps, as of 2026-10-05:
+
+- **Untested:** `layer_split` left to auto.
+- **A stream cut short reads as complete.** Strata's server ends a streamed
+  reply by closing the connection, so when a backend dies mid-reply the node
+  cannot tell the early close from the end: the client's stream ends cleanly
+  without a `[DONE]` line. A client that needs to know checks for `[DONE]`.
 
 ## Models from viiwork-parrot
 

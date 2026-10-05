@@ -174,7 +174,7 @@ func TestServeLocalMeasuresAndStrips(t *testing.T) {
 		_, _ = io.WriteString(w, content+usageEvent+"data: [DONE]\n\n")
 	})
 	rec := httptest.NewRecorder()
-	res := serveLocal(rec, chatRequest("/v1/chat/completions", "{}"), []byte("{}"), backendFor("m/0", eng), "m", "self", false, true)
+	res := serveLocal(rec, chatRequest("/v1/chat/completions", "{}"), []byte("{}"), backendFor("m/0", eng), "m", "self", false, true, false)
 	if res.Outcome != outcomeServed || res.Status != 200 {
 		t.Fatalf("res=%+v", res)
 	}
@@ -198,7 +198,7 @@ func TestServeLocalStripDropsContentLength(t *testing.T) {
 		_, _ = io.WriteString(w, full)
 	})
 	rec := httptest.NewRecorder()
-	serveLocal(rec, chatRequest("/v1/chat/completions", "{}"), []byte("{}"), backendFor("m/0", eng), "m", "self", false, true)
+	serveLocal(rec, chatRequest("/v1/chat/completions", "{}"), []byte("{}"), backendFor("m/0", eng), "m", "self", false, true, false)
 	if got := rec.Body.String(); got != content+"data: [DONE]\n\n" {
 		t.Errorf("client body %q", got)
 	}
@@ -214,7 +214,7 @@ func TestServeLocalJSONHasNoFirstToken(t *testing.T) {
 		_, _ = io.WriteString(w, `{"choices":[{"message":{"content":"hi"}}]}`)
 	})
 	rec := httptest.NewRecorder()
-	res := serveLocal(rec, chatRequest("/v1/chat/completions", "{}"), []byte("{}"), backendFor("m/0", eng), "m", "self", false, false)
+	res := serveLocal(rec, chatRequest("/v1/chat/completions", "{}"), []byte("{}"), backendFor("m/0", eng), "m", "self", false, false, false)
 	if !res.FirstToken.IsZero() {
 		t.Errorf("FirstToken = %v on a JSON response", res.FirstToken)
 	}
@@ -232,7 +232,7 @@ func TestServeLocalStripDeliversNonSSEBodies(t *testing.T) {
 	})
 	for _, think := range []bool{false, true} {
 		rec := httptest.NewRecorder()
-		res := serveLocal(rec, chatRequest("/v1/chat/completions", "{}"), []byte("{}"), backendFor("m/0", eng), "m", "self", think, true)
+		res := serveLocal(rec, chatRequest("/v1/chat/completions", "{}"), []byte("{}"), backendFor("m/0", eng), "m", "self", think, true, false)
 		want := errBody
 		if think {
 			want = string(rewriteThinkResponse([]byte(errBody)))

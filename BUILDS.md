@@ -12,6 +12,8 @@ One image per engine, all under `docker/`, each named for what it carries.
 | `viiwork:latest` (a.k.a. `viiwork`) | `docker/Dockerfile.rocm` | `llamacpp` on ROCm / gfx906 | `make docker-rocm` (aliases: `make docker`, `make docker-stable`) |
 | `viiwork-vllm:latest` | `docker/Dockerfile.vllm` | `vllm` | `make docker-vllm` |
 | `viiwork-freetoken:latest` | `docker/Dockerfile.freetoken` | `freetoken` | `make docker-freetoken` |
+| `viiwork-strata:latest` | `docker/Dockerfile.strata` | `strata` on ROCm / gfx906 | `make docker-strata` |
+| `viiwork-strata-cuda:latest` | `docker/Dockerfile.strata-cuda` | `strata` on CUDA | `make docker-strata-cuda` |
 
 **Named for the engine, never for a GPU vendor.** vLLM already has a ROCm build
 and FreeToken may add AMD or Intel, so a second accelerator backend is a sibling
@@ -25,10 +27,19 @@ that silently meant "llama.cpp for gfx906" as though no other kind existed.
 ## `docker/Dockerfile.rocm`
 
 Standard upstream llama.cpp from `ggml-org/llama.cpp`, pinned to a release tag
-(currently `b10437`, which carries Qwen3.5/3.6/3.8 hybrid DeltaNet support and
+(currently `b11371`, which carries Qwen3.5/3.6/3.8 hybrid DeltaNet support and
 MTP speculative decoding) and patched for the gfx906 FP8 header
 incompatibility. Built on `rocm/dev-ubuntu-24.04:6.2.4-complete` — the last
 ROCm with reliable gfx906 support.
+
+**`--no-mmap` is gone in `b11371`.** `--mmap`, `--no-mmap`, `--mlock` and
+`--direct-io` were deprecated in favour of `--load-mode` and then removed; the
+server now exits with `invalid argument`. The node's own no-mmap rule (a model
+at least 80% of host RAM) asks the binary's `--help` and generates
+`--load-mode none` or `--no-mmap` accordingly, so it works on either build.
+An operator's own `--no-mmap` in `models[].args` is passed as `--load-mode none`
+to a build that no longer reads it, so a config written for `b10437` keeps
+working on a `b11371` image; every other arg is passed through as written.
 
 **The pin must stay at or above `b10430`:** the Qwen3.8 quants were cut with it,
 and the older `b9222` rejects that architecture at load time with "unknown model
@@ -48,7 +59,7 @@ docker build --build-arg LLAMA_CPP_VERSION=<tag> -f docker/Dockerfile.rocm -t vi
 ## `docker/Dockerfile.vllm`
 
 The binary dropped into vLLM's own published image, `vllm/vllm-openai`, pinned
-by `VLLM_VERSION` (currently `v0.11.2`). Nothing is rebuilt: that image already
+by `VLLM_VERSION` (currently `v0.30.0`). Nothing is rebuilt: that image already
 carries a matched torch, CUDA and kernel set, and rebuilding the stack is how
 you end up with a torch that disagrees with the driver.
 
@@ -123,6 +134,55 @@ None of this changes the kernel-cache step: the URL it builds from the
 installed release resolves to the published
 `freetoken_kernel_cache-0.1.3+cu130` wheel unchanged.
 
+## `docker/Dockerfile.strata` and `docker/Dockerfile.strata-cuda`
+
+[Strata](https://github.com/Niko1221/Strata) at the tag `STRATA_VERSION` pins in
+`docker/pins.env` (currently `v0.1.39`), with `viiwork` added. Two files rather
+than one with a build argument, because the engine is compiled differently for
+each accelerator. In both images the checkout is `/opt/strata`, which is what
+`models[].strata.dir` names.
+
+**`Dockerfile.strata` is the gfx906 build** (Radeon VII, Instinct MI50 / MI60).
+
+- **The base is a community image**, `mixa3607/rocm-gfx906:7.14-complete`
+  (pinned by digest as `STRATA_ROCM_BASE` in `docker/pins.env`), the one
+  upstream's own `docs/AMD_HIP.md` documents. AMD's ROCm no longer ships
+  gfx906 libraries, so this image does not sit on the ROCm 6.2.4 base the
+  llama.cpp image uses.
+- **Strata v0.1.39 does not compile for gfx906 as released.**
+  `docker/strata/gfx906-v0.1.39.patch` carries two fixes to `strata_hip.h`
+  (`cudaFuncSetAttribute` as a template function, and an alias for the
+  shared-memory carveout attribute). The patch is named for the version and
+  must be re-cut when `STRATA_VERSION` changes. Not reported upstream as of
+  2026-10-04.
+- The engine binary is `/opt/strata/build-906/strata`: the Strata JSON's `exe`.
+- The image has no group named `render`. Give the container the host's render
+  group by number, as `docker/compose.strata.yaml` does (`RENDER_GID`); with
+  the name the container does not start.
+
+**`Dockerfile.strata-cuda` is two builds.** Upstream publishes a Dockerfile, not
+an image, so `make docker-strata-cuda` first builds upstream's image from the
+pinned tag (`strata-cuda:<version>`) and then drops `viiwork` into it — the same
+shape as `Dockerfile.vllm`. Python packages are in a venv there, so the model's
+block is `strata: {dir: /opt/strata, python: /opt/strata/.venv/bin/python}` and
+the JSON's `exe` is `/opt/strata/engine/strata`. It needs GPUs granted like the
+other two NVIDIA images (below). It has served under viiwork on three RTX A4000 at the model's full
+262,144-token context ([models.md](docs/models.md)).
+
+What an operator will not guess, for either image:
+
+- **The model is not in the image.** Mount the pack, the GGUF shards and the
+  MTP layer, and write the Strata JSON config that `models[].path` names.
+  Preparing a model is upstream's `setup.py`; viiwork does none of it.
+- **With `STRATA_ARENA_MMAP=1` the first start writes a 24 GB `experts.bin`
+  into the pack**, as root, and takes about 6 minutes instead of 3.5. The pack
+  volume must be writable, and the JSON's `args` need `--pcie-frac 0`.
+  Backends of one model share that file; two loaded used 36 GB of host RAM.
+- Strata wants `ipc: host` and `ulimits.memlock: -1`; the compose example sets
+  both.
+
+`docker/compose.strata.yaml` is a whole gfx906 node on this image.
+
 ## Running either engine natively
 
 Neither engine has to be in a container — `models[].vllm.binary` and
@@ -130,8 +190,8 @@ Neither engine has to be in a container — `models[].vllm.binary` and
 works and is the simpler shape for a FreeToken host. Two things bite, both
 found bringing this up on teddy:
 
-- **Python must be older than 3.14.** vLLM 0.11.2 requires `>=3.10,<3.14`, and a
-  host whose `python3` is 3.14 cannot install it at all — pip reports only that
+- **Python must be older than 3.15.** vLLM 0.30.0 requires `>=3.10,<3.15` (0.11.2
+  required `<3.14`), and a host whose `python3` is newer cannot install it at all — pip reports only that
   no version satisfies the requirement, without saying why. `uv python install
   3.12` and `uv venv --python 3.12` is the quickest fix and touches no system
   package. Give each engine its own venv: they pull different torch builds.
@@ -262,4 +322,5 @@ image this repo no longer builds.
 ## See also
 
 - `docs/adding-an-engine.md` — how an engine and its image get added
+- `docs/models.md` — what Strata measured on Radeon VII, and its config
 - `bench-harness/README.md` — the harness that produced the numbers above

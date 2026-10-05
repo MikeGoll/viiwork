@@ -1,4 +1,4 @@
-.PHONY: build build-darwin mcp install-mcp accept release test vet-cross clean docker docker-stable docker-rocm docker-vllm docker-freetoken up down
+.PHONY: build build-darwin mcp install-mcp accept release test vet-cross clean docker docker-stable docker-rocm docker-vllm docker-freetoken docker-strata docker-strata-cuda up down
 
 # scripts/version.sh, not `git describe` inline: the private repo carries no
 # tags, so describe reports the last one it can still see. See that script.
@@ -63,6 +63,8 @@ clean:
 #   docker-rocm (alias: docker, docker-stable) -> viiwork:latest
 #   docker-vllm                                 -> viiwork-vllm:latest
 #   docker-freetoken                            -> viiwork-freetoken:latest
+#   docker-strata                               -> viiwork-strata:latest
+#   docker-strata-cuda                          -> viiwork-strata-cuda:latest
 #
 # One image per engine, all under docker/, named for the ENGINE rather than for
 # a GPU vendor: Dockerfile.rocm is llama.cpp built for ROCm/gfx906, which is the
@@ -91,6 +93,14 @@ docker-vllm:
 
 docker-freetoken:
 	docker build --build-arg VERSION=$(VERSION) -f docker/Dockerfile.freetoken -t viiwork-freetoken .
+
+docker-strata:
+	docker build --build-arg VERSION=$(VERSION) -f docker/Dockerfile.strata -t viiwork-strata .
+
+# Upstream publishes a Dockerfile, not an image: build theirs at the pin first.
+docker-strata-cuda:
+	. docker/pins.env && docker build -t strata-cuda:$$STRATA_VERSION https://github.com/Niko1221/Strata.git#$$STRATA_COMMIT
+	docker build --build-arg VERSION=$(VERSION) -f docker/Dockerfile.strata-cuda -t viiwork-strata-cuda .
 
 up:
 	docker compose up -d

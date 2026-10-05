@@ -83,6 +83,28 @@ func (p *PromptStore) StoreOutput(rid int64, t int64, model, output string, elap
 	p.append(PromptEntry{RequestID: rid, Time: t, Model: model, Output: truncate(output), ElapsedMS: elapsedMS})
 }
 
+// StoreUsage attaches the reply's token count and generation time to an
+// existing entry. A zero is "not known" and changes nothing; usage alone
+// never creates an entry.
+func (p *PromptStore) StoreUsage(rid, outputTokens, genMS int64) {
+	if outputTokens <= 0 && genMS <= 0 {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for i := len(p.entries) - 1; i >= 0; i-- {
+		if p.entries[i].RequestID == rid {
+			if outputTokens > 0 {
+				p.entries[i].OutputTokens = outputTokens
+			}
+			if genMS > 0 {
+				p.entries[i].GenMS = genMS
+			}
+			return
+		}
+	}
+}
+
 // append adds an entry and trims the ring. Callers hold p.mu.
 func (p *PromptStore) append(e PromptEntry) {
 	p.entries = append(p.entries, e)

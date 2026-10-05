@@ -204,7 +204,36 @@ type Versioner interface {
 type UsageReporter interface {
     UsageReporting() UsageReporting
 }
+
+// ReasoningSeparator is implemented by an engine whose streamed responses
+// keep reasoning apart from the answer: reasoning arrives as
+// delta.reasoning_content with no <think> tags, and the answer follows as
+// delta.content. The proxy then passes the stream through as it is for a
+// client that did not ask for thinking, instead of renaming reasoning to
+// content.
+type ReasoningSeparator interface {
+    SeparatesReasoning() bool
+}
+
+// PerfKeyer is implemented by an engine whose model speed depends on
+// something the node's model entry does not show, such as a config file of
+// the engine's own. PerfKey returns a short string that changes when it
+// does; the node adds it to the key of the saved performance baseline.
+type PerfKeyer interface {
+    PerfKey(s Spec) string
+}
 ```
+
+`ReasoningSeparator` decides what a client sees when it streams without
+`"think": true`. Without it, reasoning that carries no `<think>` tags is
+renamed to content, which is right for a llama-server that may put its whole
+answer in `reasoning_content`. With it, the stream is passed through untouched:
+reasoning stays in `reasoning_content`, where a client either shows it as
+thinking or ignores it, and the answer is in `content`. Holding the reasoning
+back instead leaves an interactive client with nothing on screen for as long
+as the model thinks. The plain, non-streamed reply still drops the reasoning.
+Declare the capability only for a server that always writes its answer to
+`content`.
 
 `UsageReporter` is what lets a host earn a performance score. A sample needs
 the prompt's uncached token count, so viiwork asks the engine for usage
@@ -254,6 +283,11 @@ type Case struct {
     // non-empty it is parsed into Spec.Options, so a case reads like the
     // config file it stands for.
     Options string
+    // NameInConfig is for an engine whose server takes the model name from
+    // a config file. Instead of looking for Spec.Name on the command line,
+    // the kit calls Command again under a name the file does not carry and
+    // requires an error.
+    NameInConfig bool
 }
 ```
 
@@ -610,6 +644,25 @@ Tracing one hop — from the flag viiwork generates to the flag it interacts wit
 their own copy of the engine list, and a copy that fell behind made acceptance
 validate configs for an engine it had not registered as though the engine did
 not exist. They now all import `internal/engine/all`, which is the only list.
+
+**A third port found one rule the kit stated too narrowly.** Strata's server
+has no flag for the model name: it reads `model_name` and `aliases` from its
+own JSON config. "The backend must answer to `s.Name`" still holds, but the kit
+had checked it as "`s.Name` is on the command line". With `Case.NameInConfig`
+the kit checks the same rule the other way round: `Command` reads the config
+file, and the kit requires it to refuse a name the file does not carry. The
+same port expected to need a working directory on `engine.Command` and did
+not: `PYTHONPATH` in `Command.Env` was enough.
+
+**Read what the server does with the environment you gave it.** The node pins
+a backend's cards before the child starts, and FreeToken's lesson was to add
+nothing on top. Strata's server cannot be left alone the same way: it builds
+its engine's device variables itself from a `gpu` list, overwriting
+`CUDA_VISIBLE_DEVICES` on NVIDIA and numbering inside the visible set on
+Radeon. So that engine passes `--gpu` — the real indexes on NVIDIA, `0..n-1`
+on Radeon — and this is what `Spec.Vendor` is for. "Pinning belongs to one
+layer" is still the rule; the engine's job was to stop the second layer from
+undoing the first.
 
 **An engine's run-time toolchain is your problem, not the node's.** FreeToken
 JIT-compiles CUDA kernels on first use and shells out to `ninja` and `nvcc` by

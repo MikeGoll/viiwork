@@ -49,7 +49,9 @@ cmd=$(docker inspect -f '{{json .Config.Cmd}}' "$img")
 [ "$cmd" = '["--config","/etc/viiwork/viiwork.yaml"]' ] && ok "cmd" || bad "cmd: $cmd"
 
 # Each platform carries its own target's binary.
-arm=$(CRANE_FLAGS=--insecure "${CRANE:-go run github.com/google/go-containerregistry/cmd/crane@v0.22.1}" --insecure \
+# Unquoted on purpose, as in release-images.sh: the default is a command line.
+crane=${CRANE:-go run github.com/google/go-containerregistry/cmd/crane@v0.22.1}
+arm=$($crane --insecure \
 	export --platform linux/arm64 "$reg/viiwork-llamacpp-cuda:$version" - | tar -xOf - usr/local/bin/viiwork | sha256sum | cut -d' ' -f1)
 want=$(sha256sum "$tmp/build/viiwork_${version}_linux_arm64/viiwork" | cut -d' ' -f1)
 [ "$arm" = "$want" ] && ok "the arm64 image carries the arm64 binary" || bad "arm64 image binary $arm, want $want"
