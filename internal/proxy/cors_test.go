@@ -3,175 +3,101 @@ package proxy
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
-
-	"github.com/janit/viiwork/internal/balancer"
 )
 
-func testCORS() *CORS {
-	return &CORS{
-		Origins:    []string{"*.ts.net", "*.example.com", "localhost"},
-		TailnetIPs: true,
+// echoOriginEngine behaves like llama-server: it reflects whatever Origin it
+// is sent into Access-Control-Allow-Origin.
+func echoOriginEngine(w http.ResponseWriter, r *http.Request) {
+	if o := r.Header.Get("Origin"); o != "" {
+		w.Header().Set("Access-Control-Allow-Origin", o)
+		w.Header().Set("Access-Control-Allow-Credentials", "true")
 	}
+	w.Header().Add("Vary", "Origin, Accept-Encoding")
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write([]byte(engineJSON))
 }
 
-func TestCORSAllows(t *testing.T) {
-	c := testCORS()
-	cases := []struct {
-		origin string
-		want   bool
-		why    string
-	}{
-		{"https://node0.tailnet-abc.ts.net", true, "MagicDNS name"},
-		{"http://node0.tailnet-abc.ts.net:8080", true, "port is not part of the host match"},
-		{"https://admin.example.com", true, "allowed subdomain"},
-		{"http://localhost:5180", true, "exact pattern, dev server"},
-		{"http://100.100.42.7:8080", true, "tailnet IPv4 literal"},
-		{"http://[fd7a:115c:a1e0::1]", true, "tailnet IPv6 literal"},
-
-		{"https://ts.net", false, "a *. rule must not match the bare apex"},
-		{"https://example.com.evil.test", false, "suffix must be a real label boundary"},
-		{"https://notexample.com", false, "must not match a longer label ending the same way"},
-		{"http://192.168.1.10", false, "LAN address is not tailnet"},
-		{"http://100.63.255.255", false, "just below the CGNAT block"},
-		{"http://100.128.0.0", false, "just above the CGNAT block"},
-		{"null", false, "sandboxed iframe / file origin"},
-		{"", false, "no Origin header"},
-		{"chrome-extension://abcdef", false, "non-http scheme"},
-	}
-	for _, tc := range cases {
-		if got := c.Allows(tc.origin); got != tc.want {
-			t.Errorf("Allows(%q) = %v, want %v — %s", tc.origin, got, tc.want, tc.why)
+// corsStandIn plays internal/node's CORS layer, which runs before the proxy:
+// Vary: Origin always, and the allow header only for an allowed origin.
+func corsStandIn(allowed string, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if o := r.Header.Get("Origin"); o != "" {
+			w.Header().Add("Vary", "Origin")
+			if o == allowed {
+				w.Header().Set("Access-Control-Allow-Origin", o)
+			}
 		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// The node's CORS layer is the only authority on CORS. An engine that echoes
+// Origin must neither see Origin nor get its allow header to the client:
+// otherwise a refused origin reads the output, and an allowed one gets two
+// allow headers, which browsers reject.
+func TestInferenceResponseCarriesOnlyTheNodesCORS(t *testing.T) {
+	const allowed, refusedOrigin = "https://app.example.ts.net", "https://evil.example"
+	for _, path := range []string{"local", "peer"} {
+		t.Run(path, func(t *testing.T) {
+			f := newHandlerFx(t)
+			eng := newRecEngine(t, echoOriginEngine)
+			if path == "local" {
+				f.local.add("m", eng.addr())
+			} else {
+				f.reports.add("P", eng.addr(), time.Now(), peerModel("m", 1, 0))
+			}
+			f.build()
+			front := corsStandIn(allowed, f.h)
+
+			for _, origin := range []string{refusedOrigin, allowed} {
+				req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(chatReq))
+				req.Header.Set("Origin", origin)
+				req.Header.Set("Access-Control-Request-Method", "POST")
+				rec := httptest.NewRecorder()
+				front.ServeHTTP(rec, req)
+				if rec.Code != 200 {
+					t.Fatalf("%s: code=%d body=%q", origin, rec.Code, rec.Body.String())
+				}
+				acao := rec.Header().Values("Access-Control-Allow-Origin")
+				switch origin {
+				case refusedOrigin:
+					if len(acao) != 0 {
+						t.Errorf("refused origin got Access-Control-Allow-Origin %q", acao)
+					}
+				case allowed:
+					if len(acao) != 1 || acao[0] != allowed {
+						t.Errorf("allowed origin got Access-Control-Allow-Origin %q, want exactly one", acao)
+					}
+				}
+				if v := rec.Header().Get("Access-Control-Allow-Credentials"); v != "" {
+					t.Errorf("%s: engine's Access-Control-Allow-Credentials reached the client", origin)
+				}
+				if vary := rec.Header().Values("Vary"); strings.Count(strings.Join(vary, ","), "Origin") != 1 || !strings.Contains(strings.Join(vary, ","), "Accept-Encoding") {
+					t.Errorf("%s: Vary = %q, want the node's Origin once and the engine's Accept-Encoding", origin, vary)
+				}
+				_, h := eng.last()
+				if h.Get("Origin") != "" || h.Get("Access-Control-Request-Method") != "" {
+					t.Errorf("%s: the engine was sent CORS headers: %v", origin, h)
+				}
+			}
+		})
 	}
 }
 
-// A nil CORS is the "not configured" state and must never emit a header.
-func TestCORSNilAllowsNothing(t *testing.T) {
-	var c *CORS
-	if c.Allows("https://node0.tailnet-abc.ts.net") {
-		t.Error("nil CORS allowed an origin")
+func TestVaryWithoutOrigin(t *testing.T) {
+	cases := []struct{ in, want []string }{
+		{[]string{"Accept-Encoding"}, []string{"Accept-Encoding"}},
+		{[]string{"Origin"}, nil},
+		{[]string{"origin, Accept-Encoding", "Origin"}, []string{"Accept-Encoding"}},
+		{[]string{"Accept-Encoding, Origin, X-Other"}, []string{"Accept-Encoding, X-Other"}},
 	}
-}
-
-func newCORSHandler(t *testing.T) *Handler {
-	t.Helper()
-	h := NewHandler(balancer.New(nil, 7, 4), "/models/test.gguf", 30*time.Second)
-	h.SetCORS(testCORS())
-	return h
-}
-
-func TestCORSHeadersOnGET(t *testing.T) {
-	h := newCORSHandler(t)
-	req := httptest.NewRequest("GET", "/v1/models", nil)
-	req.Header.Set("Origin", "https://admin.example.com")
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-
-	if got := w.Header().Get("Access-Control-Allow-Origin"); got != "https://admin.example.com" {
-		t.Errorf("allow-origin = %q, want the echoed origin", got)
-	}
-	if got := w.Header().Get("Vary"); got == "" {
-		t.Error("Vary: Origin missing — a shared cache could cross origins over")
-	}
-	if got := w.Header().Get("Access-Control-Expose-Headers"); got == "" {
-		t.Error("expose-headers missing; a browser client cannot read X-GPU-Backend")
-	}
-}
-
-// Vary must be set even when the origin is refused, or a cache can hand the
-// allowed origin's response to a disallowed one.
-func TestCORSDisallowedOriginGetsNoHeaderButStillVaries(t *testing.T) {
-	h := newCORSHandler(t)
-	req := httptest.NewRequest("GET", "/v1/models", nil)
-	req.Header.Set("Origin", "https://evil.test")
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-
-	if got := w.Header().Get("Access-Control-Allow-Origin"); got != "" {
-		t.Errorf("allow-origin = %q, want empty for a disallowed origin", got)
-	}
-	if w.Header().Get("Vary") == "" {
-		t.Error("Vary: Origin missing on the refusal path")
-	}
-	if w.Code != 200 {
-		t.Errorf("status = %d; the request itself is not blocked, only the browser's read of it", w.Code)
-	}
-}
-
-// Before CORS existed the router matched only GET and POST, so every preflight
-// fell through to 404 and no cross-origin POST could work at all.
-func TestCORSPreflightAnswered(t *testing.T) {
-	h := newCORSHandler(t)
-	req := httptest.NewRequest("OPTIONS", "/v1/chat/completions", nil)
-	req.Header.Set("Origin", "https://admin.example.com")
-	req.Header.Set("Access-Control-Request-Method", "POST")
-	req.Header.Set("Access-Control-Request-Headers", "content-type, x-viiwork-task")
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-
-	if w.Code != http.StatusNoContent {
-		t.Fatalf("preflight status = %d, want 204", w.Code)
-	}
-	if got := w.Header().Get("Access-Control-Allow-Methods"); got == "" {
-		t.Error("allow-methods missing")
-	}
-	if got := w.Header().Get("Access-Control-Allow-Headers"); got != "content-type, x-viiwork-task" {
-		t.Errorf("allow-headers = %q, want the requested set echoed", got)
-	}
-}
-
-func TestCORSPreflightRefused(t *testing.T) {
-	h := newCORSHandler(t)
-	req := httptest.NewRequest("OPTIONS", "/v1/chat/completions", nil)
-	req.Header.Set("Origin", "https://evil.test")
-	req.Header.Set("Access-Control-Request-Method", "POST")
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-
-	if w.Code != http.StatusForbidden {
-		t.Errorf("status = %d, want 403 so the cause is visible in devtools", w.Code)
-	}
-}
-
-// A plain OPTIONS with no Access-Control-Request-Method is not a preflight and
-// must keep its previous behaviour rather than being swallowed as one.
-func TestCORSNonPreflightOptionsStill404s(t *testing.T) {
-	h := newCORSHandler(t)
-	req := httptest.NewRequest("OPTIONS", "/v1/models", nil)
-	req.Header.Set("Origin", "https://admin.example.com")
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-
-	if w.Code != http.StatusNotFound {
-		t.Errorf("status = %d, want 404", w.Code)
-	}
-}
-
-// Without CORS configured the API must behave exactly as it did before.
-func TestNoCORSConfiguredSendsNoHeaders(t *testing.T) {
-	h := NewHandler(balancer.New(nil, 7, 4), "/models/test.gguf", 30*time.Second)
-	req := httptest.NewRequest("GET", "/v1/models", nil)
-	req.Header.Set("Origin", "https://admin.example.com")
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-
-	if got := w.Header().Get("Access-Control-Allow-Origin"); got != "" {
-		t.Errorf("allow-origin = %q, want none when CORS is unconfigured", got)
-	}
-}
-
-// EventSource sends no preflight, so an SSE endpoint that misses the header on
-// its own GET response is unusable cross-origin no matter what OPTIONS does.
-func TestCORSHeaderOnSSEEndpoint(t *testing.T) {
-	h := newCORSHandler(t)
-	req := httptest.NewRequest("GET", "/v1/metrics/stream", nil)
-	req.Header.Set("Origin", "https://node0.tailnet-abc.ts.net")
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-
-	if got := w.Header().Get("Access-Control-Allow-Origin"); got != "https://node0.tailnet-abc.ts.net" {
-		t.Errorf("allow-origin = %q on the SSE path", got)
+	for _, c := range cases {
+		got := varyWithoutOrigin(c.in)
+		if strings.Join(got, "|") != strings.Join(c.want, "|") {
+			t.Errorf("varyWithoutOrigin(%q) = %q, want %q", c.in, got, c.want)
+		}
 	}
 }

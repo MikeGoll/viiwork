@@ -30,4 +30,14 @@ type PromptEntry struct {
 	// Elapsed is the wall time of the request in milliseconds, recorded with
 	// the output. Zero while the request is still running.
 	ElapsedMS int64 `json:"elapsed_ms,omitempty"`
+	// OutputTokens is the reply's usage.completion_tokens. Absent when the
+	// node that keeps this entry never saw a usage object: a streaming
+	// client that did not ask for one, behind an engine that sends none
+	// unasked. Since v2.8.0.
+	OutputTokens int64 `json:"output_tokens,omitempty"`
+	// GenMS is the time from the first token to the end of the reply, in
+	// milliseconds: what OutputTokens were generated in. Absent for a plain
+	// (non-streamed) reply and for a request another node executed, where
+	// this node saw no first token. Since v2.8.0.
+	GenMS int64 `json:"gen_ms,omitempty"`
 }

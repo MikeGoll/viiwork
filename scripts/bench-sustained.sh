@@ -13,7 +13,7 @@
 
 set -euo pipefail
 
-URL="${1:-http://gb1:8080}"
+URL="${1:-http://gb1:8086}"
 CONC="${2:-11}"
 DURATION="${3:-60}"
 MODEL="${MODEL:-qwen2.5-coder-14b-instruct-q6_k}"

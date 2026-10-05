@@ -7,7 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/janit/viiwork/meshapi"
+	"github.com/janit/viiwork/v2/meshapi"
 )
 
 var nextRequestID atomic.Int64
@@ -24,25 +24,38 @@ func NewRequestID() int64 {
 // Message field — is wire contract, not a local logging concern.
 type Event = meshapi.Event
 
-const maxEvents = 200
+// DefaultEventHistory is how many events the ring keeps when nothing is
+// configured.
+const DefaultEventHistory = 200
+
 const maxSubscribers = 16
 
 type Log struct {
-	mu          sync.Mutex
+	mu        sync.Mutex
+	maxEvents int
+	// events is a circular buffer. It grows by append until it holds
+	// maxEvents; from then on head is the oldest event's index and each emit
+	// overwrites it, so a full ring costs no allocation or copy per event.
 	events      []Event
+	head        int
 	subscribers map[chan []byte]struct{}
 	prompts     *PromptStore
 }
 
-// NewLog returns a log with the default prompt-history capacity.
-func NewLog() *Log { return NewLogWithPromptHistory(DefaultPromptHistory) }
+// NewLog returns a log with the default prompt-history and event-ring
+// capacities.
+func NewLog() *Log { return NewLogWithHistory(DefaultPromptHistory, DefaultEventHistory) }
 
-// NewLogWithPromptHistory returns a log whose prompt store holds promptHistory
-// requests. Kept separate from NewLog so the many call sites that do not care
-// stay unchanged.
-func NewLogWithPromptHistory(promptHistory int) *Log {
+// NewLogWithHistory also sizes the event ring (C1 activity.event_history);
+// eventHistory <= 0 means DefaultEventHistory. The ring is also how far back a
+// reconnecting dashboard can replay, see Backlog.
+func NewLogWithHistory(promptHistory, eventHistory int) *Log {
+	if eventHistory <= 0 {
+		eventHistory = DefaultEventHistory
+	}
 	return &Log{
-		events:      make([]Event, 0, maxEvents),
+		maxEvents:   eventHistory,
+		events:      make([]Event, 0, min(eventHistory, DefaultEventHistory)),
 		subscribers: make(map[chan []byte]struct{}),
 		prompts:     NewPromptStore(promptHistory),
 	}
@@ -59,6 +72,12 @@ func (l *Log) StorePrompt(rid int64, model, prompt string) {
 // against the same rid the prompt was stored under.
 func (l *Log) StoreOutput(rid int64, model, output string, elapsedMS int64) {
 	l.prompts.StoreOutput(rid, time.Now().Unix(), model, output, elapsedMS)
+}
+
+// StoreUsage records the reply's token count and generation time for a
+// request, after StoreOutput. Zeros mean "not known".
+func (l *Log) StoreUsage(rid, outputTokens, genMS int64) {
+	l.prompts.StoreUsage(rid, outputTokens, genMS)
 }
 
 // PromptHistoryMax reports the prompt store's configured capacity.
@@ -94,23 +113,25 @@ func (l *Log) EmitRequestTask(rid int64, gpuID int, taskID string, format string
 }
 
 func (l *Log) emit(ev Event) {
+	// Marshalled before the lock: it is the expensive part and needs nothing
+	// the lock protects.
+	data, _ := json.Marshal(ev)
 
 	l.mu.Lock()
-	l.events = append(l.events, ev)
-	if len(l.events) > maxEvents {
-		kept := make([]Event, maxEvents)
-		copy(kept, l.events[len(l.events)-maxEvents:])
-		l.events = kept
+	defer l.mu.Unlock()
+	if len(l.events) < l.maxEvents {
+		l.events = append(l.events, ev)
+	} else {
+		l.events[l.head] = ev
+		l.head = (l.head + 1) % l.maxEvents
 	}
-	// Snapshot subscribers
-	subs := make([]chan []byte, 0, len(l.subscribers))
+	// Sent while holding the lock, not to a snapshot taken under it and
+	// released first. Subscribe closes the oldest subscriber's channel when it
+	// is at capacity, and a send racing that close panics — "send on closed
+	// channel", which a select's default case does not prevent. Holding the
+	// lock makes closing and sending mutually exclusive. It cannot stall on a
+	// slow client, because every send here is non-blocking.
 	for ch := range l.subscribers {
-		subs = append(subs, ch)
-	}
-	l.mu.Unlock()
-
-	data, _ := json.Marshal(ev)
-	for _, ch := range subs {
 		select {
 		case ch <- data:
 		default: // skip slow clients
@@ -118,22 +139,52 @@ func (l *Log) emit(ev Event) {
 	}
 }
 
-// Backlog returns the ring marked as replay, for a stream that has just
-// opened.
+// ReplayWindow bounds how much history Backlog hands a stream that has just
+// opened. A dashboard loading fresh has no use for the whole ring — replaying
+// every member's ring made a page load wade through thousands of events —
+// only for what happened just now, plus whatever is still running.
+const ReplayWindow = 30 * time.Second
+
+// Backlog returns the recent part of the ring marked as replay, for a stream
+// that has just opened: every event from the last ReplayWindow, and, from
+// before it, the events of requests still in flight.
 //
 // This is what makes a dropped connection recoverable. A consumer
 // reconstructing in-flight requests from start/done pairs loses the pairing for
 // anything that completes while it is away — a laptop sleeping, a tab throttled
 // in the background, a node restarting — and a start with no matching done
-// strands a row that never leaves. Replaying the ring hands back both halves.
+// strands a row that never leaves. Replaying hands back both halves. The
+// in-flight exception is why the window cannot simply cut: an inference running
+// for minutes started long before it, and dropping its start would make it
+// vanish from a reloaded dashboard while it is still running.
 //
-// The ring bounds how far back that works. A gap longer than maxEvents on a
+// The ring bounds how far back that works. A gap longer than the ring on a
 // given node cannot be repaired from here, which is why a consumer should also
 // treat a reconnect as a reason to rebuild rather than to carry state across.
-func (l *Log) Backlog() []Event {
-	out := l.Recent()
-	for i := range out {
-		out[i].Replay = true
+func (l *Log) Backlog() []Event { return l.backlogAt(time.Now()) }
+
+func (l *Log) backlogAt(now time.Time) []Event {
+	cutoff := now.Add(-ReplayWindow).Unix()
+	all := l.Recent()
+
+	// A request whose terminal event is in the ring is over, whenever it began.
+	var ended map[int64]bool
+	for _, ev := range all {
+		if ev.RequestID != 0 && meshapi.IsRequestTerminal(ev.Message) {
+			if ended == nil {
+				ended = make(map[int64]bool)
+			}
+			ended[ev.RequestID] = true
+		}
+	}
+
+	out := all[:0]
+	for _, ev := range all {
+		if ev.Time < cutoff && (ev.RequestID == 0 || ended[ev.RequestID]) {
+			continue
+		}
+		ev.Replay = true
+		out = append(out, ev)
 	}
 	return out
 }
@@ -141,8 +192,10 @@ func (l *Log) Backlog() []Event {
 func (l *Log) Recent() []Event {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	// Oldest first: the part from head to the end, then the wrapped part.
 	out := make([]Event, len(l.events))
-	copy(out, l.events)
+	n := copy(out, l.events[l.head:])
+	copy(out[n:], l.events[:l.head])
 	return out
 }
 
@@ -151,10 +204,15 @@ func (l *Log) Subscribe() chan []byte {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if len(l.subscribers) >= maxSubscribers {
-		// Drop oldest subscriber
-		for old := range l.subscribers {
-			delete(l.subscribers, old)
-			close(old)
+		// Evict one to make room. Which one is arbitrary: subscribers are a
+		// map and Go randomises its iteration order, so this is not "the
+		// oldest" however much that would be nicer. It does not matter for
+		// correctness — the evicted reader sees its channel close and returns,
+		// and a dashboard reconnects — but it is worth not mistaking for an
+		// ordering guarantee.
+		for evict := range l.subscribers {
+			delete(l.subscribers, evict)
+			close(evict)
 			break
 		}
 	}

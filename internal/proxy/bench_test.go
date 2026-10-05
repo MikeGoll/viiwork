@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Benchmarks for the per-request and per-token hot paths.
@@ -98,6 +99,25 @@ func BenchmarkStreamThinkDisabledReasoning(b *testing.B) {
 	}
 }
 
+// BenchmarkStreamThinkDisabledUntaggedReasoning is a model whose server splits
+// reasoning out without <think> tags (llama-server's reasoning format): every
+// token arrives as reasoning_content outside any think block and is renamed to
+// content. The rename fast path covers it.
+func BenchmarkStreamThinkDisabledUntaggedReasoning(b *testing.B) {
+	var sb strings.Builder
+	for i := 0; i < 512; i++ {
+		sb.WriteString("data: " + reasoningChunk(fmt.Sprintf("thought%d ", i)) + "\n\n")
+	}
+	sb.WriteString("data: [DONE]\n\n")
+	stream := sb.String()
+	b.SetBytes(int64(len(stream)))
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		w := &flushRecorder{}
+		streamThinkDisabled(w, strings.NewReader(stream), func() {})
+	}
+}
+
 // BenchmarkRewriteThinkResponse covers the non-streaming equivalent.
 func BenchmarkRewriteThinkResponse(b *testing.B) {
 	body := []byte(`{"id":"chatcmpl-abc","object":"chat.completion","created":1700000000,` +
@@ -121,6 +141,57 @@ func chatBody(promptTokens int, withTask bool) []byte {
 	return []byte(fmt.Sprintf(`{"model":"Laguna-XS-2.1-Q4_K_M",%s"messages":[`+
 		`{"role":"system","content":"You are a helpful assistant."},`+
 		`{"role":"user","content":%q}],"max_tokens":400,"temperature":0.7}`, task, prompt))
+}
+
+// conversationBody is a multi-turn chat: the prompt history's extraction reads
+// only the last user message, yet every earlier turn is in the body too.
+func conversationBody(turns, tokensPerTurn int) []byte {
+	var b strings.Builder
+	b.WriteString(`{"model":"Laguna-XS-2.1-Q4_K_M","messages":[{"role":"system","content":"You are a helpful assistant."}`)
+	text := strings.Repeat("the quick brown fox jumps over the lazy dog ", tokensPerTurn/9)
+	for i := 0; i < turns; i++ {
+		role := "user"
+		if i%2 == 1 {
+			role = "assistant"
+		}
+		fmt.Fprintf(&b, `,{"role":%q,"content":%q}`, role, fmt.Sprintf("turn %d: %s", i, text))
+	}
+	b.WriteString(`],"max_tokens":400,"temperature":0.7}`)
+	return []byte(b.String())
+}
+
+// BenchmarkExtractPromptText is the prompt history's read of every recorded
+// request body.
+func BenchmarkExtractPromptText(b *testing.B) {
+	for _, c := range []struct {
+		name string
+		body []byte
+	}{
+		{"single-16384tok", chatBody(16384, false)},
+		{"conversation-40x512tok", conversationBody(40, 512)},
+	} {
+		b.Run(c.name, func(b *testing.B) {
+			b.SetBytes(int64(len(c.body)))
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				extractPromptText(c.body)
+			}
+		})
+	}
+}
+
+// BenchmarkRewriteModel is the aliased request's body rewrite.
+func BenchmarkRewriteModel(b *testing.B) {
+	for _, n := range []int{512, 16384} {
+		body := chatBody(n, false)
+		b.Run(fmt.Sprintf("prompt=%dtok", n), func(b *testing.B) {
+			b.SetBytes(int64(len(body)))
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				rewriteModel(body, "translategemma-27b-it")
+			}
+		})
+	}
 }
 
 // BenchmarkExtractRequestFields measures what handleProxy pays just to learn the
@@ -245,6 +316,21 @@ func BenchmarkCaptureWriter(b *testing.B) {
 			_ = capw.Output()
 		}
 	})
+
+	// A long response: past the prompt history's cap, Output stops decoding.
+	long := []byte(`data: {"choices":[{"delta":{"content":"` + strings.Repeat("x", 200) + `"}}]}` + "\n\n")
+	b.Run("capture-writes+extract-long", func(b *testing.B) {
+		const longChunks = 8000 // ~2 MB, the capture cap
+		b.SetBytes(int64(len(long) * longChunks))
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			w, capw := newCaptureWriter(discardWriter{})
+			for j := 0; j < longChunks; j++ {
+				w.Write(long)
+			}
+			_ = capw.Output()
+		}
+	})
 }
 
 // discardWriter is a flushing ResponseWriter that does nothing, so the
@@ -255,3 +341,20 @@ func (discardWriter) Header() http.Header         { return http.Header{} }
 func (discardWriter) Write(b []byte) (int, error) { return len(b), nil }
 func (discardWriter) WriteHeader(int)             {}
 func (discardWriter) Flush()                      {}
+
+// BenchmarkMeasureWriterPerChunk is the per-token cost of measurement once the
+// first token was seen, without and with stripping. Both must be 0 allocs/op.
+func BenchmarkMeasureWriterPerChunk(b *testing.B) {
+	chunk := []byte("data: {\"choices\":[{\"delta\":{\"content\":\"token\"}}]}\n\n")
+	for _, strip := range []bool{false, true} {
+		b.Run(fmt.Sprintf("strip=%v", strip), func(b *testing.B) {
+			w, _ := newMeasureWriter(discardWriter{}, strip, time.Now)
+			w.Write(chunk) // first token seen, carry buffer grown
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				w.Write(chunk)
+			}
+		})
+	}
+}

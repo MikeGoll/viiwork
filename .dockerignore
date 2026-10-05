@@ -1,9 +1,13 @@
 models/
+models_local/
 bin/
 *.gguf
+**/*.gguf
 docker-compose.yaml
 viiwork.yaml
 viiwork-*.yaml
 configs/
 .env
 .git
+.gocache/
+.gomodcache/

@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  viiwork-parrot, the downloader and seeder a node asks for weights when a model
+  says source: viiwork-parrot:<id>. See docs/macos.md.
+
+    cp scripts/macos/fi.viiwork.parrot.plist.example ~/Library/LaunchAgents/fi.viiwork.parrot.plist
+    # replace every /Users/YOU below: launchd expands neither ~ nor $HOME
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/fi.viiwork.parrot.plist
+
+  Load it before the node's agent. The node waits for it anyway: a backend
+  sits in phase fetching until parrot answers.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>fi.viiwork.parrot</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/YOU/.local/bin/viiwork-parrot</string>
+    <string>daemon</string>
+    <string>-config</string>
+    <string>/Users/YOU/.config/viiwork-parrot/viiwork-parrot.yaml</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <!-- ~/.local/bin first: its tailscale wrapper reaches the App Store CLI. -->
+    <key>PATH</key>
+    <string>/Users/YOU/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ExitTimeOut</key>
+  <integer>30</integer>
+  <key>StandardOutPath</key>
+  <string>/Users/YOU/Library/Logs/viiwork/viiwork-parrot.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/YOU/Library/Logs/viiwork/viiwork-parrot.log</string>
+</dict>
+</plist>

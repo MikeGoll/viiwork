@@ -24,7 +24,7 @@
 //	go rec.Run(ctx) // flushes the bucket in progress when ctx is cancelled
 //
 //	kwh := store.KWh24h() // whole-node energy, rolling 24 hours
-//	per := store.ByModel(energy.TierDay, monthAgo, now)
+//	per := store.ByModel(energy.TierHour, monthAgo, now) // not TierDay: see ByModel
 //
 // # Why this is a public package
 //

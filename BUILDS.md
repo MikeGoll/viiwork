@@ -1,96 +1,326 @@
 # Builds
 
-viiwork ships in two parallel builds living in the same repo. Both run the same Go server, the same balancer, the same dashboard, the same API. They differ only in the llama.cpp binary that the server spawns under the hood.
+viiwork is one Go binary that supervises inference engines. An image is that
+binary dropped into a base that carries an engine's runtime — viiwork compiles
+against none of them, because it only ever spawns and supervises, so **pinning
+the base image is how the inference stack gets pinned.**
 
-| | Stable foundation | Experimental track |
+One image per engine, all under `docker/`, each named for what it carries.
+
+| Image | Dockerfile | Engine | Make target |
+|---|---|---|---|
+| `viiwork:latest` (a.k.a. `viiwork`) | `docker/Dockerfile.rocm` | `llamacpp` on ROCm / gfx906 | `make docker-rocm` (aliases: `make docker`, `make docker-stable`) |
+| `viiwork-vllm:latest` | `docker/Dockerfile.vllm` | `vllm` | `make docker-vllm` |
+| `viiwork-freetoken:latest` | `docker/Dockerfile.freetoken` | `freetoken` | `make docker-freetoken` |
+| `viiwork-strata:latest` | `docker/Dockerfile.strata` | `strata` on ROCm / gfx906 | `make docker-strata` |
+| `viiwork-strata-cuda:latest` | `docker/Dockerfile.strata-cuda` | `strata` on CUDA | `make docker-strata-cuda` |
+
+**Named for the engine, never for a GPU vendor.** vLLM already has a ROCm build
+and FreeToken may add AMD or Intel, so a second accelerator backend is a sibling
+base image, not a fork — and `Spec.Vendor` is informational rather than a gate.
+
+`make docker` builds the ROCm image. That is deliberate rather than historical:
+Radeon VII is the core of this fleet, and the unqualified target pointing at it
+is right. What was wrong before v2.1.0 was the *name* — a root `Dockerfile`
+that silently meant "llama.cpp for gfx906" as though no other kind existed.
+
+## `docker/Dockerfile.rocm`
+
+Standard upstream llama.cpp from `ggml-org/llama.cpp`, pinned to a release tag
+(currently `b11371`, which carries Qwen3.5/3.6/3.8 hybrid DeltaNet support and
+MTP speculative decoding) and patched for the gfx906 FP8 header
+incompatibility. Built on `rocm/dev-ubuntu-24.04:6.2.4-complete` — the last
+ROCm with reliable gfx906 support.
+
+**`--no-mmap` is gone in `b11371`.** `--mmap`, `--no-mmap`, `--mlock` and
+`--direct-io` were deprecated in favour of `--load-mode` and then removed; the
+server now exits with `invalid argument`. The node's own no-mmap rule (a model
+at least 80% of host RAM) asks the binary's `--help` and generates
+`--load-mode none` or `--no-mmap` accordingly, so it works on either build.
+An operator's own `--no-mmap` in `models[].args` is passed as `--load-mode none`
+to a build that no longer reads it, so a config written for `b10437` keeps
+working on a `b11371` image; every other arg is passed through as written.
+
+**The pin must stay at or above `b10430`:** the Qwen3.8 quants were cut with it,
+and the older `b9222` rejects that architecture at load time with "unknown model
+architecture" rather than anything self-explanatory.
+
+The FP8 patch is required because ROCm 6.2+ ships `<hip/hip_fp8.h>` for all
+architectures, but gfx906 has no FP8 hardware and the header fails to compile.
+
+Build: `make docker`. To try a different llama.cpp release, override the pin —
+and check the architectures your models need, since an older tag can refuse them
+at load:
+
+```bash
+docker build --build-arg LLAMA_CPP_VERSION=<tag> -f docker/Dockerfile.rocm -t viiwork .
+```
+
+## `docker/Dockerfile.vllm`
+
+The binary dropped into vLLM's own published image, `vllm/vllm-openai`, pinned
+by `VLLM_VERSION` (currently `v0.30.0`). Nothing is rebuilt: that image already
+carries a matched torch, CUDA and kernel set, and rebuilding the stack is how
+you end up with a torch that disagrees with the driver.
+
+Two things about it are load bearing:
+
+- **`ENTRYPOINT []`.** The base image sets an entrypoint that launches one vLLM
+  API server. viiwork is the process that runs here, and it starts `vllm serve`
+  itself, once per backend, with the flags the engine builds. Leave the
+  entrypoint in place and `CMD` reads as arguments to that server instead.
+- **`ARG VLLM_VERSION` is declared before the first `FROM`.** An `ARG` written
+  after a `FROM` belongs to that stage only, and the runtime stage's `FROM`
+  would expand it to empty and fail with `invalid reference format`.
+
+Build: `make docker-vllm`. About a minute once the base image is pulled; the
+base is roughly 25 GB.
+
+## `docker/Dockerfile.freetoken`
+
+Carried from `viiwork-freetoken`. There is no official FreeToken image, so the
+engine is installed here into its own virtualenv on `PATH` — which is why the
+build is slow (torch and its CUDA wheels) and the image is several GB.
+
+- **It must be a *devel* CUDA base, not a runtime one.** FreeToken JIT-compiles
+  its kernels on first use and needs `nvcc` on `PATH` **at run time**. A runtime
+  base passes `docker build` and then fails on the first request.
+- **The prebuilt kernel cache is best effort.** Upstream publishes a companion
+  wheel whose `+cuXYZ` suffix must match the CUDA that *torch* was built for —
+  not `CUDA_TAG`. The engine raises on a mismatch rather than falling back, so a
+  wrong wheel is worse than none; no wheel is the ordinary case and the build
+  continues.
+- **`FREETOKEN_CHANNEL`** is `pypi` (a tagged release) or `nightly` (upstream's
+  latest build of main, resolved and sha256-verified by
+  `scripts/fetch-engine.py`). Nightly cannot be pinned — each publish deletes
+  the previous wheels — so `FREETOKEN_COMMIT` makes a rebuild *fail* when the
+  engine has moved rather than reproduce the old one. **Keep the image, not the
+  build args**; `/opt/freetoken/engine.json` records the pair it holds.
+
+Build: `make docker-freetoken`, off-peak.
+
+### FreeToken 0.1.3 is the floor (viiwork 2.3.0)
+
+`FREETOKEN_VERSION` defaults to `0.1.3` rather than to empty, so a rebuild
+reproduces the inference stack instead of taking whatever PyPI has that day.
+The floor is not advisory: 0.1.3 renamed `--moe-backend` to `--moe-strategy`,
+viiwork generates the new spelling, and an older engine rejects it — every
+backend on the node dies at load with an argparse error.
+
+Upgrading an existing host is two flags and a checkpoint question:
+
+- **`models[].freetoken.moe_backend` does not change.** The operator key keeps
+  its name (C1 freezes the YAML an operator writes); only the generated flag
+  moved. `--nvfp4-backend` in `args:` does have to become
+  `--quant-backend moe.nvfp4=<kernel>`.
+- **Multimodal checkpoints now build their vision tower by default**, which is
+  the change most likely to take a backend down. Qwen3.6, Qwen3.8-Flash-Next,
+  Gemma-4, GLM-5.3-Flash, MiniMax-M3 and Muse-Glimmer-30B serve images out of
+  the box; `--text-model-only` in `models[].args` restores the text-only
+  footprint. It also restores the *load*, because an FTW converted before its
+  family served images holds no vision encoder and `ft serve` refuses it.
+- **Some older FTW checkpoints need repairing** before 0.1.3 loads them at all
+  — NVFP4 dense exports missing the `input_scale` their scheme declares, and
+  Qwen3.8-Flash-Next, whose PLE table now lives beside the FTW. Reconvert with
+  `ft checkpoint`, or patch in place with upstream's `scripts/ftw_hotfix.py`.
+- **`ft checkpoint --device` and `ft bench bw --device` are gone**; both take
+  `--gpu <uuid|index>`. This only affects scripts you run by hand — viiwork
+  spawns neither, and still pins `ft serve` with `CUDA_VISIBLE_DEVICES` rather
+  than the new `ft serve --gpu`, because the node has already narrowed the
+  child to one card and two layers pinning one backend is how it lands on a
+  neighbour.
+
+None of this changes the kernel-cache step: the URL it builds from the
+installed release resolves to the published
+`freetoken_kernel_cache-0.1.3+cu130` wheel unchanged.
+
+## `docker/Dockerfile.strata` and `docker/Dockerfile.strata-cuda`
+
+[Strata](https://github.com/Niko1221/Strata) at the tag `STRATA_VERSION` pins in
+`docker/pins.env` (currently `v0.1.39`), with `viiwork` added. Two files rather
+than one with a build argument, because the engine is compiled differently for
+each accelerator. In both images the checkout is `/opt/strata`, which is what
+`models[].strata.dir` names.
+
+**`Dockerfile.strata` is the gfx906 build** (Radeon VII, Instinct MI50 / MI60).
+
+- **The base is a community image**, `mixa3607/rocm-gfx906:7.14-complete`
+  (pinned by digest as `STRATA_ROCM_BASE` in `docker/pins.env`), the one
+  upstream's own `docs/AMD_HIP.md` documents. AMD's ROCm no longer ships
+  gfx906 libraries, so this image does not sit on the ROCm 6.2.4 base the
+  llama.cpp image uses.
+- **Strata v0.1.39 does not compile for gfx906 as released.**
+  `docker/strata/gfx906-v0.1.39.patch` carries two fixes to `strata_hip.h`
+  (`cudaFuncSetAttribute` as a template function, and an alias for the
+  shared-memory carveout attribute). The patch is named for the version and
+  must be re-cut when `STRATA_VERSION` changes. Not reported upstream as of
+  2026-10-04.
+- The engine binary is `/opt/strata/build-906/strata`: the Strata JSON's `exe`.
+- The image has no group named `render`. Give the container the host's render
+  group by number, as `docker/compose.strata.yaml` does (`RENDER_GID`); with
+  the name the container does not start.
+
+**`Dockerfile.strata-cuda` is two builds.** Upstream publishes a Dockerfile, not
+an image, so `make docker-strata-cuda` first builds upstream's image from the
+pinned tag (`strata-cuda:<version>`) and then drops `viiwork` into it — the same
+shape as `Dockerfile.vllm`. Python packages are in a venv there, so the model's
+block is `strata: {dir: /opt/strata, python: /opt/strata/.venv/bin/python}` and
+the JSON's `exe` is `/opt/strata/engine/strata`. It needs GPUs granted like the
+other two NVIDIA images (below). It has served under viiwork on three RTX A4000 at the model's full
+262,144-token context ([models.md](docs/models.md)).
+
+What an operator will not guess, for either image:
+
+- **The model is not in the image.** Mount the pack, the GGUF shards and the
+  MTP layer, and write the Strata JSON config that `models[].path` names.
+  Preparing a model is upstream's `setup.py`; viiwork does none of it.
+- **With `STRATA_ARENA_MMAP=1` the first start writes a 24 GB `experts.bin`
+  into the pack**, as root, and takes about 6 minutes instead of 3.5. The pack
+  volume must be writable, and the JSON's `args` need `--pcie-frac 0`.
+  Backends of one model share that file; two loaded used 36 GB of host RAM.
+- Strata wants `ipc: host` and `ulimits.memlock: -1`; the compose example sets
+  both.
+
+`docker/compose.strata.yaml` is a whole gfx906 node on this image.
+
+## Running either engine natively
+
+Neither engine has to be in a container — `models[].vllm.binary` and
+`models[].freetoken.binary` take an absolute path, so a virtualenv per engine
+works and is the simpler shape for a FreeToken host. Two things bite, both
+found bringing this up on teddy:
+
+- **Python must be older than 3.15.** vLLM 0.30.0 requires `>=3.10,<3.15` (0.11.2
+  required `<3.14`), and a host whose `python3` is newer cannot install it at all — pip reports only that
+  no version satisfies the requirement, without saying why. `uv python install
+  3.12` and `uv venv --python 3.12` is the quickest fix and touches no system
+  package. Give each engine its own venv: they pull different torch builds.
+- **FreeToken needs `ninja` and `nvcc` on the BACKEND's PATH**, not just yours.
+  It shells out to both by name to JIT-compile kernels, and without them the
+  backend dies with `FileNotFoundError: [Errno 2] No such file or directory:
+  'ninja'` after the API server has already started — so the failure looks like
+  a crash on first load rather than a missing dependency. viiwork passes
+  `models[].env` to the child, so:
+
+  ```yaml
+  env:
+    PATH: /opt/engines/freetoken/bin:/usr/local/cuda/bin:/usr/local/bin:/usr/bin:/bin
+  ```
+
+  This is the host-side twin of why `docker/Dockerfile.freetoken` needs a
+  *devel* CUDA base: the toolchain is a run-time dependency, not a build-time
+  one.
+
+## GPU access for the two NVIDIA images
+
+Neither image contains `nvidia-smi` or `libcuda`, deliberately: the container
+runtime injects them from the host so they always match the running driver. A
+copy baked in would be whatever was current on build day.
+
+So the container must be granted GPUs explicitly. Two ways, and the choice
+matters on a busy machine:
+
+| | Needs | Restarts the Docker daemon |
 |---|---|---|
-| **Image tag** | `viiwork:latest` (a.k.a. `viiwork`) | `viiwork:gfx906` |
-| **Dockerfile** | `Dockerfile` | `Dockerfile.gfx906` |
-| **Make target** | `make docker` (alias: `make docker-stable`) | `make docker-gfx906` (alias: `make docker-experimental`) |
-| **llama.cpp source** | Upstream `ggml-org/llama.cpp` @ pinned release tag | Local fork tree at `$GFX906_FORK` (default `~/gfx906-work/llama.cpp-gfx906`) |
-| **Build dependencies** | Just the repo + Docker | Repo + Docker + the local fork tree (built separately) |
-| **Production status** | Default, ships everywhere | Bake-in track, opt-in per node |
-| **setup-node.sh choice** | Option 1 (default) | Option 2 |
+| **CDI** | `nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml` | no |
+| nvidia runtime | `nvidia-ctk runtime configure --runtime=docker` | **yes** — bounces every container on the host |
 
-## Stable foundation — `viiwork:latest`
-
-The default. Standard upstream llama.cpp from `ggml-org/llama.cpp`, built from the repo's `Dockerfile`. Pinned to a specific release tag (currently `b10437`, which carries Qwen3.5/3.6/3.8 hybrid DeltaNet support and MTP speculative decoding) and patched for the gfx906 FP8 header incompatibility. The pin must stay at or above `b10430` — the Qwen3.8 quants were cut with it, and the older `b9222` rejects that arch at load time. This is the build every viiwork node has run since day one and what every new node should start on unless there's a reason to do otherwise.
-
-Build: `make docker` or `docker compose up -d` (compose's `build:` directive triggers the build automatically the first time).
-
-## Experimental track — `viiwork:gfx906`
-
-A gfx906-specialized fork of llama.cpp with non-HIP backends, unused model architectures, unused quant formats, half the HIP MMQ instances, the grammar parser, and several sampler strategies removed. The fork is the subject of `docs/superpowers/specs/2026-04-07-gfx906-llama-cpp-fork-design.md` and lives in its own repo (`llama.cpp-gfx906`) on the dev node, not in this tree.
-
-What it has shown so far:
-
-| Measurement | Result | Source |
-|---|---|---|
-| Single-GPU bench parity vs upstream | -0.07 % (within noise) | `gfx906-work/results/20260408T085054Z-cutover-viiwork-gfx906/` |
-| 4 h sustained A/B vs upstream, concurrency 10 | **+3.0 %** sustained tok/s, 0 failures over 5455 vs 5298 requests | milestone tag `milestone/gfx906-fork-4h-soak-2026-04-09` |
-| RSS drift over 4 h | Bounded — both builds reach steady state in ~5 min and oscillate inside a ~2 GiB band, no upward trend | same milestone |
-| VRAM drift over 4 h | -2 MiB / +0 MiB | same milestone |
-| Binary size | -73 % lines in `llama-model.cpp`, -28 % in `llama-sampler.cpp`, ~370 source files removed | commit `49f51d5` |
-
-What it's still missing before promotion:
-
-- **24 h formal soak** under production load to formally clear the spec's `≤5% RSS drift` exit gate. The 4 h A/B soak (bounded RSS, flat VRAM) and the 6 h extreme stress test (4,979 reqs, 0 failures across stable+fork, replica+tensor-split) both showed stable memory — this is likely a formality, not a risk. TODO: run and record.
-- **Phase 3 kernel work — PAUSED at hard-stop.** Profile-guided kernel selection showed conservative headroom of only +9 pp (below the +15 % spec floor) after PMC corrections. `mul_mat_vec_q` is at 12 % of HBM peak bandwidth; R-mode (row tensor parallelism) is demoted. The failed experiment images are preserved (`viiwork:gfx906-mmq64-experiment-2026-04-09`, `viiwork:gfx906-hipgraphs-experiment-2026-04-09`). See `docs/superpowers/specs/2026-04-09-gfx906-fork-phase-3-reassessment.md` and its addendum. TODO: decide whether to pursue a different kernel angle or accept that the strip-down is the entire win.
-- Canary deploy on one production node alongside the cluster.
-
-Build: `make docker-gfx906` (or the alias `make docker-experimental`). Requires the fork tree at `$GFX906_FORK`. Override with `make docker-gfx906 GFX906_FORK=/path/to/llama.cpp-gfx906` if you keep the fork somewhere else.
-
-## When to use which
-
-- **New node, fresh setup:** stable. Pick option 1 in `setup-node.sh` (or just press Enter — it's the default).
-- **Existing production node:** stable. Don't switch unless you're explicitly canarying the experimental build, and only after you've talked to whoever owns that node.
-- **Dev / test / one-off bench rig:** either. The experimental build is +3 % sustained throughput and the same memory profile in the soak, so for non-customer-facing work the experimental build is fine and arguably preferable.
-- **Canary:** one node on experimental, the rest on stable, watch metrics for 48 h. The `scripts/switch-node-build.sh` helper flips a single node between tracks in place without re-running full setup.
-
-## Switching a running node between tracks
+CDI is the better default. Docker 25+ reads `/etc/cdi` and `/var/run/cdi`
+natively; `docker info` lists them under "CDI spec directories". Then:
 
 ```bash
-./scripts/switch-node-build.sh
+docker run --rm --device nvidia.com/gpu=all viiwork-vllm nvidia-smi
 ```
 
-Prompts you for the target build, edits `docker-compose.yaml` in place, and restarts the stack. Bails if the target image doesn't exist locally and tells you how to obtain it.
+`docker/compose.vllm.yaml` and `docker/compose.freetoken.yaml` use the compose
+spelling of the same thing, which needs `capabilities` alongside `device_ids`:
 
-## Image distribution
+```yaml
+deploy:
+  resources:
+    reservations:
+      devices:
+        - driver: cdi
+          capabilities: [gpu]
+          device_ids: ["nvidia.com/gpu=all"]
+```
 
-The stable image is built from this repo and any node can build it directly. The experimental image is built from a separate fork tree that doesn't live in this repo, so for nodes without that tree the image has to be transferred:
+Both compose files also set `ipc: host` — required for vLLM tensor parallelism,
+whose shards talk over shared memory — and mount `node.state_dir` as a host
+directory so the alias table survives recreating the container. The FreeToken
+one additionally mounts the JIT kernel cache and the model cache: without those
+two volumes every container start recompiles kernels and re-downloads weights.
+
+## Test images
+
+A bring-up that only needs a **newer upstream llama.cpp** needs no Dockerfile of
+its own: `docker/Dockerfile.rocm` takes the ref as a build argument, and any tag
+or branch `git clone --branch` accepts will do.
 
 ```bash
-# On a node that has built it:
-docker save viiwork:gfx906 | ssh OTHER_NODE 'docker load'
-
-# Or via a registry once the fork has a published image:
-docker pull <registry>/viiwork:gfx906
+docker build --build-arg LLAMA_CPP_VERSION=master \
+  --build-arg VERSION=$(scripts/version.sh) \
+  -t viiwork:llama-master -f docker/Dockerfile.rocm .
 ```
 
-A registry-pushed experimental image is on the to-do list but not yet set up.
+That image ships `llama-server` and `llama-perplexity`; it does not build
+`llama-cli`, which viiwork never runs. For an interactive smoke test, use
+`llama-server` directly.
 
-## Rollback
+`docker/test/` holds one-off images for what the build argument cannot reach —
+today `Dockerfile.k2-test`, which builds a fork at a pinned commit. Same-week
+architectures sometimes need an *unmerged* llama.cpp rather than a current one;
+pin the PR head in a dedicated test Dockerfile rather than tracking `master`,
+and re-pin to a release tag once it merges. They are not part of any release.
 
-Switching back to stable is symmetric:
+The earlier `Dockerfile.qwen-test` and `Dockerfile.granite-test` were
+`Dockerfile.rocm` with the ref set to `master` and were removed in favour of the
+command above.
 
-```bash
-./scripts/switch-node-build.sh   # pick option 1
-```
+## The gfx906 fork track is retired
 
-Or manually: edit the `image:` line in `docker-compose.yaml` from `viiwork:gfx906` back to `viiwork`, restore the `build: .` line, then `docker compose up -d`. Stable rebuilds from the repo's `Dockerfile` so no cross-node transfer is needed.
+Until v2.1.0 this file described a second first-class build: `viiwork:gfx906`,
+a gfx906-specialised fork of llama.cpp with unused architectures, quant formats
+and backends stripped out. It was **retired on 2026-08-30** and removed from
+this repo in v2.1.0.
+
+It is worth saying why, because the numbers were good: a 4 h A/B soak measured
+**+3.0 % sustained tok/s** with bounded RSS and flat VRAM over 5455 requests.
+What killed it was not performance. The fork's base was ~2000 build tags behind,
+and the architecture prune that produced the win is exactly what made it unable
+to load three of the fleet's five models. No host ran it, and the published repo
+advertised a build track that no outside reader could build, because
+`Dockerfile.gfx906` needed a `--build-context` pointing at a fork tree that was
+never cloned.
+
+The full record — measurements, the phase-2 kernel hard-stop, what was salvaged
+— is kept with the project's internal notes rather than here.
+
+Two things still reference the retired image and are left as historical
+benchmarking apparatus rather than swept up: the v1 compose files in the
+unpublished `configs/private/v1-archive/` and the A/B arms in
+`bench-harness/run_feature_soak.sh` and `run_overnight_soak.sh`. They need an
+image this repo no longer builds.
 
 ## Repo conventions
 
-- The two `Dockerfile`s live at the repo root. Both tracks are first-class citizens.
-- `docker-compose.yaml` is the active per-node compose file at the repo root (gitignored, generated by `setup-node.sh`).
-- `docker-compose.yaml.example` is the stable-track example at the repo root.
-- `configs/docker-compose.gfx906.yaml` is the experimental-track example.
-- `configs/docker-compose.soak-{prod,fork}.yaml` are the dedicated A/B soak compose files used by `bench-harness/run_overnight_soak.sh`. Not for normal use.
-- All benchmark/experiment compose + viiwork configs live under `configs/`; see `scripts/deploy.sh` for an interactive picker.
+- **Every Dockerfile lives under `docker/`**, with test images under
+  `docker/test/`. Nothing builds from the repo root: `docker build .` with no
+  `-f` will not find a Dockerfile, and `make docker` is the documented path.
+- `docker-compose.yaml` is the active per-node compose file at the repo root
+  (gitignored; copy it from the example below).
+- `configs/docker-compose.v2.example.yaml` is the example the README's Quick
+  Start copies. It is a whole v2 node: host networking, `pid: host` for the
+  on-GPU check, the state directory, and the stop grace a clean drain needs.
+- The v1 benchmark and experiment layouts (one `viiwork.*.yaml` and one
+  compose file per model) are refused by a v2 node. They are kept, unconverted,
+  as benchmark provenance in `configs/private/v1-archive/` together with the
+  v1 helpers that drove them (`deploy.sh`, `run-qwen*-test.sh`); that directory
+  is never published. A v2 layout is a `models:` entry in the machine's one
+  `viiwork.yaml` — see `docs/migrating-to-v2.md`.
 
 ## See also
 
-- `docs/superpowers/specs/2026-04-07-gfx906-llama-cpp-fork-design.md` — full design rationale for the experimental track
-- `docs/superpowers/plans/2026-04-07-gfx906-fork-phase-0-1.md` — Phase 0+1 implementation plan (the strip-down work that produced `viiwork:gfx906`)
-- `bench-harness/README.md` — the harness that produced the milestone numbers above
-- Tag `milestone/gfx906-fork-4h-soak-2026-04-09` — committed proof of the 4 h A/B result
+- `docs/adding-an-engine.md` — how an engine and its image get added
+- `docs/models.md` — what Strata measured on Radeon VII, and its config
+- `bench-harness/README.md` — the harness that produced the numbers above

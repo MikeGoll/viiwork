@@ -36,6 +36,11 @@ type ring struct {
 	slots   int
 	lanes   int // records per slot: 1 for node series, one per GPU otherwise
 	recSize int
+	// period is the bucket length in seconds (60, 3600, 86400), so that a
+	// record's slot is mod(TS/period, slots). Not stored on disk: it follows
+	// from which file this is. Zero means unknown, and range reads fall back to
+	// reading every slot.
+	period int64
 }
 
 // ringHeader is the parsed 32-byte prefix of a ring file. See
@@ -172,6 +177,50 @@ func (r *ring) all() ([]byte, error) {
 		return nil, err
 	}
 	return buf, nil
+}
+
+// span reads the slots that can hold buckets lo..hi inclusive, wrapping at the
+// end of the ring, or every slot when the span is as long as the ring. The
+// result is those slots' raw bytes in slot order; callers filter by timestamp
+// exactly as they do after all(), so a slot holding an older period's record
+// is still ignored.
+func (r *ring) span(lo, hi int64) ([]byte, error) {
+	if hi < lo {
+		return nil, nil
+	}
+	if hi-lo+1 >= int64(r.slots) {
+		return r.all()
+	}
+	count := int(hi - lo + 1)
+	start := int(mod(lo, int64(r.slots)))
+	slotBytes := r.lanes * r.recSize
+	buf := make([]byte, count*slotBytes)
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	first := min(count, r.slots-start)
+	if _, err := r.f.ReadAt(buf[:first*slotBytes], r.offset(start, 0)); err != nil {
+		return nil, err
+	}
+	if first < count {
+		if _, err := r.f.ReadAt(buf[first*slotBytes:], r.offset(0, 0)); err != nil {
+			return nil, err
+		}
+	}
+	return buf, nil
+}
+
+// window reads the slots that can hold a record with TS in [lo, hi).
+func (r *ring) window(lo, hi int64) ([]byte, error) {
+	if hi <= lo {
+		return nil, nil
+	}
+	if r.period <= 0 {
+		return r.all()
+	}
+	// Truncating division, as the writers use: monotonic, so every TS in
+	// [lo, hi) has its bucket in [lo/period, (hi-1)/period].
+	return r.span(lo/r.period, (hi-1)/r.period)
 }
 
 func (r *ring) sync() error {

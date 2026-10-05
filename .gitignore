@@ -3,13 +3,21 @@ models
 models/
 opencode.json
 docker-compose.yaml
+viiwork.yaml
 viiwork-*.yaml
 .env
 .worktrees/
 bench-harness/__pycache__/
 bench-harness/results/
 .claude/
+# Agent/editor tool state, like .claude/ above. publish-lib.sh already excludes
+# these from a public snapshot; ignoring them also keeps the tree clean, which
+# publish.sh requires before it will run.
+.serena/
+.cursor/
 *.swp
 configs/docker-compose.qwen36-pair-gpu56.yaml
 configs/viiwork.qwen36-pair-gpu56.yaml
-venv/
+.gocache/
+.gomodcache/
+dist/

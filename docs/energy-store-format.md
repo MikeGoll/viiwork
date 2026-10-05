@@ -158,9 +158,14 @@ kWh = AttrW * CoveredS / 3600 / 1000          // GPU, attributed
 Sum those over the records in a window to total it. Never reconstruct energy
 from the bucket period.
 
-`CoveredS` **saturates at 65,535**, so a fully covered day bucket reports
-65,535 rather than 86,400. Day-tier energy is therefore a slight underestimate
-of a fully observed day; use the hour tier where that matters.
+`CoveredS` **saturates at 65,535** (it is a `uint16`), so any day bucket
+covering more than 65,535 s — about 18.2 hours — reports 65,535. A fully
+covered 86,400 s day therefore totals **about 24% low** from the day tier
+(65,535 / 86,400 ≈ 0.76), and a 25-hour DST day more. Minute (60 s) and hour
+(3,600 s) buckets always fit. **Total energy from the hour tier**; read the day
+tier for mean watts, or for history older than the hour ring retains, knowing
+its kWh is a lower bound. viiwork's own `energy_kwh_30d` sums the hour tier for
+this reason. Widening the field would be a format change, which bumps the magic.
 
 ### `AttrW` versus `RawW`
 
@@ -199,6 +204,10 @@ Newline-separated UTF-8 model names, one per line, **append-only**. Line *N*
 - Bounded at 65,535 entries by `ModelIdx` being a `uint16`.
 - Each append is `fsync`ed before the index is used, so a crash cannot leave a
   ring referencing a name that was never written.
+- **Every line ends in `\n`.** A last line without one is a torn append whose
+  index was never handed out; a reader ignores it, and a writer truncates it off
+  on open so its next append starts a fresh line rather than extending the
+  fragment and shifting every later index.
 
 The file is deliberately plain text: it is the one part of a store a human
 reads directly.
@@ -217,6 +226,11 @@ It uses **the same vocabulary as the mesh wire field `power_source`**:
 | `sdr` | whole-chassis draw via the `Power Supply` SDR sensor class |
 | `sensor:<NAME>` | whole-chassis draw via a named IPMI sensor |
 | `nvidia-smi` | **sum of GPU board power** — excludes CPU, fans, drives, PSU losses |
+| `rocm-smi` | **sum of GPU package power reported by rocm-smi** — excludes CPU, fans, drives, PSU losses |
+
+Adding a value to this vocabulary is not a format change: the ring files, their
+headers and the one-line shape of this file are unchanged, so the magic stays
+`VIIWENG1`.
 
 This exists because the bytes are identical whichever was measured, and the two
 readings differ by hundreds of watts on the same hardware. A store copied off a
@@ -245,8 +259,9 @@ on the same value instead of double counting.
   in the period, ties broken by the lower index. A model can change mid-period;
   taking whichever record sorted first would be arbitrary.
 - The hour tier rolls up from the minute tier, and the day tier from the **hour**
-  tier — not from the minute tier, whose ring is only 24 hours long.
-
+  tier — not from the minute tier, whose ring is only 24 hours long. A day rolls
+  up the hours from its local midnight to the **next** local midnight, so a DST
+  day aggregates its 23 or 25 hours rather than a fixed 24.
 ## Durability and concurrency
 
 - Record writes are `pwrite` without `fsync`. An explicit sync flushes all six

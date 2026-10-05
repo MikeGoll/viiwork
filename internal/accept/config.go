@@ -1,0 +1,320 @@
+package accept
+
+import (
+	"context"
+	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/janit/viiwork/v2/internal/config"
+	"github.com/janit/viiwork/v2/internal/parrot"
+)
+
+const (
+	apiPort    = 8086
+	gossipPort = 7946
+
+	// largeWeights and longStartup are Decision 4: a split or large model
+	// loading from slow storage needs far longer than the engine default.
+	largeWeights = 20 << 30
+	longStartup  = 45 * time.Minute
+
+	containerModels = "/models/"
+)
+
+// ModelSummary is one models[] entry as the node will run it.
+type ModelSummary struct {
+	Name           string        `json:"name"`
+	Engine         string        `json:"engine"`
+	GPUs           []int         `json:"gpus"`
+	Backends       int           `json:"backends"`
+	Slots          int           `json:"slots"`
+	CtxPerSlot     int           `json:"ctx_per_slot"`
+	StartupTimeout time.Duration `json:"startup_timeout_ns"`
+	WeightsBytes   int64         `json:"weights_bytes,omitempty"`
+}
+
+// ConfigSummary is what a v2 file configures, for a reader checking it
+// before the machine's v1 instances stop.
+type ConfigSummary struct {
+	Node       string         `json:"node"`
+	StateDir   string         `json:"state_dir"`
+	Network    string         `json:"network"`
+	Mesh       string         `json:"mesh"`
+	APIPort    int            `json:"api_port"`
+	GossipPort int            `json:"gossip_port"`
+	Models     []ModelSummary `json:"models"`
+}
+
+// SummarizeConfig validates the file at path exactly as the node would, then
+// checks what validation cannot: the fixed ports, that every model's weights
+// exist, and that large or split models allow a long enough load. modelsRoot,
+// when set, replaces the /models/ prefix of container paths so the weights
+// can be found from the host. requireMesh, when set, is the mesh mode the file
+// must have (secured or open).
+func SummarizeConfig(path string, lookupEnv func(string) (string, bool), modelsRoot, requireMesh string) (ConfigSummary, Report) {
+	r := Report{Command: "config", Target: path, Started: time.Now()}
+	cfg, err := config.Load(path, lookupEnv)
+	if err != nil {
+		r.Checks = []Check{{Name: "config valid", Detail: err.Error()}}
+		return ConfigSummary{}, r
+	}
+	r.Checks = append(r.Checks, Check{Name: "config valid", Pass: true})
+
+	mode := "secured"
+	if cfg.Mesh.Open {
+		mode = "open"
+	}
+	meshCheck := Check{Name: "mesh " + mode, Pass: requireMesh == "" || requireMesh == mode}
+	if !meshCheck.Pass {
+		meshCheck.Detail = "required: " + requireMesh
+	}
+	r.Checks = append(r.Checks, meshCheck,
+		portCheck("api port", apiPort, "api.port", cfg.API.Port),
+		portCheck("gossip port", gossipPort, "mesh.bind_port", cfg.Mesh.BindPort))
+
+	sum := ConfigSummary{
+		Node:       cfg.Node.Name,
+		StateDir:   cfg.Node.StateDir,
+		Network:    cfg.Mesh.Network,
+		Mesh:       mode,
+		APIPort:    cfg.API.Port,
+		GossipPort: cfg.Mesh.BindPort,
+	}
+	// viiwork-parrot's status is read once, and only if a model is sourced.
+	var parrotList []parrot.ModelStatus
+	var parrotErr error
+	parrotRead := false
+
+	for _, m := range cfg.Models {
+		ms := ModelSummary{
+			Name:           m.Name,
+			Engine:         m.Engine,
+			GPUs:           append([]int{}, m.GPUs...),
+			Backends:       m.Backends(),
+			CtxPerSlot:     m.Context,
+			StartupTimeout: m.StartupTimeout.Duration,
+		}
+		ms.Slots = ms.Backends * m.Parallel
+
+		var weights Check
+		var size int64
+		var sized bool
+		if id, ok := m.ParrotID(); ok {
+			if !parrotRead {
+				parrotRead = true
+				ctx, cancel := context.WithTimeout(context.Background(), parrot.DefaultTimeout)
+				parrotList, parrotErr = parrot.New(cfg.ViiworkParrot.API).Status(ctx)
+				cancel()
+			}
+			weights, size, sized = sourceCheck(m, id, cfg.ViiworkParrot.API, parrotList, parrotErr)
+		} else {
+			weights, size, sized = pathCheck(m, modelsRoot)
+		}
+		if sized {
+			ms.WeightsBytes = size
+		}
+		r.Checks = append(r.Checks, weights, startupCheck(m, size, sized))
+		sum.Models = append(sum.Models, ms)
+	}
+	return sum, r
+}
+
+// pathCheck is the weights check for a model with a path. sized reports that
+// size is known (a hub id is not sized, and is not a failure).
+func pathCheck(m config.Model, modelsRoot string) (Check, int64, bool) {
+	weights := Check{Name: "weights " + m.Name}
+	if isHubID(m.Path) {
+		// Not a filesystem path at all: vLLM and FreeToken both load a
+		// HuggingFace repo id, and the engine resolves it from its own
+		// cache or the hub at load time. There is nothing to stat, and
+		// failing here would tell an operator mid-conversion that working
+		// weights are missing.
+		weights.Pass = true
+		weights.Detail = m.Path + " (hub id — not checked locally)"
+		return weights, 0, true
+	}
+	weightsPath := hostPath(m.Path, modelsRoot)
+	size, err := weightsSize(weightsPath)
+	if err != nil {
+		weights.Detail = err.Error()
+		return weights, 0, false
+	}
+	weights.Pass = true
+	weights.Detail = fmt.Sprintf("%s %s", weightsPath, formatBytes(size))
+	return weights, size, true
+}
+
+// sourceCheck is the weights check for a model sourced from viiwork-parrot.
+// Accept never changes anything, and /ensure does (it makes a model wanted),
+// so this reads /status — which lists only wanted models. An id that is not
+// listed is either unknown or not wanted yet; nothing read-only can tell
+// which, so it passes with a note rather than inventing a failure.
+func sourceCheck(m config.Model, id, api string, list []parrot.ModelStatus, err error) (Check, int64, bool) {
+	c := Check{Name: "weights " + m.Name}
+	if err != nil {
+		c.Detail = fmt.Sprintf("viiwork-parrot at %s: %v", api, err)
+		return c, 0, false
+	}
+	for _, st := range list {
+		if st.ID != id {
+			continue
+		}
+		switch st.State {
+		case "seeding":
+			size, serr := weightsSize(st.Path)
+			if serr != nil {
+				c.Detail = fmt.Sprintf("viiwork-parrot seeds %s at %s, but: %v", id, st.Path, serr)
+				return c, 0, false
+			}
+			c.Pass = true
+			c.Detail = fmt.Sprintf("%s %s (viiwork-parrot %s)", st.Path, formatBytes(size), id)
+			return c, size, true
+		case "failed", "paused", "absent":
+			// absent: viiwork-parrot has been told to want this model (it is
+			// listed) and still will not fetch it — typically
+			// seed_only_existing refusing an id it does not already have.
+			// That is a real failure, not "not checked yet", so it belongs
+			// here alongside failed and paused.
+			c.Detail = fmt.Sprintf("viiwork-parrot %s is %s: %s", id, st.State, st.Error)
+			return c, 0, false
+		default:
+			c.Pass = true
+			c.Detail = fmt.Sprintf("viiwork-parrot %s: %s, %.1f%%", id, st.State, st.Percent)
+			return c, 0, false
+		}
+	}
+	c.Pass = true
+	c.Detail = fmt.Sprintf("viiwork-parrot %s: not wanted yet; viiwork will ensure it at startup (id not verified)", id)
+	return c, 0, false
+}
+
+func portCheck(name string, want int, key string, got int) Check {
+	c := Check{Name: fmt.Sprintf("%s %d", name, want), Pass: got == want}
+	if !c.Pass {
+		c.Detail = fmt.Sprintf("%s is %d; every machine uses %d", key, got, want)
+	}
+	return c
+}
+
+func startupCheck(m config.Model, size int64, sized bool) Check {
+	c := Check{Name: "startup_timeout " + m.Name, Pass: true}
+	have := "engine default"
+	if m.StartupTimeout.Duration > 0 {
+		have = m.StartupTimeout.Duration.String()
+	}
+	var reasons []string
+	if m.GPUsPerBackend > 1 {
+		reasons = append(reasons, fmt.Sprintf("gpus_per_backend %d", m.GPUsPerBackend))
+	}
+	if sized && size > largeWeights {
+		reasons = append(reasons, "weights "+formatBytes(size))
+	}
+	if len(reasons) > 0 && m.StartupTimeout.Duration < longStartup {
+		c.Pass = false
+		c.Detail = fmt.Sprintf("%s: need at least %s, have %s", strings.Join(reasons, ", "), longStartup, have)
+		return c
+	}
+	c.Detail = have
+	return c
+}
+
+// hostPath rewrites a container path under /models/ to modelsRoot.
+// isHubID reports whether path is a HuggingFace repo id (org/name) rather than
+// a filesystem path. The two are distinguishable by shape: a repo id has
+// exactly one slash, neither side empty, no leading "/" or "./", and no file
+// extension on the name. Anything else is treated as a path, so a real missing
+// file still fails the check.
+func isHubID(path string) bool {
+	if path == "" || strings.HasPrefix(path, "/") || strings.HasPrefix(path, ".") {
+		return false
+	}
+	org, name, ok := strings.Cut(path, "/")
+	if !ok || org == "" || name == "" || strings.Contains(name, "/") {
+		return false
+	}
+	// A name ending in a weight-file extension is a relative path, not a repo:
+	// "models/m.gguf". Testing for ANY extension does not work, because model
+	// names routinely contain dots — filepath.Ext("Qwen2.5-0.5B-Instruct") is
+	// ".5B-Instruct", which would make every Qwen2.5 and granite-4.2 repo id
+	// look like a file.
+	return !weightFileExt[strings.ToLower(filepath.Ext(name))]
+}
+
+// weightFileExt is the extensions that mean "this is a file on disk". Kept
+// small and explicit: a name that does not end in one of these is treated as a
+// repo id, and the only cost of a wrong guess is a check that says "not
+// checked locally" instead of stat-ing something that was never there.
+var weightFileExt = map[string]bool{
+	".gguf": true, ".safetensors": true, ".bin": true,
+	".pt": true, ".pth": true, ".onnx": true,
+	".json": true, ".yaml": true, ".yml": true,
+}
+
+func hostPath(p, modelsRoot string) string {
+	if modelsRoot == "" || !strings.HasPrefix(p, containerModels) {
+		return p
+	}
+	return filepath.Join(modelsRoot, strings.TrimPrefix(p, containerModels))
+}
+
+// splitGGUF matches the first shard of a split GGUF, whose loader opens every
+// shard: name-00001-of-00003.gguf.
+var splitGGUF = regexp.MustCompile(`^(.*)-00001-of-(\d{5})\.gguf$`)
+
+// weightsSize is the size of everything a model loads from path: the file, all
+// shards of a split GGUF, or every file under a model directory.
+func weightsSize(path string) (int64, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0, err
+	}
+	if info.IsDir() {
+		var total int64
+		err := filepath.WalkDir(path, func(_ string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if d.Type().IsRegular() {
+				fi, err := d.Info()
+				if err != nil {
+					return err
+				}
+				total += fi.Size()
+			}
+			return nil
+		})
+		return total, err
+	}
+	m := splitGGUF.FindStringSubmatch(path)
+	if m == nil {
+		return info.Size(), nil
+	}
+	n, _ := strconv.Atoi(m[2])
+	total := info.Size()
+	for i := 2; i <= n; i++ {
+		shard := fmt.Sprintf("%s-%05d-of-%s.gguf", m[1], i, m[2])
+		fi, err := os.Stat(shard)
+		if err != nil {
+			return 0, fmt.Errorf("shard %d of %d: %w", i, n, err)
+		}
+		total += fi.Size()
+	}
+	return total, nil
+}
+
+func formatBytes(n int64) string {
+	switch {
+	case n >= 1<<30:
+		return fmt.Sprintf("%.1f GiB", float64(n)/(1<<30))
+	case n >= 1<<20:
+		return fmt.Sprintf("%.1f MiB", float64(n)/(1<<20))
+	default:
+		return fmt.Sprintf("%d B", n)
+	}
+}

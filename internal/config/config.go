@@ -1,20 +1,36 @@
+// Package config is viiwork 2's node configuration, spec contract C1: one
+// viiwork.yaml per machine. Parse decodes it strictly and fills defaults,
+// Validate enforces the spec's rules, and Load does both.
 package config
 
 import (
 	"fmt"
-	"os"
-	"strconv"
+	"reflect"
+	"sort"
 	"strings"
 	"time"
 
-	"github.com/janit/viiwork/internal/pipeline"
-	"github.com/janit/viiwork/internal/power"
+	"github.com/janit/viiwork/v2/internal/pipeline"
 	"gopkg.in/yaml.v3"
 )
 
-type Duration struct {
-	time.Duration
-}
+const (
+	NetworkTailnet = "tailnet"
+	NetworkLAN     = "lan"
+
+	EnforceFull     = "full"
+	EnforceOutgoing = "outgoing"
+	EnforceNone     = "none"
+
+	VendorAuto   = "auto"
+	VendorNVIDIA = "nvidia"
+	VendorAMD    = "amd"
+	VendorApple  = "apple"
+	VendorNone   = "none"
+)
+
+// Duration is a time.Duration written as a Go duration string ("60s").
+type Duration struct{ time.Duration }
 
 func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
 	var s string
@@ -29,130 +45,296 @@ func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
 	return nil
 }
 
-type ServerConfig struct {
-	Host string `yaml:"host"`
-	Port int    `yaml:"port"`
-	// MeshPort is a second, well-known port whose "/" is the mesh dashboard.
-	// It exists because Port is not guessable: a host runs one instance per
-	// model, each on its own port, and knowing which of them is up is the
-	// thing you do not have when you want to look at the fleet. Every instance
-	// asks for MeshPort and exactly one gets it, so the address is the same on
-	// every host and stays up while any instance on that host does. 0 disables
-	// it; see proxy.ServeMeshPort.
-	MeshPort int        `yaml:"mesh_port"`
-	CORS     CORSConfig `yaml:"cors"`
+// Toggle is a tri-state switch. "auto" means the caller decides from context,
+// for example tailnet discovery defaults on only when mesh.network is tailnet.
+type Toggle string
+
+const (
+	ToggleAuto Toggle = "auto"
+	ToggleOn   Toggle = "true"
+	ToggleOff  Toggle = "false"
+)
+
+// UnmarshalYAML accepts auto/true/false plus yes/no/on/off, case-insensitively.
+// A custom decoder is needed because yaml.v3 will not decode a YAML boolean
+// into a string field.
+func (t *Toggle) UnmarshalYAML(value *yaml.Node) error {
+	if value.Kind != yaml.ScalarNode {
+		return fmt.Errorf("line %d: expected auto, true or false", value.Line)
+	}
+	switch strings.ToLower(strings.TrimSpace(value.Value)) {
+	case "auto":
+		*t = ToggleAuto
+	case "true", "yes", "on":
+		*t = ToggleOn
+	case "false", "no", "off":
+		*t = ToggleOff
+	default:
+		return fmt.Errorf("line %d: %q is not auto, true or false", value.Line, value.Value)
+	}
+	return nil
 }
 
-// CORSConfig controls which browser origins may read this node's API. It
-// matters because viiwork authenticates nothing: see proxy.CORS for what an
-// origin allowlist is and is not doing on an unauthenticated service.
+// Resolve reports whether the switch is on; auto yields the caller's default.
+func (t Toggle) Resolve(auto bool) bool {
+	switch t {
+	case ToggleOn:
+		return true
+	case ToggleOff:
+		return false
+	default:
+		return auto
+	}
+}
+
+func (t Toggle) valid() bool { return t == ToggleAuto || t == ToggleOn || t == ToggleOff }
+
+type Config struct {
+	Node          NodeConfig                         `yaml:"node"`
+	API           APIConfig                          `yaml:"api"`
+	Mesh          MeshConfig                         `yaml:"mesh"`
+	Routing       RoutingConfig                      `yaml:"routing"`
+	GPU           GPUConfig                          `yaml:"gpu"`
+	Models        []Model                            `yaml:"models"`
+	Health        HealthConfig                       `yaml:"health"`
+	Activity      ActivityConfig                     `yaml:"activity"`
+	Power         PowerConfig                        `yaml:"power"`
+	Energy        EnergyConfig                       `yaml:"energy"`
+	Cost          CostConfig                         `yaml:"cost"`
+	ViiworkParrot ViiworkParrotConfig                `yaml:"viiwork_parrot"`
+	Update        UpdateConfig                       `yaml:"update"`
+	Pipelines     map[string]pipeline.PipelineConfig `yaml:"pipelines"`
+}
+
+type NodeConfig struct {
+	// Name is the node's mesh identity. Empty means os.Hostname(), resolved
+	// at startup (P6), not here, so Parse stays pure.
+	Name string `yaml:"name"`
+	// StateDir holds durable node state such as the alias table.
+	StateDir string `yaml:"state_dir"`
+}
+
+type APIConfig struct {
+	Host    string        `yaml:"host"`
+	Port    int           `yaml:"port"`
+	CORS    CORSConfig    `yaml:"cors"`
+	Catalog CatalogConfig `yaml:"catalog"`
+}
+
+// CatalogConfig is the OpenCode model catalogue served on /api.json, which
+// lets a coding client discover the fleet instead of listing it by hand. See
+// internal/catalog and docs/autodiscovery.md.
+type CatalogConfig struct {
+	Enabled Toggle `yaml:"enabled"`
+	// ProviderID is the provider key, and so the prefix a user types:
+	// "viiwork/granite-4.2-8b".
+	ProviderID string `yaml:"provider_id"`
+	// ProviderName is the display name. OpenCode orders its model picker by
+	// provider name, byte by byte, so this string decides where the fleet
+	// appears in that list — see the default.
+	ProviderName string `yaml:"provider_name"`
+	// BaseURL overrides the endpoint advertised to clients. Empty means the
+	// address the request arrived on, which is right for every node in a mesh
+	// where any node is an entry point; set it only behind a proxy that
+	// rewrites the host.
+	BaseURL string `yaml:"base_url"`
+	// Upstream chains another models.dev-shaped catalogue, without the
+	// /api.json suffix, so that a client pointed at a node keeps its hosted
+	// providers as well: "https://models.opencode.ai". Empty means none, and
+	// a node that makes no outbound request.
+	Upstream string `yaml:"upstream"`
+	// UpstreamTTL is how long a fetched upstream is reused.
+	UpstreamTTL Duration `yaml:"upstream_ttl"`
+}
+
+// CORSConfig is the browser-origin allowlist of an API that authenticates
+// nothing. The YAML keys are v1's.
 type CORSConfig struct {
-	// AllowOrigins are host patterns. "*.example.com" matches subdomains only;
-	// anything else must match the host exactly. Empty disables CORS entirely.
-	AllowOrigins []string `yaml:"allow_origins"`
-	// AllowTailnetIPs also allows origins addressed by a literal Tailscale IP
-	// (100.64.0.0/10, fd7a:115c:a1e0::/48), since a tailnet host is reached by
-	// its address about as often as by its MagicDNS name.
-	AllowTailnetIPs *bool `yaml:"allow_tailnet_ips"`
+	// AllowOrigins are host patterns. Left out (or null), the node derives
+	// the list at startup: this tailnet's own MagicDNS domain from tailscaled
+	// plus LocalCORSOrigins, or LocalCORSOrigins alone when tailscaled cannot
+	// say. An explicit list, the empty one included, is used as written;
+	// "allow_origins: []" sends no CORS header at all.
+	AllowOrigins    []string `yaml:"allow_origins"`
+	AllowTailnetIPs *bool    `yaml:"allow_tailnet_ips"`
 }
 
-type ModelConfig struct {
-	Path        string `yaml:"path"`
-	ContextSize int    `yaml:"context_size"`
-	NGPULayers  int    `yaml:"n_gpu_layers"`
-	Parallel    int    `yaml:"parallel"`
+// Derive reports whether the operator left allow_origins unset, so the node
+// is to derive the allowlist rather than use one.
+func (c CORSConfig) Derive() bool { return c.AllowOrigins == nil }
+
+// LocalCORSOrigins are the origins a derived allowlist always holds: pages
+// served on this machine itself.
+func LocalCORSOrigins() []string { return []string{"localhost", "127.0.0.1"} }
+
+type MeshConfig struct {
+	Network        string        `yaml:"network"`
+	BindPort       int           `yaml:"bind_port"`
+	Advertise      string        `yaml:"advertise"`
+	Open           bool          `yaml:"open"`
+	SecretEnv      string        `yaml:"secret_env"`
+	SecretPrevEnv  string        `yaml:"secret_prev_env"`
+	SecretEnforce  string        `yaml:"secret_enforce"`
+	Tailnet        TailnetConfig `yaml:"tailnet"`
+	LAN            LANConfig     `yaml:"lan"`
+	Seeds          []string      `yaml:"seeds"`
+	RejoinInterval Duration      `yaml:"rejoin_interval"`
+	CapacityPoll   Duration      `yaml:"capacity_poll"`
 }
+
+type TailnetConfig struct {
+	Enabled Toggle `yaml:"enabled"`
+	Socket  string `yaml:"socket"`
+}
+
+type LANConfig struct {
+	MDNS Toggle `yaml:"mdns"`
+}
+
+type RoutingConfig struct {
+	QueueMax     int      `yaml:"queue_max"`
+	QueueTimeout Duration `yaml:"queue_timeout"`
+	ForwardRetry int      `yaml:"forward_retry"`
+	StaleAfter   Duration `yaml:"stale_after"`
+	// Performance routes by each host's measured time to first token
+	// (performance-routing spec). Default true; false restores local-first,
+	// most-free-slots routing and stops publishing scores.
+	Performance *bool `yaml:"performance"`
+}
+
+// PerformanceOn is routing.performance with its default applied.
+func (r RoutingConfig) PerformanceOn() bool { return r.Performance == nil || *r.Performance }
 
 type GPUConfig struct {
-	Count           int               `yaml:"count"`
-	Devices         []int             `yaml:"devices"`
-	BasePort        int               `yaml:"base_port"`
-	Offset          int               `yaml:"offset"`
-	PowerLimitWatts int               `yaml:"power_limit_watts"`
-	TensorSplit     TensorSplitConfig `yaml:"tensor_split"`
+	Vendor          string `yaml:"vendor"`
+	PowerLimitWatts int    `yaml:"power_limit_watts"`
 }
 
-// TensorSplitConfig configures llama.cpp tensor parallelism: a llama-server
-// process spans multiple GPUs and the model is split across them. When
-// Enabled, viiwork partitions GPUConfig.Devices into one or more groups of
-// GroupSize and spawns one backend per group. With GroupSize=0 (default) all
-// devices form a single group, giving the original "one big backend across
-// every GPU" behavior. GroupSize>=2 produces multiple tensor-split backends,
-// each replicating the full model across its group — used when the model
-// fits in a group's combined VRAM and you want several concurrent streams
-// with the single-stream speed of tensor parallelism.
-type TensorSplitConfig struct {
-	Enabled   bool      `yaml:"enabled"`
-	Mode      string    `yaml:"mode"`       // "layer" (default) or "row"
-	Weights   []float64 `yaml:"weights"`    // optional per-group split fractions; default: even. Length must equal the group size when set; the same pattern applies to every group.
-	MainGPU   int       `yaml:"main_gpu"`   // only used when mode="row"; default 0. Index within a group (0..group_size-1).
-	GroupSize int       `yaml:"group_size"` // 0 = all devices in one group (legacy). >=2 = split devices into consecutive groups of this size, each becoming its own backend on base_port+i.
+// ViiworkParrotConfig is the host's viiwork-parrot node. A model with a source
+// gets its weights through it: viiwork-parrot downloads, verifies and seeds
+// them, and viiwork only asks for the path. See docs/models.md.
+type ViiworkParrotConfig struct {
+	// API is viiwork-parrot's API address, host:port. That API is loopback
+	// only and unauthenticated, so Validate refuses any other host.
+	API string `yaml:"api"`
 }
 
-// ResolvedDevices returns the explicit GPU device IDs to use.
-// If devices is set, it takes priority. Otherwise falls back to count+offset.
-func (g *GPUConfig) ResolvedDevices() []int {
-	if len(g.Devices) > 0 {
-		return g.Devices
+// SourceParrot is the scheme of a models[].source served by viiwork-parrot.
+const SourceParrot = "viiwork-parrot:"
+
+// Model is one models[] entry. Context is tokens PER SLOT for every engine;
+// engines translate it (llama.cpp --ctx-size = context * parallel).
+type Model struct {
+	Name   string `yaml:"name"`
+	Engine string `yaml:"engine"`
+	Path   string `yaml:"path"`
+	// Source names a model by catalog id instead of by file: the node asks
+	// viiwork-parrot for it at start and runs the engine on the path it
+	// returns. Exactly one of Path and Source is set.
+	Source         string            `yaml:"source"`
+	GPUs           []int             `yaml:"gpus"`
+	GPUsPerBackend int               `yaml:"gpus_per_backend"`
+	Context        int               `yaml:"context"`
+	Parallel       int               `yaml:"parallel"`
+	StartupTimeout Duration          `yaml:"startup_timeout"`
+	Args           []string          `yaml:"args"`
+	Env            map[string]string `yaml:"env"`
+	// Options collects every key this struct does not define, which is how a
+	// model carries its engine's own configuration block. Exactly one is
+	// allowed and it must be named for the model's engine; Parse rejects
+	// anything else, so a typo is still an error that names the key. The
+	// engine decodes its own block (engine.DecodeOptions) and config never
+	// looks inside — which is what keeps the list of engines that exist out of
+	// this package.
+	Options map[string]yaml.Node `yaml:",inline"`
+}
+
+// EngineBlock is this model's engine configuration block, or a zero Node when
+// the operator wrote none. Parse guarantees any block present is named for
+// this model's engine.
+func (m Model) EngineBlock() yaml.Node {
+	if n, ok := m.Options[m.Engine]; ok {
+		return n
 	}
-	ids := make([]int, g.Count)
-	for i := range ids {
-		ids[i] = g.Offset + i
-	}
-	return ids
+	return yaml.Node{}
 }
 
-type BackendConfig struct {
-	Binary    string   `yaml:"binary"`
-	ExtraArgs []string `yaml:"extra_args"`
-	// Threads is the per-backend llama-server --threads value. When 0, viiwork
-	// auto-derives max(1, nproc/n_backends) at startup so N backends don't all
-	// default to nproc/2 each and oversubscribe the host. Pass --threads in
-	// extra_args to bypass this entirely (the auto-derive defers to user
-	// args). See field report on 4-core EPYC 3151 hosts running 10 backends.
-	Threads int `yaml:"threads"`
+// ParrotID is the viiwork-parrot catalog id this model is sourced from, and
+// false when it has no viiwork-parrot source.
+func (m Model) ParrotID() (string, bool) {
+	return strings.CutPrefix(m.Source, SourceParrot)
+}
+
+// Equal reports whether two models are the same configuration.
+//
+// This cannot be reflect.DeepEqual, and the reason is a trap worth stating: an
+// engine block is a yaml.Node, which carries the Line and Column it was written
+// at. Two parses of the same model at different places in a file are therefore
+// not DeepEqual, and a supervisor diffing on that would restart a live backend
+// because an unrelated model above it gained a line. Compare the block by what
+// it says instead of where it was said.
+func (m Model) Equal(o Model) bool {
+	a, b := m, o
+	a.Options, b.Options = nil, nil
+	if !reflect.DeepEqual(a, b) {
+		return false
+	}
+	return blockText(m.Options) == blockText(o.Options)
+}
+
+// blockText renders an options map to a stable string, keys in sorted order.
+func blockText(opts map[string]yaml.Node) string {
+	if len(opts) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(opts))
+	for k := range opts {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var sb strings.Builder
+	for _, k := range keys {
+		node := opts[k]
+		sb.WriteString(k)
+		sb.WriteByte(':')
+		if b, err := yaml.Marshal(&node); err == nil {
+			sb.Write(b)
+		}
+		sb.WriteByte('\n')
+	}
+	return sb.String()
+}
+
+// Backends is how many backend processes the model runs: one per
+// gpus_per_backend-sized group of its GPUs, or one CPU backend with no GPUs.
+func (m Model) Backends() int {
+	if len(m.GPUs) == 0 || m.GPUsPerBackend < 1 {
+		return 1
+	}
+	return len(m.GPUs) / m.GPUsPerBackend
+}
+
+// BackendGPUs returns a copy of backend i's GPUs in config order, or nil for a
+// CPU model.
+func (m Model) BackendGPUs(i int) []int {
+	if len(m.GPUs) == 0 {
+		return nil
+	}
+	n := m.GPUsPerBackend
+	return append([]int(nil), m.GPUs[i*n:(i+1)*n]...)
 }
 
 type HealthConfig struct {
-	Interval    Duration `yaml:"interval"`
-	Timeout     Duration `yaml:"timeout"`
-	MaxFailures int      `yaml:"max_failures"`
-	// RespawnGrace is the maximum time to wait for in-flight requests on an
-	// unhealthy backend to drain before forcing a respawn. Setting this >0
-	// prevents the 502 cascade where a slow-but-recoverable backend hits the
-	// failure threshold and gets killed with N requests in flight. Once grace
-	// expires or in-flight reaches 0, the respawn proceeds normally.
-	RespawnGrace Duration `yaml:"respawn_grace"`
-	// EvictOnHardFailure makes the proxy treat an EOF or "connection refused"
-	// from a backend's inference path as a definitive process-gone signal:
-	// the backend is marked unhealthy from the request path (so the picker
-	// stops routing to it instantly), and the manager respawns after one
-	// failed probe instead of MaxFailures. Defaults to true; the signal is
-	// kernel-level and effectively unambiguous, but operators can disable it
-	// to fall back to v0.5.0 health-ladder-only behavior.
-	EvictOnHardFailure bool `yaml:"evict_on_hard_failure"`
-}
-
-// ActivityConfig tunes the in-memory activity and prompt history a node keeps.
-// None of it is persisted; a restart clears everything here.
-type ActivityConfig struct {
-	// PromptHistory is how many recent requests keep their prompt and output
-	// available for lookup. Memory scales with it: roughly this many times up
-	// to 100 KB (a prompt and an output, each truncated at 50 000 characters).
-	// 0 uses the default.
-	PromptHistory int `yaml:"prompt_history"`
-}
-
-type BalancerConfig struct {
-	LatencyWindow     Duration `yaml:"latency_window"`
-	HighLoadThreshold int      `yaml:"high_load_threshold"`
-	MaxInFlightPerGPU int      `yaml:"max_in_flight_per_gpu"`
-}
-
-type PeersConfig struct {
-	Hosts        []string `yaml:"hosts"`
-	PollInterval Duration `yaml:"poll_interval"`
+	Interval     Duration `yaml:"interval"`
 	Timeout      Duration `yaml:"timeout"`
+	MaxFailures  int      `yaml:"max_failures"`
+	RespawnGrace Duration `yaml:"respawn_grace"`
+	MaxRespawns  int      `yaml:"max_respawns"`
+}
+
+type ActivityConfig struct {
+	PromptHistory int `yaml:"prompt_history"`
+	EventHistory  int `yaml:"event_history"`
 }
 
 type WinterTransferConfig struct {
@@ -252,284 +434,4 @@ type EnergyConfig struct {
 	MinuteSlots int `yaml:"minute_slots"`
 	HourSlots   int `yaml:"hour_slots"`
 	DaySlots    int `yaml:"day_slots"`
-}
-
-type Config struct {
-	Server    ServerConfig                       `yaml:"server"`
-	Model     ModelConfig                        `yaml:"model"`
-	GPUs      GPUConfig                          `yaml:"gpus"`
-	Backend   BackendConfig                      `yaml:"backend"`
-	Health    HealthConfig                       `yaml:"health"`
-	Activity  ActivityConfig                     `yaml:"activity"`
-	Balancer  BalancerConfig                     `yaml:"balancer"`
-	Peers     PeersConfig                        `yaml:"peers"`
-	Cost      CostConfig                         `yaml:"cost"`
-	Power     PowerConfig                        `yaml:"power"`
-	Energy    EnergyConfig                       `yaml:"energy"`
-	Pipelines map[string]pipeline.PipelineConfig `yaml:"pipelines"`
-}
-
-func Load(path string) (*Config, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("reading config: %w", err)
-	}
-
-	cfg := Defaults()
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		return nil, fmt.Errorf("parsing config: %w", err)
-	}
-
-	if err := cfg.Validate(); err != nil {
-		return nil, err
-	}
-
-	return &cfg, nil
-}
-
-func (c *Config) Validate() error {
-	if c.Model.Path == "" {
-		return fmt.Errorf("model.path is required")
-	}
-	if len(c.GPUs.Devices) > 0 {
-		c.GPUs.Count = len(c.GPUs.Devices)
-	}
-	if c.GPUs.Count < 1 {
-		return fmt.Errorf("gpus.count or gpus.devices is required")
-	}
-	if c.Server.Port < 1 || c.Server.Port > 65535 {
-		return fmt.Errorf("server.port must be 1-65535")
-	}
-	if c.Server.MeshPort < 0 || c.Server.MeshPort > 65535 {
-		return fmt.Errorf("server.mesh_port must be 0-65535 (0 disables)")
-	}
-	if c.Balancer.MaxInFlightPerGPU < 1 {
-		return fmt.Errorf("balancer.max_in_flight_per_gpu must be >= 1")
-	}
-	if c.Health.Interval.Duration <= 0 {
-		return fmt.Errorf("health.interval must be positive")
-	}
-	if c.Health.Timeout.Duration <= 0 {
-		return fmt.Errorf("health.timeout must be positive")
-	}
-	if c.Health.MaxFailures < 1 {
-		return fmt.Errorf("health.max_failures must be >= 1")
-	}
-	if c.Health.RespawnGrace.Duration < 0 {
-		return fmt.Errorf("health.respawn_grace must be >= 0")
-	}
-	if err := validatePowerControl(&c.Power.Control); err != nil {
-		return err
-	}
-	if err := validatePowerSource(c.Power.Source); err != nil {
-		return err
-	}
-	if c.Energy.Enabled {
-		if c.Energy.Dir == "" {
-			return fmt.Errorf("energy.dir is required when energy.enabled is true")
-		}
-		if c.Energy.SampleInterval.Duration <= 0 {
-			return fmt.Errorf("energy.sample_interval must be positive")
-		}
-	}
-	if c.Backend.Threads < 0 {
-		return fmt.Errorf("backend.threads must be >= 0 (0 = auto-derive max(1, nproc/n_backends))")
-	}
-	if c.GPUs.TensorSplit.Enabled {
-		// Tensor-split mode: one or more backends, each spanning GroupSize
-		// devices on consecutive ports starting at BasePort.
-		devices := c.GPUs.ResolvedDevices()
-		if len(devices) < 2 {
-			return fmt.Errorf("gpus.tensor_split.enabled requires at least 2 devices")
-		}
-		groupSize := c.GPUs.TensorSplit.GroupSize
-		if groupSize < 0 {
-			return fmt.Errorf("gpus.tensor_split.group_size must be >= 0 (0 = single group across all devices)")
-		}
-		if groupSize == 0 {
-			groupSize = len(devices)
-		}
-		if groupSize < 2 {
-			return fmt.Errorf("gpus.tensor_split.group_size must be 0 or >= 2, got %d", groupSize)
-		}
-		if groupSize > len(devices) {
-			return fmt.Errorf("gpus.tensor_split.group_size (%d) exceeds device count (%d)", groupSize, len(devices))
-		}
-		if len(devices)%groupSize != 0 {
-			return fmt.Errorf("gpus.tensor_split.group_size (%d) must evenly divide device count (%d)", groupSize, len(devices))
-		}
-		nGroups := len(devices) / groupSize
-		if c.GPUs.BasePort < 1 || c.GPUs.BasePort+nGroups-1 > 65535 {
-			return fmt.Errorf("gpus.base_port must be 1-65535 and base_port+nGroups-1 must not exceed 65535")
-		}
-		if c.GPUs.TensorSplit.Mode == "" {
-			c.GPUs.TensorSplit.Mode = "layer"
-		}
-		if c.GPUs.TensorSplit.Mode != "layer" && c.GPUs.TensorSplit.Mode != "row" {
-			return fmt.Errorf("gpus.tensor_split.mode must be 'layer' or 'row', got %q", c.GPUs.TensorSplit.Mode)
-		}
-		// Weights apply within a group (same pattern replicated to every group).
-		if len(c.GPUs.TensorSplit.Weights) > 0 && len(c.GPUs.TensorSplit.Weights) != groupSize {
-			return fmt.Errorf("gpus.tensor_split.weights length (%d) must match group_size (%d)",
-				len(c.GPUs.TensorSplit.Weights), groupSize)
-		}
-		if c.GPUs.TensorSplit.MainGPU < 0 || c.GPUs.TensorSplit.MainGPU >= groupSize {
-			return fmt.Errorf("gpus.tensor_split.main_gpu (%d) must be a valid index 0..%d",
-				c.GPUs.TensorSplit.MainGPU, groupSize-1)
-		}
-		// model.parallel works in tensor-split mode too: llama-server splits
-		// its --ctx-size budget across N slots, each handling one in-flight
-		// request. Tradeoff is per-slot context (total/N) and shared GPU
-		// compute vs. the all-GPUs-idle waste of single-stream TS. Left to
-		// the operator to tune.
-	} else {
-		// Replica mode: one process per GPU on consecutive ports.
-		if c.GPUs.BasePort < 1 || c.GPUs.BasePort+c.GPUs.Count-1 > 65535 {
-			return fmt.Errorf("gpus.base_port must be 1-65535 and base_port+count must not exceed 65535")
-		}
-	}
-	return nil
-}
-
-func (c *Config) ApplyOverrides(overrides map[string]string) error {
-	for key, val := range overrides {
-		switch key {
-		case "server.host":
-			c.Server.Host = val
-		case "server.port":
-			v, err := strconv.Atoi(val)
-			if err != nil {
-				return fmt.Errorf("invalid server.port: %w", err)
-			}
-			c.Server.Port = v
-		case "server.mesh_port":
-			v, err := strconv.Atoi(val)
-			if err != nil {
-				return fmt.Errorf("invalid server.mesh_port: %w", err)
-			}
-			c.Server.MeshPort = v
-		case "model.path":
-			c.Model.Path = val
-		case "model.context_size":
-			v, err := strconv.Atoi(val)
-			if err != nil {
-				return fmt.Errorf("invalid model.context_size: %w", err)
-			}
-			c.Model.ContextSize = v
-		case "model.n_gpu_layers":
-			v, err := strconv.Atoi(val)
-			if err != nil {
-				return fmt.Errorf("invalid model.n_gpu_layers: %w", err)
-			}
-			c.Model.NGPULayers = v
-		case "gpus.count":
-			v, err := strconv.Atoi(val)
-			if err != nil {
-				return fmt.Errorf("invalid gpus.count: %w", err)
-			}
-			c.GPUs.Count = v
-		case "gpus.base_port":
-			v, err := strconv.Atoi(val)
-			if err != nil {
-				return fmt.Errorf("invalid gpus.base_port: %w", err)
-			}
-			c.GPUs.BasePort = v
-		case "gpus.offset":
-			v, err := strconv.Atoi(val)
-			if err != nil {
-				return fmt.Errorf("invalid gpus.offset: %w", err)
-			}
-			c.GPUs.Offset = v
-		case "backend.binary":
-			c.Backend.Binary = val
-		case "balancer.high_load_threshold":
-			v, err := strconv.Atoi(val)
-			if err != nil {
-				return fmt.Errorf("invalid balancer.high_load_threshold: %w", err)
-			}
-			c.Balancer.HighLoadThreshold = v
-		case "balancer.max_in_flight_per_gpu":
-			v, err := strconv.Atoi(val)
-			if err != nil {
-				return fmt.Errorf("invalid balancer.max_in_flight_per_gpu: %w", err)
-			}
-			c.Balancer.MaxInFlightPerGPU = v
-		case "health.interval":
-			d, err := time.ParseDuration(val)
-			if err != nil {
-				return fmt.Errorf("invalid health.interval: %w", err)
-			}
-			c.Health.Interval = Duration{d}
-		case "health.timeout":
-			d, err := time.ParseDuration(val)
-			if err != nil {
-				return fmt.Errorf("invalid health.timeout: %w", err)
-			}
-			c.Health.Timeout = Duration{d}
-		case "health.respawn_grace":
-			d, err := time.ParseDuration(val)
-			if err != nil {
-				return fmt.Errorf("invalid health.respawn_grace: %w", err)
-			}
-			c.Health.RespawnGrace = Duration{d}
-		case "health.evict_on_hard_failure":
-			b, err := strconv.ParseBool(val)
-			if err != nil {
-				return fmt.Errorf("invalid health.evict_on_hard_failure: %w", err)
-			}
-			c.Health.EvictOnHardFailure = b
-		case "backend.threads":
-			v, err := strconv.Atoi(val)
-			if err != nil {
-				return fmt.Errorf("invalid backend.threads: %w", err)
-			}
-			c.Backend.Threads = v
-		case "balancer.latency_window":
-			d, err := time.ParseDuration(val)
-			if err != nil {
-				return fmt.Errorf("invalid balancer.latency_window: %w", err)
-			}
-			c.Balancer.LatencyWindow = Duration{d}
-		default:
-			return fmt.Errorf("unknown override key: %s", key)
-		}
-	}
-	return nil
-}
-
-// validatePowerControl fails startup on a power-control block that would not do
-// what it appears to say. Enabling control with no hosts listed is the case
-// worth catching: it looks armed and controls nothing, and the operator finds
-// out by clicking a button that refuses.
-func validatePowerControl(pc *PowerControlConfig) error {
-	if !pc.Enabled {
-		return nil
-	}
-	if len(pc.Hosts) == 0 {
-		return fmt.Errorf("power.control.enabled is true but power.control.hosts is empty: list the hosts that may be controlled")
-	}
-	for _, h := range pc.Hosts {
-		if strings.TrimSpace(h) == "" {
-			return fmt.Errorf("power.control.hosts contains an empty hostname")
-		}
-	}
-	return nil
-}
-
-// validatePowerSource rejects a misspelled source at startup. Without this a
-// typo would fall through the sampler's probe and silently disable power and
-// cost tracking, which is exactly the failure mode this feature exists to end.
-func validatePowerSource(source string) error {
-	switch s := strings.TrimSpace(source); {
-	case s == "", s == power.SourceAuto, s == power.SourceDCMI,
-		s == power.SourceSDR, s == power.SourceNone:
-		return nil
-	case strings.HasPrefix(s, power.SourceSensorPrefix):
-		if strings.TrimSpace(strings.TrimPrefix(s, power.SourceSensorPrefix)) == "" {
-			return fmt.Errorf("power.source %q needs a sensor name, e.g. %qSYS_POWER", s, power.SourceSensorPrefix)
-		}
-		return nil
-	default:
-		return fmt.Errorf("power.source %q must be one of: auto, dcmi, sdr, none, sensor:<NAME>", s)
-	}
 }

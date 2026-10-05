@@ -74,10 +74,14 @@ type ControlConfig struct {
 	BMCs map[string]BMC
 }
 
+// envRunner executes ipmitool with extra environment entries (KEY=value)
+// appended to the process's own. Injected so tests can inspect both.
+type envRunner func(ctx context.Context, env []string, args ...string) ([]byte, error)
+
 type Controller struct {
 	cfg      ControlConfig
 	logger   *log.Logger
-	run      runner
+	run      envRunner
 	selfHost string
 
 	mu         sync.RWMutex
@@ -89,7 +93,7 @@ func NewController(cfg ControlConfig, selfHost string) *Controller {
 		cfg:        cfg,
 		selfHost:   selfHost,
 		logger:     log.New(os.Stdout, "[power] ", log.LstdFlags),
-		run:        execIpmitool,
+		run:        execIpmitoolEnv,
 		discovered: make(map[string]string),
 	}
 }
@@ -236,13 +240,8 @@ func (c *Controller) exec(ctx context.Context, bmc *BMC, action string) (string,
 	ctx, cancel := context.WithTimeout(ctx, controlBudget)
 	defer cancel()
 
-	var args []string
-	if bmc != nil {
-		args = append(args, "-I", "lanplus", "-H", bmc.Addr, "-U", bmc.Username, "-P", bmc.Password)
-	}
-	args = append(args, "chassis", "power", action)
-
-	out, err := c.run(ctx, args...)
+	args, env := controlCommand(bmc, action)
+	out, err := c.run(ctx, env, args...)
 	if err != nil {
 		// ipmitool puts the useful part on stderr — "Unable to establish IPMI
 		// v2 / RMCP+ session" and the like — which Output() captures into
@@ -251,6 +250,33 @@ func (c *Controller) exec(ctx context.Context, bmc *BMC, action string) (string,
 		return "", fmt.Errorf("ipmitool chassis power %s: %w%s", action, err, stderrOf(err))
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+// controlCommand builds ipmitool's arguments and the extra environment for one
+// chassis action.
+//
+// The BMC password goes in IPMI_PASSWORD with -E, never as -P <password>:
+// argv is world-readable in /proc/<pid>/cmdline, and viiwork's containers run
+// with pid: host, so a -P argument is visible to every process on the machine
+// for the whole of an RMCP+ handshake. The environment is set on this one
+// command only, not on the viiwork process.
+func controlCommand(bmc *BMC, action string) (args, env []string) {
+	if bmc != nil {
+		args = append(args, "-I", "lanplus", "-H", bmc.Addr, "-U", bmc.Username, "-E")
+		env = []string{"IPMI_PASSWORD=" + bmc.Password}
+	}
+	return append(args, "chassis", "power", action), env
+}
+
+// execIpmitoolEnv runs ipmitool with env appended to viiwork's own
+// environment; a later duplicate key wins, so an inherited IPMI_PASSWORD
+// cannot shadow the configured one.
+func execIpmitoolEnv(ctx context.Context, env []string, args ...string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, "ipmitool", args...)
+	if len(env) > 0 {
+		cmd.Env = append(os.Environ(), env...)
+	}
+	return cmd.Output()
 }
 
 // stderrOf extracts ipmitool's diagnostics from a failed run. Never include the

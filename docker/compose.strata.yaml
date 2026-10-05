@@ -1,0 +1,69 @@
+# viiwork 2 on Strata, gfx906: one node per machine.
+#
+# Copy beside the machine's viiwork.yaml and start it with
+#   docker compose -f compose.strata.yaml up -d
+# Reload the model list after editing viiwork.yaml:
+#   docker kill -s HUP viiwork
+
+services:
+  viiwork:
+    image: viiwork-strata:latest
+    container_name: viiwork
+    restart: unless-stopped
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.strata
+      args:
+        VERSION: dev
+
+    # Gossip binds the machine's tailnet (or LAN) address on 7946 and the API
+    # listens on 8086. Members dial each other's real addresses.
+    network_mode: host
+
+    # Strata's own requirement (upstream docs/AMD_HIP.md).
+    ipc: host
+    ulimits:
+      memlock: -1
+
+    # The on-GPU check matches backend processes against host PIDs.
+    pid: host
+
+    devices:
+      - /dev/kfd
+      - /dev/dri
+    group_add:
+      - video
+      # The host's render group, by number: `getent group render | cut -d: -f3`.
+      - "${RENDER_GID:-992}"
+
+    volumes:
+      # Packs, GGUF shards and the MTP layer, at the path the JSON files use.
+      # WRITABLE: with STRATA_ARENA_MMAP=1 the first start writes a 24 GB
+      # experts.bin into the pack.
+      - /srv/strata:/s
+      # The Strata JSON configs that models[].path names, READ ONLY and apart
+      # from the writable volume: a Strata JSON names the program the server
+      # runs ("exe", "before_load"), so nothing a backend can write should be
+      # able to change one.
+      - /etc/viiwork/strata:/etc/strata:ro
+      - ./viiwork.yaml:/etc/viiwork/viiwork.yaml:ro
+      # node.state_dir: the alias table must survive recreating the container.
+      - /var/lib/viiwork:/var/lib/viiwork
+      # The directory, not the socket file: a mounted file keeps its old inode
+      # when tailscaled restarts.
+      - /var/run/tailscale:/var/run/tailscale:ro
+
+    env_file:
+      - path: /etc/viiwork/mesh.env
+        required: false
+
+    # Leave the mesh, drain for health.respawn_grace (60 s), stop the backends.
+    stop_grace_period: 90s
+
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8086/health"]
+      interval: 30s
+      timeout: 5s
+      # A load is 3.5 to 6 minutes per backend and loads are serialised.
+      start_period: 30m
+      retries: 3

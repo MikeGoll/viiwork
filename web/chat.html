@@ -7,9 +7,11 @@
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace; background: #0d1117; color: #c9d1d9; display: flex; flex-direction: column; height: 100vh; }
-  header { padding: 12px 20px; border-bottom: 1px solid #30363d; display: flex; align-items: center; gap: 16px; flex-shrink: 0; }
+  header { padding: 12px 20px; border-bottom: 1px solid #30363d; display: flex; align-items: center; gap: 16px; flex-shrink: 0; flex-wrap: wrap; }
   header a { color: #58a6ff; text-decoration: none; font-size: 1.1rem; font-weight: 600; }
   header a:hover { text-decoration: underline; }
+  .sel { display: inline-flex; align-items: center; gap: 6px; }
+  .sel label { color: #8b949e; font-size: 0.78rem; }
   select { background: #161b22; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; padding: 6px 10px; font-family: inherit; font-size: 0.85rem; }
   #messages { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 16px; }
   .msg { max-width: 85%; padding: 12px 16px; border-radius: 8px; line-height: 1.5; white-space: pre-wrap; word-wrap: break-word; font-size: 0.9rem; }
@@ -26,6 +28,13 @@
   button:hover { background: #2ea043; }
   button:disabled { background: #21262d; color: #484f58; cursor: not-allowed; }
   .meta { font-size: 0.75rem; color: #484f58; margin-top: 4px; }
+  #tps { margin-left: auto; display: flex; align-items: baseline; gap: 10px; background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 4px 12px; font-variant-numeric: tabular-nums; }
+  #tps .rate { font-size: 1.05rem; font-weight: 600; color: #8b949e; min-width: 5.5em; text-align: right; }
+  #tps .rate small { font-size: 0.72rem; font-weight: 400; color: #8b949e; margin-left: 4px; }
+  #tps .detail { font-size: 0.72rem; color: #484f58; white-space: nowrap; }
+  #tps.live { border-color: #238636; }
+  #tps.live .rate { color: #3fb950; }
+  #tps.waiting .rate { color: #d29922; }
 </style>
 </head>
 <body>
@@ -34,7 +43,9 @@
   <a href="/">viiwork</a>
   <span style="color:#484f58">/</span>
   <span style="color:#c9d1d9;font-weight:600">chat</span>
-  <select id="model-select"><option>loading...</option></select>
+  <span class="sel"><label for="model-select">model</label><select id="model-select"><option>loading...</option></select></span>
+  <span class="sel"><label for="host-select">backend</label><select id="host-select"><option value="mesh">mesh</option></select></span>
+  <span id="tps"><span class="rate">&ndash;<small>tok/s</small></span><span class="detail">idle</span></span>
 </header>
 
 <div id="messages"></div>
@@ -51,9 +62,25 @@ const messagesEl = document.getElementById('messages');
 const promptEl = document.getElementById('prompt');
 const sendBtn = document.getElementById('send');
 const modelSelect = document.getElementById('model-select');
+const hostSelect = document.getElementById('host-select');
+const tpsEl = document.getElementById('tps');
+const tpsRate = tpsEl.querySelector('.rate');
+const tpsDetail = tpsEl.querySelector('.detail');
 
 let conversation = [];
 let streaming = false;
+
+// The URL is this page's only addressable state: ?model= picks the model and
+// ?host= pins where it runs ("mesh", or absent, lets the mesh route it as it
+// always has). Read once on load and reflected back with replaceState on every
+// change, so the address bar always describes what is on screen and a link to
+// "this model, on that host" can be copied straight out of it.
+const MESH = 'mesh';
+const params = new URLSearchParams(location.search);
+const wanted = { model: params.get('model') || '', host: params.get('host') || MESH };
+let cluster = null;
+let modelsLoaded = false;
+const aliasTargets = new Map(); // alias name -> target model, from /v1/models
 
 // Auto-resize textarea
 promptEl.addEventListener('input', () => {
@@ -69,21 +96,209 @@ promptEl.addEventListener('keydown', (e) => {
   }
 });
 
+modelSelect.addEventListener('change', () => { renderHosts(hostSelect.value, false); syncURL(); });
+hostSelect.addEventListener('change', syncURL);
+
 // Load models
 async function loadModels() {
   try {
     const resp = await fetch('/v1/models');
     const data = await resp.json();
     modelSelect.innerHTML = '';
-    for (const m of data.data) {
+    let found = false;
+    // Real models first, then aliases labelled with where they point: an alias
+    // is a stable name for whatever model it targets today.
+    const entries = data.data || [];
+    const real = entries.filter(m => m.owned_by !== 'alias');
+    const aliasEntries = entries.filter(m => m.owned_by === 'alias');
+    for (const m of [...real, ...aliasEntries]) {
       const opt = document.createElement('option');
       opt.value = m.id;
-      opt.textContent = m.id;
+      if (m.owned_by === 'alias') {
+        aliasTargets.set(m.id, m.target || '');
+        opt.textContent = m.id + ' \u2192 ' + (m.target || '?');
+      } else {
+        opt.textContent = m.id;
+      }
+      if (m.id === wanted.model) { opt.selected = true; found = true; }
       modelSelect.appendChild(opt);
     }
+    // A stale link, or a host that has since gone: keep the model that was
+    // asked for on screen and say so, rather than quietly answering with a
+    // different one. Which model you asked for is the whole point of the link.
+    if (wanted.model && !found) {
+      const opt = document.createElement('option');
+      opt.value = wanted.model;
+      opt.textContent = wanted.model + ' (not currently served)';
+      opt.selected = true;
+      modelSelect.appendChild(opt);
+    }
+    modelsLoaded = true;
   } catch (e) {
     modelSelect.innerHTML = '<option>error loading models</option>';
   }
+}
+
+async function loadCluster() {
+  try {
+    const resp = await fetch('/v1/cluster');
+    cluster = await resp.json();
+  } catch (e) {
+    cluster = null;
+  }
+}
+
+// Hosts serving a model: the alive members whose status lists it, by node
+// name, which is what the ?host= pin compares against. An alias lists the
+// hosts of its target. Members that are not alive are left out; pinning to one
+// could only produce a 404.
+function hostsForModel(model) {
+  if (!cluster || !model) return [];
+  const name = aliasTargets.get(model) || model;
+  const set = new Set();
+  for (const m of cluster.members || []) {
+    if (m.state !== 'alive' || !m.status) continue;
+    if ((m.status.models || []).some(x => x.name === name)) set.add(m.node);
+  }
+  return [...set].sort();
+}
+
+// hostLabel names a node for the meta line. Node names are already machine
+// names in viiwork 2, so there is nothing to translate.
+function hostLabel(name) {
+  return name;
+}
+
+// renderHosts rebuilds the backend selector for the current model: mesh
+// first and default, then every host serving it. `keep` is the host to hold
+// on to if it still qualifies; with `insist`, a host that does not is kept
+// anyway and labelled — the rule the model selector applies to a stale link,
+// so a send fails loudly instead of silently going somewhere else.
+function renderHosts(keep, insist) {
+  const hosts = hostsForModel(modelSelect.value);
+  hostSelect.innerHTML = '';
+  const mesh = document.createElement('option');
+  mesh.value = MESH;
+  mesh.textContent = MESH;
+  hostSelect.appendChild(mesh);
+  for (const h of hosts) {
+    const opt = document.createElement('option');
+    opt.value = h;
+    opt.textContent = h;
+    hostSelect.appendChild(opt);
+  }
+  if (hosts.includes(keep)) {
+    hostSelect.value = keep;
+  } else if (insist && keep && keep !== MESH) {
+    const opt = document.createElement('option');
+    opt.value = keep;
+    opt.textContent = keep + ' (not currently serving)';
+    hostSelect.appendChild(opt);
+    hostSelect.value = keep;
+  } else {
+    hostSelect.value = MESH;
+  }
+}
+
+function pinnedHost() {
+  return hostSelect.value && hostSelect.value !== MESH ? hostSelect.value : '';
+}
+
+function syncURL() {
+  if (!modelsLoaded) return;
+  const p = new URLSearchParams();
+  if (modelSelect.value) p.set('model', modelSelect.value);
+  const host = pinnedHost();
+  if (host) p.set('host', host);
+  const q = p.toString();
+  history.replaceState(null, '', location.pathname + (q ? '?' + q : ''));
+  // A row of tabs all reading "viiwork chat" would defeat a side-by-side
+  // comparison, so the title carries what this tab is talking to.
+  document.title = (modelSelect.value || 'chat') + (host ? ' @ ' + host : '') + ' · viiwork chat';
+}
+
+// The tokens/second meter. The live figure counts streamed deltas, one per
+// token as llama.cpp and vLLM send them, over a sliding window so it follows
+// the decode rate as it changes; it starts at the first token, so prompt
+// processing shows as time to first token rather than dragging the rate down.
+// When the stream's last chunk carries the engine's own numbers (llama.cpp's
+// `timings`, or `usage`), the final figure is taken from them instead.
+const TPS_WINDOW_MS = 2000;
+let tpsTimer = null;
+
+function tpsShow(state, rate, detail) {
+  tpsEl.className = state;
+  tpsRate.innerHTML = '';
+  tpsRate.append(rate);
+  const unit = document.createElement('small');
+  unit.textContent = 'tok/s';
+  tpsRate.appendChild(unit);
+  tpsDetail.textContent = detail;
+}
+
+function fmtRate(r) {
+  return Number.isFinite(r) && r > 0 ? r.toFixed(1) : '\u2013';
+}
+
+function newMeter(t0) {
+  return { t0, first: 0, last: 0, n: 0, stamps: [], engineRate: 0, engineN: 0 };
+}
+
+function meterToken(m, now) {
+  if (!m.first) m.first = now;
+  m.last = now;
+  m.n++;
+  m.stamps.push(now);
+}
+
+// meterEngine reads the engine's own count from a chunk, when it has one.
+function meterEngine(m, chunk) {
+  const t = chunk.timings;
+  if (t && t.predicted_per_second > 0) {
+    m.engineRate = t.predicted_per_second;
+    m.engineN = t.predicted_n || m.engineN;
+  }
+  if (chunk.usage && chunk.usage.completion_tokens > 0) m.engineN = chunk.usage.completion_tokens;
+}
+
+function meterAverage(m) {
+  if (m.engineRate) return m.engineRate;
+  const n = m.engineN || m.n;
+  const span = (m.last - m.first) / 1000;
+  return n > 1 && span > 0 ? (n - 1) / span : 0;
+}
+
+function meterTick(m) {
+  const now = performance.now();
+  if (!m.first) {
+    tpsShow('waiting', '\u2026', 'prompt ' + ((now - m.t0) / 1000).toFixed(1) + 's');
+    return;
+  }
+  while (m.stamps.length && m.stamps[0] < now - TPS_WINDOW_MS) m.stamps.shift();
+  // Rate over the window, measured from its oldest token to now, so a stall
+  // pulls the figure down instead of freezing it at the last good value.
+  let rate = 0;
+  if (m.stamps.length > 1) rate = (m.stamps.length - 1) / ((now - m.stamps[0]) / 1000);
+  else if (m.n > 1) rate = meterAverage(m);
+  tpsShow('live', fmtRate(rate), m.n + ' tok \u00b7 ttft ' + ((m.first - m.t0) / 1000).toFixed(1) + 's');
+}
+
+function meterStart(m) {
+  clearInterval(tpsTimer);
+  meterTick(m);
+  tpsTimer = setInterval(() => meterTick(m), 250);
+}
+
+// meterStop leaves the finished request's average on screen until the next.
+function meterStop(m, failed) {
+  clearInterval(tpsTimer);
+  tpsTimer = null;
+  if (failed || !m.first) {
+    tpsShow('', '\u2013', failed ? 'failed' : 'no tokens');
+    return;
+  }
+  const n = m.engineN || m.n;
+  tpsShow('', fmtRate(meterAverage(m)), 'last: ' + n + ' tok \u00b7 ttft ' + ((m.first - m.t0) / 1000).toFixed(1) + 's');
 }
 
 function addMessage(role, content) {
@@ -93,6 +308,16 @@ function addMessage(role, content) {
   messagesEl.appendChild(div);
   messagesEl.scrollTop = messagesEl.scrollHeight;
   return div;
+}
+
+// errorMessage pulls the message out of an OpenAI-style error body; the 404
+// for a pin that did not hold already names both the host and the model.
+function errorMessage(text) {
+  try {
+    const parsed = JSON.parse(text);
+    if (parsed?.error?.message) return parsed.error.message;
+  } catch (e) { /* not JSON */ }
+  return text;
 }
 
 async function send() {
@@ -111,15 +336,22 @@ async function send() {
   const msgDiv = addMessage('assistant', '');
   let fullText = '';
   let thinkText = '';
-  let inThink = false;
   const t0 = performance.now();
+  const model = modelSelect.value;
+  const pinned = pinnedHost();
+  const meter = newMeter(t0);
+  let failed = true;
+  meterStart(meter);
 
   try {
-    const resp = await fetch('/v1/chat/completions', {
+    // The pin rides as a query parameter: the node applies it to its route
+    // set and forwards it intact to a peer, so it holds across the hop.
+    const url = '/v1/chat/completions' + (pinned ? '?host=' + encodeURIComponent(pinned) : '');
+    const resp = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        model: modelSelect.value,
+        model: model,
         messages: conversation,
         stream: true
       })
@@ -128,9 +360,21 @@ async function send() {
     if (!resp.ok) {
       const err = await resp.text();
       msgDiv.className = 'msg error';
-      msgDiv.textContent = resp.status + ': ' + err;
+      msgDiv.textContent = resp.status + ': ' + errorMessage(err);
       return;
     }
+
+    // Where it actually ran, so a two-host comparison can be trusted: the node
+    // that executed it, and the node that forwarded it there when that was not
+    // the one this page talks to.
+    const node = resp.headers.get('X-Viiwork-Node');
+    const origin = resp.headers.get('X-Viiwork-Origin');
+    const realModel = resp.headers.get('X-Viiwork-Model');
+    const alias = resp.headers.get('X-Viiwork-Alias');
+    const ranOn = (node ? hostLabel(node) : 'entry node') + (pinned ? ' (pinned)' : '') +
+      (origin ? ' via ' + hostLabel(origin) : '');
+    const gpu = resp.headers.get('X-GPU-Backend');
+    const modelLabel = alias && realModel ? alias + ' \u2192 ' + realModel : (realModel || model);
 
     const reader = resp.body.getReader();
     const decoder = new TextDecoder();
@@ -151,13 +395,14 @@ async function send() {
 
         try {
           const chunk = JSON.parse(payload);
+          meterEngine(meter, chunk);
           const delta = chunk.choices?.[0]?.delta;
           if (!delta) continue;
+          if (delta.reasoning_content || delta.content) meterToken(meter, performance.now());
 
           // Handle thinking content (Gemma 4 thinking mode)
           if (delta.reasoning_content) {
             thinkText += delta.reasoning_content;
-            inThink = true;
           }
           if (delta.content) {
             fullText += delta.content;
@@ -181,8 +426,11 @@ async function send() {
     const elapsed = ((performance.now() - t0) / 1000).toFixed(1);
     const meta = document.createElement('div');
     meta.className = 'meta';
-    meta.textContent = modelSelect.value + ' | ' + elapsed + 's';
+    const rate = meterAverage(meter);
+    meta.textContent = modelLabel + ' @ ' + ranOn + (gpu ? ' ' + gpu : '') + ' | ' + elapsed + 's' +
+      (rate ? ' | ' + fmtRate(rate) + ' tok/s' : '');
     msgDiv.appendChild(meta);
+    failed = false;
 
     conversation.push({ role: 'assistant', content: fullText });
 
@@ -190,6 +438,7 @@ async function send() {
     msgDiv.className = 'msg error';
     msgDiv.textContent = 'Error: ' + e.message;
   } finally {
+    meterStop(meter, failed);
     streaming = false;
     sendBtn.disabled = false;
     sendBtn.textContent = 'Send';
@@ -197,7 +446,11 @@ async function send() {
   }
 }
 
-loadModels();
+(async () => {
+  await Promise.all([loadModels(), loadCluster()]);
+  renderHosts(wanted.host, true);
+  syncURL();
+})();
 </script>
 </body>
 </html>
