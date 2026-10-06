@@ -72,7 +72,7 @@ type Deps struct {
 	// PublishPerf adds the scores to /v1/capacity (routing.performance).
 	PublishPerf bool
 	// Usage says how a model's engine reports usage. nil = the zero value:
-	// ask for usage, and treat an absent cached_tokens as unknown.
+	// usage is not asked for, and an absent cached_tokens is unknown.
 	Usage func(model string) engine.UsageReporting
 	// SeparateReasoning says whether a model's engine streams reasoning apart
 	// from the answer (engine.ReasoningSeparator). nil = no: untagged
@@ -346,13 +346,20 @@ func (h *Handler) dispatch(w http.ResponseWriter, r *http.Request, d *dispatch) 
 		res := h.attempt(w, r, lease, d, label)
 
 		if res.Outcome == outcomeServed {
-			if d.record {
-				// For the /prompt page's average rate. The response is
-				// complete, so the capture's usage decode sees all of it.
-				d.outTokens, _ = d.capture.CompletionTokens()
+			// The response is complete here, so the capture's usage decode
+			// (cached on first use) sees the whole body. The capture never
+			// sees a stripped usage chunk, so without the stripped event
+			// every such request would count no tokens.
+			var tokens int64
+			if d.record || t.Local {
+				tokens, _ = d.capture.CompletionTokens()
 				if n, ok := completionTokensFromEvent(res.StrippedUsage); ok {
-					d.outTokens = n
+					tokens = n
 				}
+			}
+			if d.record {
+				// For the /prompt page's average rate.
+				d.outTokens = tokens
 				if !res.GenStart.IsZero() {
 					d.genMS = time.Since(res.GenStart).Milliseconds()
 				}
@@ -366,14 +373,6 @@ func (h *Handler) dispatch(w http.ResponseWriter, r *http.Request, d *dispatch) 
 			// Counted where the request ran, so a forward is counted by its
 			// receiver and not twice (spec).
 			if t.Local {
-				// The response is complete here, so the capture's usage
-				// decode (cached on first use) sees the whole body. The
-				// capture never sees a stripped usage chunk, so without the
-				// stripped event tokens_total would lose every such request.
-				tokens, _ := d.capture.CompletionTokens()
-				if n, ok := completionTokensFromEvent(res.StrippedUsage); ok {
-					tokens = n
-				}
 				h.d.Counters.Add(d.model, tokens)
 				h.recordPerf(d.model, res, d.capture)
 			}
@@ -456,7 +455,7 @@ func (h *Handler) usage(model string) engine.UsageReporting {
 func (h *Handler) localBodyFor(d *dispatch) ([]byte, bool) {
 	if !d.localBuilt {
 		d.localBuilt, d.localBody = true, d.body
-		if h.d.Perf != nil && h.usage(d.model) == (engine.UsageReporting{CachedTokens: true}) {
+		if u := h.usage(d.model); h.d.Perf != nil && u.CachedTokens && !u.Unasked {
 			d.localBody, d.localStrip = injectIncludeUsage(d.body)
 		}
 	}
@@ -482,7 +481,14 @@ func (h *Handler) recordPerf(model string, res execResult, c *captureWriter) {
 	if uncached < 0 {
 		return
 	}
-	h.d.Perf.Record(model, res.FirstToken, uncached, res.FirstToken.Sub(res.Granted))
+	// The engine's first token, not the client's first byte: with think off
+	// a tagged think block is generated and held back, and counting it made
+	// a host that reasons look slow at reading prompts.
+	first := res.FirstToken
+	if !res.GenStart.IsZero() && res.GenStart.Before(first) {
+		first = res.GenStart
+	}
+	h.d.Perf.Record(model, first, uncached, first.Sub(res.Granted))
 }
 
 // attempt runs one dispatch on the lease's target and releases the lease on

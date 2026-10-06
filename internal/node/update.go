@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"path/filepath"
 	"runtime"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -103,7 +105,8 @@ func (n *Node) buildUpdate(cfg *config.Config, auth update.Authorizer) (*update.
 	if cfg.Update.Enabled {
 		c = &update.Confirmer{
 			Store: store, Running: n.o.Version, Window: cfg.ConfirmWindow(),
-			Backends: n.sup.Status, Restart: n.RequestRestart, Now: time.Now, Log: n.logf,
+			Backends: n.sup.Status, Wanted: n.wantsBackend,
+			Restart: n.RequestRestart, Now: time.Now, Log: n.logf,
 			Managed: n.o.Managed,
 		}
 		svc.Deadline = c.Deadline
@@ -153,4 +156,18 @@ func (n *Node) meshPeers() []string {
 		}
 	}
 	return out
+}
+
+// wantsBackend reports whether the backend of that ID belongs to a model
+// this node is configured with and has not parked.
+func (n *Node) wantsBackend(id string) bool {
+	i := strings.LastIndexByte(id, '/')
+	if i < 0 {
+		return true
+	}
+	model := id[:i]
+	if n.isParked(model) {
+		return false
+	}
+	return slices.ContainsFunc(n.runningConfig().Models, func(m config.Model) bool { return m.Name == model })
 }

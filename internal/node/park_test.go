@@ -359,3 +359,33 @@ func TestParkNeedsJSON(t *testing.T) {
 		t.Errorf("a refused write reached the node %d times", f.calls)
 	}
 }
+
+// No models means every model, so a body that names none by accident — a
+// misspelt key, a null, a list — must be refused, never read as "all".
+func TestParkRefusesABodyThatNamesNoModelsByAccident(t *testing.T) {
+	auth, _ := alias.NewAuthorizer("n1", nil, nil)
+	f := &fakePark{}
+	srv := NewServer(ServerDeps{Self: "n1", Park: &parkHandler{auth: auth, park: f.park}})
+	post := func(body string) int {
+		req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8086"+meshapi.PathModelsDown, strings.NewReader(body))
+		req.RemoteAddr = "127.0.0.1:5555"
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, req)
+		return rec.Code
+	}
+	for _, body := range []string{`{"model":"m"}`, `{"names":["m"]}`, `{"Model":["m"]}`, `null`, `["m"]`, `"m"`} {
+		if code := post(body); code != http.StatusBadRequest {
+			t.Errorf("%s: %d, want 400", body, code)
+		}
+	}
+	if f.calls != 0 {
+		t.Fatalf("a refused body reached the node %d times", f.calls)
+	}
+	// A key beside "models" is ignored, as everywhere on the wire.
+	for _, body := range []string{`{}`, `{"models":["m"]}`, `{"models":["m"],"later":1}`} {
+		if code := post(body); code != http.StatusOK {
+			t.Errorf("%s: %d, want 200", body, code)
+		}
+	}
+}

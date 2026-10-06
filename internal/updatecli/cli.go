@@ -86,6 +86,7 @@ type Env struct {
 	GitHubAPI string        // "" = https://api.github.com
 	PollEvery time.Duration // 0 = 2s
 	ComeBack  time.Duration // 0 = 10m: how long a restarting host may be unreachable
+	LoadWait  time.Duration // 0 = 30m: how long activate waits for a host's loading model
 
 	// For `update cli`. DefaultConfig is this machine's viiwork.yaml, read
 	// when --config is not given and it exists; Executable is the running
@@ -128,6 +129,9 @@ func withDefaults(env Env) Env {
 	}
 	if env.ComeBack <= 0 {
 		env.ComeBack = 10 * time.Minute
+	}
+	if env.LoadWait <= 0 {
+		env.LoadWait = 30 * time.Minute
 	}
 	if env.Executable == nil {
 		env.Executable = os.Executable
@@ -437,7 +441,7 @@ func (c *cli) post(ctx context.Context, addr, path string, in, out any, timeout 
 		if json.Unmarshal(b, &e) == nil && e.Error.Message != "" {
 			msg = e.Error.Message
 		}
-		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, msg)
+		return &httpError{code: resp.StatusCode, msg: msg}
 	}
 	if out != nil {
 		// The write took effect; a reply it cannot read does not undo that.
@@ -445,6 +449,14 @@ func (c *cli) post(ctx context.Context, addr, path string, in, out any, timeout 
 	}
 	return nil
 }
+
+// httpError is a node's refusal of a write.
+type httpError struct {
+	code int
+	msg  string
+}
+
+func (e *httpError) Error() string { return fmt.Sprintf("HTTP %d: %s", e.code, e.msg) }
 
 func (c *cli) status(ctx context.Context, asJSON bool) int {
 	v, err := c.members(ctx)
@@ -804,6 +816,40 @@ func hostNames(hs []host) []string {
 	return names
 }
 
+// activate asks one host to switch to the release. Two refusals are not
+// failures. A host already running it (another rollout got there first) is
+// followed like one this rollout activated. A host with a model still
+// loading — after a crash, a rollback or a restart, or in a Strata warm-up —
+// is asked again until the model is healthy or LoadWait has passed: stopping
+// there left the fleet on two versions for a reason that ends by itself.
+func (c *cli) activate(ctx context.Context, h host, to string, allowDowngrade bool) error {
+	req := meshapi.UpdateRequest{Version: to, AllowDowngrade: allowDowngrade}
+	start, said := time.Now(), false
+	for {
+		err := c.post(ctx, h.addr, meshapi.PathUpdateActivate, req, nil, writeTimeout)
+		var refused *httpError
+		if !errors.As(err, &refused) || refused.code != http.StatusConflict {
+			return err
+		}
+		switch {
+		case strings.Contains(refused.msg, update.RefusedAlreadyRunning):
+			c.say(c.env.Stdout, "%s: already running %s\n", h.name, to)
+			return nil
+		case !strings.Contains(refused.msg, update.RefusedStillLoading), time.Since(start) >= c.env.LoadWait:
+			return err
+		}
+		if !said {
+			said = true
+			c.say(c.env.Stdout, "%s: %s; waiting up to %s\n", h.name, refused.msg, c.env.LoadWait)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(c.env.PollEvery):
+		}
+	}
+}
+
 // runWave activates every host of one wave, then follows them all at once
 // through their restarts. It reports true when every host confirmed and is
 // back in the mesh. An activate the node refuses leaves the rest of the wave
@@ -814,8 +860,7 @@ func (c *cli) runWave(ctx context.Context, wave []host, label, to string, allowD
 	activated := make([]bool, len(wave))
 	for i, h := range wave {
 		c.say(c.env.Stdout, "activating %s on %s…\n", to, h.name)
-		req := meshapi.UpdateRequest{Version: to, AllowDowngrade: allowDowngrade}
-		if err := c.post(ctx, h.addr, meshapi.PathUpdateActivate, req, nil, writeTimeout); err != nil {
+		if err := c.activate(ctx, h, to, allowDowngrade); err != nil {
 			errs[i] = fmt.Errorf("activate failed: %v", err)
 			break
 		}

@@ -52,7 +52,7 @@ func (r *Router) Acquire(ctx context.Context, req Request) (*Lease, time.Duratio
 		return nil, 0, ErrQueueFull
 	}
 	w := &waiter{
-		req:      Request{Model: req.Model, Host: req.Host},
+		req:      Request{Model: req.Model, Host: req.Host, EstK: req.EstK, SessionKey: req.SessionKey},
 		enqueued: time.Now(),
 		result:   make(chan waitResult, 1),
 	}

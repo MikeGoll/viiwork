@@ -12,8 +12,10 @@ import (
 	"net/http"
 	"net/netip"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -273,6 +275,7 @@ func New(cfg *config.Config, o Options) (*Node, error) {
 		// node with only path models never talks to viiwork-parrot.
 		Resolver: parrot.New(cfg.ViiworkParrot.API),
 		Timing:   o.SupervisorTiming,
+		Environ:  engineEnviron(cfg),
 	})
 
 	// 7. Routing, aliases and the inference handler.
@@ -741,4 +744,34 @@ func buildCatalog(cfg *config.Config, src discovery.Source) http.Handler {
 		Upstream:     c.Upstream,
 		UpstreamTTL:  c.UpstreamTTL.Duration,
 	}, src)
+}
+
+// engineEnviron is the environment an engine process starts from: the node's
+// own, without the node's secrets. An engine needs none of them, and one
+// that prints its environment into a log or a crash report (a third-party
+// server, and whatever it starts in turn) would publish the secret that
+// signs every write in the mesh. A model that does want one of these names
+// sets it in its own env, which is added afterwards.
+func engineEnviron(cfg *config.Config) func() []string {
+	secret := cfg.Mesh.SecretEnv
+	if secret == "" {
+		secret = config.DefaultMeshSecretEnv
+	}
+	bmc := cfg.Power.Control.BMC.PasswordEnv
+	if bmc == "" {
+		bmc = "BMC_PASSWORD"
+	}
+	drop := []string{secret, cfg.Mesh.SecretPrevEnv, bmc, "ENTSOE_API_KEY"}
+	return func() []string {
+		env := os.Environ()
+		out := make([]string, 0, len(env))
+		for _, kv := range env {
+			name, _, _ := strings.Cut(kv, "=")
+			if name != "" && slices.Contains(drop, name) {
+				continue
+			}
+			out = append(out, kv)
+		}
+		return out
+	}
 }

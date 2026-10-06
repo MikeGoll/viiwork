@@ -65,6 +65,9 @@ func TestRecordPerf(t *testing.T) {
 	}{
 		{"stripped usage", func() execResult { r := ok; r.StrippedUsage = []byte(usageEvent); return r }(), "", engine.UsageReporting{CachedTokens: true}, true, 3000},
 		{"usage from capture", ok, usageEvent, engine.UsageReporting{CachedTokens: true}, true, 3000},
+		// A think block generated and held back is not prompt reading: the
+		// sample ends at the engine's first token, 40 s before the client's.
+		{"hidden reasoning before the first byte", func() execResult { r := ok; r.GenStart = first; r.FirstToken = first.Add(40 * time.Second); return r }(), usageEvent, engine.UsageReporting{CachedTokens: true}, true, 3000},
 		{"no first token", func() execResult { r := ok; r.FirstToken = time.Time{}; return r }(), usageEvent, engine.UsageReporting{CachedTokens: true}, false, 0},
 		{"no grant", func() execResult { r := ok; r.Granted = time.Time{}; return r }(), usageEvent, engine.UsageReporting{CachedTokens: true}, false, 0},
 		{"error status", func() execResult { r := ok; r.Status = 500; return r }(), usageEvent, engine.UsageReporting{CachedTokens: true}, false, 0},

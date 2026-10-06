@@ -329,3 +329,23 @@ func TestQueueQ13Q14Budget(t *testing.T) {
 		t.Errorf("Q14: err = %v after %v", err, time.Since(start))
 	}
 }
+
+// A queued request is picked again when a slot frees, with what the scored
+// choice needs: its session and its prompt size. Without them a session's
+// turn that waited went to whichever host the band chose, onto a cold cache.
+func TestQueueKeepsSessionAndPromptSize(t *testing.T) {
+	f := realFixture(64, 5*time.Second)
+	f.local.add("m", newFakeBackend("m/0", 1))
+	held := f.pick(t, Request{Model: "m"})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	acquireAsync(f, ctx, Request{Model: "m", EstK: 12.5, SessionKey: 77, Exclude: map[string]bool{"x": true}})
+	waitQueue(t, f, "m", 1)
+	f.router.mu.Lock()
+	got := f.router.queues["m"][0].req
+	f.router.mu.Unlock()
+	if got.EstK != 12.5 || got.SessionKey != 77 || got.Exclude != nil {
+		t.Fatalf("queued request = %+v", got)
+	}
+	held.Release()
+}

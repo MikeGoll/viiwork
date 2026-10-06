@@ -246,3 +246,69 @@ func TestSmallSamplesDoNotReplaceTheBaseline(t *testing.T) {
 		t.Errorf("baseline rate %d; one big sample among five must not replace 5000", s.MsPer1k)
 	}
 }
+
+// Big samples that answer within the overhead fit a rate of zero. Published,
+// that was rounded up to 1 ms per 1k tokens and saved as the baseline, and
+// every peer predicted this host far faster than any other.
+func TestAFittedRateOfZeroIsNoScore(t *testing.T) {
+	c := &clock{t0}
+	tr := New(c.now)
+	for i := 0; i < 3; i++ {
+		tr.Record("m", c.t, 100, 900*time.Millisecond)
+	}
+	for i := 0; i < 5; i++ {
+		tr.Record("m", c.t, 600, 800*time.Millisecond)
+	}
+	if s, ok := tr.Score("m"); ok {
+		t.Fatalf("score = %+v, want none: the window measured no rate", s)
+	}
+	dir := t.TempDir()
+	if err := tr.Save(dir); err != nil {
+		t.Fatal(err)
+	}
+	if data, err := os.ReadFile(filepath.Join(dir, fileName)); err == nil && len(data) > 4 {
+		t.Fatalf("a baseline was saved: %s", data)
+	}
+}
+
+func TestLoadDropsABaselineWithoutARate(t *testing.T) {
+	dir := t.TempDir()
+	saved := `{"m": {"overhead_ms": 900, "ms_per_1k": 0, "at": "2026-09-29T12:00:00Z", "key": "k"}}`
+	if err := os.WriteFile(filepath.Join(dir, fileName), []byte(saved), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c := &clock{t0}
+	tr := New(c.now)
+	if err := tr.Load(dir); err != nil {
+		t.Fatal(err)
+	}
+	tr.SetKeys(map[string]string{"m": "k"})
+	if s, ok := tr.Score("m"); ok {
+		t.Fatalf("score = %+v, want none", s)
+	}
+}
+
+// A busy model's baseline moves its time on every Score. That alone is saved
+// every saveAge, not every minute.
+func TestBaselineTimeAloneIsSavedRarely(t *testing.T) {
+	c := &clock{t0}
+	tr := New(c.now)
+	dir := t.TempDir()
+	saves := 0
+	for i := 0; i < 30; i++ {
+		feed(tr, c, "m", 5, 4000, 400, 5000)
+		tr.Score("m")
+		tr.mu.Lock()
+		if tr.dirty {
+			saves++
+		}
+		tr.mu.Unlock()
+		if err := tr.Save(dir); err != nil {
+			t.Fatal(err)
+		}
+		c.t = c.t.Add(time.Minute)
+	}
+	if saves < 2 || saves > 4 {
+		t.Fatalf("%d saves in 30 busy minutes, want one per %s", saves, saveAge)
+	}
+}

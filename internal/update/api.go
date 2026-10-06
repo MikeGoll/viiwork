@@ -183,7 +183,7 @@ func (s *Service) activate(_ context.Context, req meshapi.UpdateRequest) (int, a
 	}
 	if c, ok := Compare(req.Version, s.Running); ok {
 		if c == 0 {
-			return http.StatusConflict, fmt.Errorf("%s is already running", req.Version)
+			return http.StatusConflict, fmt.Errorf("%s %s", req.Version, RefusedAlreadyRunning)
 		}
 		if c < 0 && !req.AllowDowngrade {
 			return http.StatusConflict, fmt.Errorf("%s is older than the running %s: pass allow_downgrade, or roll back", req.Version, s.Running)
@@ -199,7 +199,7 @@ func (s *Service) activate(_ context.Context, req meshapi.UpdateRequest) (int, a
 				// The baseline is what the new release must bring back. A
 				// model still loading would be left out of it, so the release
 				// would confirm without ever having to load it.
-				return http.StatusConflict, fmt.Errorf("model %s is still loading (backend %s, %s): activate when it is healthy", m.Name, b.ID, b.Phase)
+				return http.StatusConflict, fmt.Errorf("model %s %s (backend %s, %s): activate when it is healthy", m.Name, RefusedStillLoading, b.ID, b.Phase)
 			}
 		}
 	}
@@ -338,3 +338,13 @@ func transitionError(err error) (int, error) {
 	}
 	return http.StatusInternalServerError, err
 }
+
+// Two of activate's refusals are not the end of a rollout, and `viiwork
+// update` tells them from the rest by these words in the 409's message: a
+// node already on the version is done, and one whose model is loading will
+// take the release once it is healthy. The words are read by CLIs of other
+// versions, so they do not change.
+const (
+	RefusedAlreadyRunning = "is already running"
+	RefusedStillLoading   = "is still loading"
+)

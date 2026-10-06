@@ -34,6 +34,9 @@ func (t *Tracker) Load(dir string) error {
 	defer t.mu.Unlock()
 	for name, b := range saved {
 		b := b
+		if b.MsPer1k < 1 {
+			continue // saved by a version that kept a fitted rate of zero
+		}
 		m := t.get(name)
 		m.base, m.cached = &b, false
 	}

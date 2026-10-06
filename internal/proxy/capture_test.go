@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-// The Flusher assertion drives whether responses stream at all: proxyRequest
+// The Flusher assertion drives whether responses stream at all: stream
 // and streamThinkDisabled both branch on it, and the latter falls back to a
 // buffered io.Copy when it fails. The wrapper must therefore mirror the
 // underlying writer rather than always or never advertising Flush.

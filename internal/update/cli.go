@@ -168,12 +168,15 @@ func (s *Store) FollowCLI(ctx context.Context, version, cli string, logf func(st
 	if !behind {
 		return nil
 	}
-	if err := InstallCLI(cli, data); err != nil {
-		return fmt.Errorf("installing %s at %s: %w", version, cli, err)
-	}
+	// The record first: it says nothing until the launcher has this sha256,
+	// while a launcher installed without it reads at the next start as an
+	// out-of-band install, and the state is reset to it.
 	b, _ := json.Marshal(cliRecord{Version: version, SHA256: sum})
 	if err := durable.WriteFile(s.Dir, cliFile, append(b, '\n')); err != nil {
 		return err
+	}
+	if err := InstallCLI(cli, data); err != nil {
+		return fmt.Errorf("installing %s at %s: %w", version, cli, err)
 	}
 	resolved, err := filepath.EvalSymlinks(cli)
 	if err != nil {

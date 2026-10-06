@@ -264,6 +264,7 @@ type Vendor string
 const (
     VendorNVIDIA Vendor = "nvidia"
     VendorAMD    Vendor = "amd"
+    VendorApple  Vendor = "apple" // an Apple Silicon Mac: one GPU, no device variable
     VendorNone   Vendor = "none"
 )
 ```

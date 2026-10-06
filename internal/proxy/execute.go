@@ -283,18 +283,15 @@ func serveLocal(w http.ResponseWriter, r *http.Request, body []byte, b route.Loc
 	w.WriteHeader(resp.StatusCode)
 	var clientGone bool
 	var upstreamErr error
-	switch {
-	case thinkDisabled && separateReasoning:
-		// The engine already keeps reasoning out of content, in its own
-		// field: there is nothing to rewrite. A client that shows
-		// reasoning_content shows the thinking as it happens; one that does
-		// not ignores the field and reads the answer. Holding it back would
-		// leave an interactive client with a blank screen for as long as
-		// the model thinks.
-		clientGone, upstreamErr = stream(w, resp.Body, cancel)
-	case thinkDisabled:
+	if thinkDisabled && !separateReasoning {
 		clientGone, upstreamErr = streamThinkDisabled(w, resp.Body, cancel)
-	default:
+	} else {
+		// Think on, or an engine that already keeps reasoning out of
+		// content, in its own field: there is nothing to rewrite. A client
+		// that shows reasoning_content shows the thinking as it happens;
+		// one that does not ignores the field and reads the answer. Holding
+		// it back would leave an interactive client with a blank screen for
+		// as long as the model thinks.
 		clientGone, upstreamErr = stream(w, resp.Body, cancel)
 	}
 	if err := meter.finish(); err != nil {

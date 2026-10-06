@@ -54,10 +54,29 @@ See [security.md](security.md).
 
 ## Routing
 
-A request for a model goes to a local backend with a free slot, else to the
-member with the most free slots, else it waits in a FIFO queue on the node that
-received it for up to `routing.queue_timeout` (20 s), then gets 429 with
+A request for a model goes to a host with a free slot, chosen by measured
+speed. When no host has one it waits in a FIFO queue on the node that received
+it for up to `routing.queue_timeout` (20 s), then gets 429 with
 `Retry-After: 2`.
+
+- **Routing follows measured speed** (`routing.performance`, on by default).
+  Every node measures its own time to first token per model and publishes the
+  score on `/v1/capacity`. For a request, each host with a free slot gets a
+  predicted time from its score and the prompt's size, and only hosts within
+  1.25 times the best count. Among those the node that received the request
+  runs it when it is one of them; otherwise the faster a host, the more often
+  it is chosen. A host with no score yet is priced at the fleet's median and
+  gets one request in twenty, so it can earn one.
+- **A session stays on one host.** A request carrying `X-Session-Affinity` or
+  `X-Session-Id` goes to the same host among those that count, whichever node
+  it enters by, and to the same backend on that host while it has a free
+  slot, so a conversation's turns reuse one warm prompt cache. A coding agent
+  should send one of the two headers with a value that is stable for the
+  session.
+- **With no score anywhere, or `routing.performance: false`,** a request goes
+  to a local backend with a free slot, else to the member with the most free
+  slots. With no scores a session header still picks one host; with the key
+  set to false it is ignored.
 
 - **Capacity is polled, membership is gossiped.** Every node polls every alive
   member's `/v1/capacity` once a second. A report older than
