@@ -1,5 +1,39 @@
 # Changelog
 
+## v2.8.3
+
+**Strata v0.1.40.1, and the Radeon VII checkpoint failure fixed.**
+
+- **Both Strata images build Strata v0.1.40.1** (`docker/pins.env`). Upstream
+  rewrote its git history on 2026-10-06, which moved every tag: the v0.1.39
+  commit that v2.8.0 to v2.8.2 pin is no longer what the tag names, so
+  `make docker-strata` of those versions refuses to build.
+- **`saving a checkpoint part failed` is fixed in the gfx906 image.** It was
+  the first long prompt after a load, on a backend of more than one card.
+  The engine saves a checkpoint every 16,384 prompt tokens with a copy on the
+  default stream, while another thread is still capturing its prompt graphs.
+  CUDA lets that through; the ROCm runtime refuses it (`operation would make
+  the legacy stream depend on a capturing blocking stream`), and the refusal
+  invalidates the capture as well. The image's gfx906 patch makes the copy on
+  a stream of the saving thread's own. On nine Radeon VIIs, v0.1.40.1 without
+  the fix failed that prompt two times in two; with it, seven cold first long
+  prompts were read (41,000 to 47,000 tokens, six of them three at once on
+  three backends), and a 200,244-token prompt at 837 tokens per second.
+- **v0.1.40.1 does not compile for gfx906 as released.** The patch carries
+  three more fixes for that ([BUILDS.md](BUILDS.md)); the two v0.1.39 needed
+  are upstream.
+- **The 30-second warm-up stays at its default** and still does not matter to
+  this failure; `strata: {warmup: 0s}` turns it off.
+- **The CUDA image served at v0.1.40.1** on three RTX A4000 at 262,144
+  context: a 200,244-token cold prompt read at 2,527 tokens per second, a
+  41,221-token first prompt after the load at 2,474, 57 to 74 tokens per
+  second generated, cache reuse, streamed reasoning and a tool call, with no
+  respawn. It needs no patch.
+- **Measured, no pin change:** llama.cpp b11451 against the pinned b11371 on
+  two Radeon VIIs (Qwen3.8-27B, 98,304 context): the same answers, tool call
+  and cache reuse, the same decode speed, prompt reading 200 against 208
+  tokens per second at 41,000 tokens. Nothing to gain; the pin stays.
+
 ## v2.8.2
 
 **Fixes from a six-lens review** of the tree, mostly of what v2.7 and v2.8
