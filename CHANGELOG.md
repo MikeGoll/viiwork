@@ -1,5 +1,25 @@
 # Changelog
 
+## v2.9.0
+
+**A request can name the machines it would rather run on.**
+
+- **`?prefer=node-a,node-b`** on an inference endpoint names nodes in order of
+  preference. The first one with a free slot for the model runs the request,
+  ahead of performance routing and of session affinity; when none of them has
+  room the request routes exactly as it would without the list, and a queued
+  request walks its list again each time a slot frees. Unlike the `?host=`
+  pin it never fails a request: an unknown name, a host that is off or one
+  that is full is passed over. A malformed value, or more than eight names,
+  is `400`.
+- **`X-Viiwork-Prefer`** carries the same list for a client that can set a
+  header but not a query parameter. The parameter wins when both are present,
+  `?host=` wins over both, and the header is not sent on to a member or an
+  engine.
+- A session that ran elsewhere while its preferred host was full moves to
+  that host on its next turn and reads its prompt there again; send no list
+  with a session whose cache matters more than the machine.
+
 ## v2.8.3
 
 **Strata v0.1.40.1, and the Radeon VII checkpoint failure fixed.**

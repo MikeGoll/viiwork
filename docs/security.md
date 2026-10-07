@@ -37,7 +37,9 @@ network that also carries IPMI would otherwise be a probe primitive:
 - **`/v1/mesh/prompt` only forwards to mesh members.** The `addr` parameter is
   checked against the API addresses of alive members before anything is fetched.
 - **`?host=` is compared, never dialled.** The value only filters routing
-  candidates by node name; it never becomes an address.
+  candidates by node name; it never becomes an address. The same holds for
+  the names in `?prefer=` and `X-Viiwork-Prefer`, and that header is removed
+  before a request goes to a member or an engine.
 
 Mesh headers are stripped from every incoming request right after verification,
 so no client can smuggle a forwarding claim through and no engine ever sees one.

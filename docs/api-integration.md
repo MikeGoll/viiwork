@@ -464,6 +464,20 @@ dialled, so it cannot reach anything normal routing could not. Through the
 gateway a pinned request may take two hops (gateway → a node serving the
 model → the pinned host); that is expected and invisible to the caller.
 
+**Preferring hosts.** `?prefer=node-a,node-b` names machines in order of
+preference: the first one with a free slot for the model runs the request,
+and when none has room the request goes wherever it would have gone without
+the list. It is the soft form of the pin: an unknown name or a powered-off
+host is passed over rather than answered with `404`, and only a malformed
+value, or more than eight names, is `400`. A client that cannot add a query
+parameter (most OpenAI SDKs append the path to a base URL) sends the same
+list as the `X-Viiwork-Prefer` header; the parameter wins when both are
+present, and `?host=` wins over both. A preferred host is taken even when the
+mesh has measured another as faster, and even when the request's session
+lives elsewhere, so a session that spilled to another host while the
+preferred one was full moves back on its next turn and reads its prompt
+again there. `X-Viiwork-Node` on the response names the machine that ran it.
+
 ## 5. Prompt and output history
 
 The part of the API with real sharp edges. Read this before designing a request

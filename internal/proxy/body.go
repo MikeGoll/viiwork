@@ -69,6 +69,36 @@ func sanitizeHost(s string) (string, bool) {
 	return s, true
 }
 
+// maxPrefer bounds the ?prefer= list. A fleet is a dozen machines and a list
+// names the few a client would rather have.
+const maxPrefer = 8
+
+// parsePrefer validates the ?prefer= list (or its header): node names
+// separated by commas, in order of preference. Blank entries and the literal
+// "mesh" are dropped, so "gb1,mesh" means gb1 and then anywhere, which is
+// what the list means anyway. A malformed name or more than maxPrefer names
+// is (nil, false) and the caller answers 400, for the reason sanitizeHost
+// gives. Like the pin, a name is only ever compared and never dialled.
+func parsePrefer(s string) ([]string, bool) {
+	var out []string
+	for s != "" {
+		var name string
+		name, s, _ = strings.Cut(s, ",")
+		name, ok := sanitizeHost(name)
+		if !ok {
+			return nil, false
+		}
+		if name == "" {
+			continue
+		}
+		if len(out) == maxPrefer {
+			return nil, false
+		}
+		out = append(out, name)
+	}
+	return out, true
+}
+
 // readBodyPresized buffers a request body, sizing the destination from
 // Content-Length when the client supplied a usable one.
 //

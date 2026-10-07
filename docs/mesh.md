@@ -92,6 +92,15 @@ it for up to `routing.queue_timeout` (20 s), then gets 429 with
 - **`?host=<node name>` pins a request to one machine.** The value only filters
   candidates by name; it is never dialled as an address, and a forwarded request
   ignores it.
+- **`?prefer=<node>,<node>` asks for machines in order, when they are free.**
+  The first named node with a free slot for the model runs the request, ahead
+  of measured speed and of the session rule. When none of them has room the
+  request routes as if the list were absent, so a preference never fails or
+  delays a request; a queued request walks its list again each time a slot
+  frees. A name the mesh does not know, or a node that is off, is passed
+  over. `X-Viiwork-Prefer` carries the same list for a client that can set a
+  header but not a query parameter. Like the pin, the names are only compared,
+  and a forwarded request ignores them.
 
 ## Aliases
 

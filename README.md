@@ -184,7 +184,7 @@ driving the fleet. → [docs/security.md](docs/security.md)
 
 | Endpoint | What |
 |---|---|
-| `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings` | Inference, routed by model (`?host=` pins a node) |
+| `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings` | Inference, routed by model (`?host=` pins a node, `?prefer=` names favourites) |
 | `/v1/models` | Every model in the mesh, with context length |
 | `/health` | Node health |
 | `/v1/capacity`, `/v1/fleet/capacity` | Slots and load, this node or the whole mesh |
