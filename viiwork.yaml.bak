@@ -3,7 +3,7 @@ server:
   port: 8080
 
 model:
-  path: models/Qwen3.8-27B-UD-Q4_K_XL.gguf
+  path: models/Muse-Glimmer-30B-UD-Q6_K_XL.gguf
   #context_size: 65536
   context_size: 131072
   n_gpu_layers: -1
@@ -36,40 +36,40 @@ backend:
     #"--n-predict", "32768",
     # --------------------------------
     # ---- Qwen 3.8 Configuration ----
-    "--reasoning-format", "deepseek",
-    "--reasoning-budget", "8192",
-    "--jinja",
-    "--no-context-shift",
-    "--flash-attn", "auto",
-    "--batch-size", "2048",
-    "--ubatch-size", "512",
-    "--no-mmap",
-    "--temperature", "1.0",
-    "--top-p", "0.95",
-    "--top-k", "20",
-    "--min-p", "0.0",
-    "--repeat-penalty", "1.0",
-    "--presence_penalty", "0.0",
-    "--tensor-split", "1,1,1",
-    "--cache-type-k", "q8_0",
-    "--cache-type-v", "q8_0",
-    "--n-predict", "-1",
-    # --------------------------------
-    # ---- Glimmer / Ornith Configuration ----
-    #"--reasoning-format", "auto",
+    #"--reasoning-format", "deepseek",
+    #"--reasoning-budget", "8192",
     #"--jinja",
-    #"--flash-attn", "on",
-    #"--batch-size", "512",
+    #"--no-context-shift",
+    #"--flash-attn", "auto",
+    #"--batch-size", "2048",
     #"--ubatch-size", "512",
-    #"--cache-type-k", "q8_0",
-    #"--cache-type-v", "q8_0",
     #"--no-mmap",
     #"--temperature", "1.0",
     #"--top-p", "0.95",
-    ##"--top-k", "64", #Glimmer
-    #"--top-k", "20", #Ornith 1.5
+    #"--top-k", "20",
+    #"--min-p", "0.0",
     #"--repeat-penalty", "1.0",
+    #"--presence_penalty", "0.0",
     #"--tensor-split", "1,1,1",
+    #"--cache-type-k", "q8_0",
+    #"--cache-type-v", "q8_0",
+    #"--n-predict", "-1",
+    # --------------------------------
+    # ---- Glimmer / Ornith Configuration ----
+    "--reasoning-format", "auto",
+    "--jinja",
+    "--flash-attn", "on",
+    "--batch-size", "512",
+    "--ubatch-size", "512",
+    "--cache-type-k", "q8_0",
+    "--cache-type-v", "q8_0",
+    "--no-mmap",
+    "--temperature", "1.0",
+    "--top-p", "0.95",
+    "--top-k", "64", #Glimmer
+    #"--top-k", "20", #Ornith 1.5
+    "--repeat-penalty", "1.0",
+    "--tensor-split", "1,1,1",
     # --------------------------------
     # ---- Granite ----
     #"--reasoning-format", "auto",
