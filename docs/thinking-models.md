@@ -2,6 +2,10 @@
 
 Some models (e.g. Gemma 4, Qwen3, DeepSeek-R1) produce a reasoning phase before the final answer. The backend (`llama-server`) may return all output in `reasoning_content` with an empty `content` field, regardless of what the client requests. Viiwork's proxy normalizes this so clients always get usable responses.
 
+> **This fork differs from upstream:** omitting `think` passes the response
+> through as `"think": true` does. Only an explicit `"think": false` strips
+> thinking. See the summary table below.
+
 ## Disabling thinking
 
 Add `"think": false` to your request body:
@@ -61,9 +65,13 @@ the backend sent it, `reasoning_content` and all.
 
 | `think` value | Non-streaming | Streaming |
 |---|---|---|
-| omitted (**default**) | Think blocks stripped, answer in `content` | Think tokens suppressed, answer streamed as `delta.content` |
+| omitted (**default**) | Transparent passthrough *(this fork; upstream strips)* | Transparent passthrough *(this fork; upstream suppresses)* |
 | `false` | Think blocks stripped, answer in `content` | Think tokens suppressed, answer streamed as `delta.content` |
 | `true` | Transparent passthrough | Transparent passthrough |
+
+An engine that keeps reasoning in its own field is the exception when
+streaming: its stream is passed through whatever `think` says. Today that is
+[Strata](#strata).
 
 ## Diagnosing "the model is dumping its monologue into content"
 
@@ -124,3 +132,21 @@ completion_tokens 1767, content ~100 tokens  ->  ~1667 spent thinking
 ```
 
 Worth checking before concluding a model is slow — decode rate may be fine.
+
+## Strata
+
+Strata sends reasoning as `reasoning_content` and uses no `<think>` tags, and
+its answer always follows as `content`. Its engine declares that
+(`engine.ReasoningSeparator`), so the "models without think tags" rule above
+does not apply to it. With `think` unset:
+
+- A plain (non-streamed) reply drops the reasoning and returns the answer.
+- A **streamed** reply is passed through as the server sent it: the reasoning
+  arrives in `delta.reasoning_content` and the answer in `delta.content`. A
+  client that shows `reasoning_content` (the `/chat` page does) shows the
+  thinking as it happens; one that does not ignores the field. Either way
+  `content` holds the answer and nothing else.
+
+`"think": true` gives the same stream. To avoid thinking altogether, send
+`"reasoning_effort": "none"`; to bound it for every client, set
+`"reasoning_budget_tokens"` in the Strata JSON.

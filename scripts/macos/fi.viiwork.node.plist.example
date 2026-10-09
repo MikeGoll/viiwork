@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  A user LaunchAgent running a viiwork node on an Apple Silicon Mac.
+  See docs/macos.md.
+
+    cp scripts/macos/fi.viiwork.node.plist.example ~/Library/LaunchAgents/fi.viiwork.node.plist
+    # replace every /Users/YOU below: launchd expands neither ~ nor $HOME
+    mkdir -p ~/Library/Logs/viiwork
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/fi.viiwork.node.plist
+
+  Reload the config:  launchctl kill HUP gui/$(id -u)/fi.viiwork.node
+  Restart:            launchctl kickstart -k gui/$(id -u)/fi.viiwork.node
+  Stop and remove:    launchctl bootout gui/$(id -u)/fi.viiwork.node
+
+  A user agent rather than a system daemon: it runs only while you are logged
+  in, which is also when Metal is available to it, and it needs no root.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>fi.viiwork.node</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/YOU/.local/bin/viiwork</string>
+    <string>--config</string>
+    <string>/Users/YOU/.config/viiwork/viiwork.yaml</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <!-- sysctl, vm_stat and ioreg live in /usr/sbin and /usr/bin, route in
+         /sbin. llama-server is named by path in viiwork.yaml, so it need not
+         be on PATH. -->
+    <key>PATH</key>
+    <string>/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <!-- A secured mesh: uncomment, and chmod 600 this file, since it then
+         holds the secret.
+    <key>VIIWORK_MESH_SECRET</key>
+    <string>…</string>
+    -->
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+
+  <!-- launchd sends SIGTERM, then SIGKILL after this many seconds. The node
+       leaves the mesh, gives in-flight requests health.respawn_grace (60 s by
+       default) and stops its backends, so this must exceed that grace, as the
+       container stop grace does on Linux. -->
+  <key>ExitTimeOut</key>
+  <integer>90</integer>
+
+  <key>StandardOutPath</key>
+  <string>/Users/YOU/Library/Logs/viiwork/viiwork.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/YOU/Library/Logs/viiwork/viiwork.log</string>
+</dict>
+</plist>

@@ -141,11 +141,15 @@ async function capacity() {
     const resp = await fetch("/v1/cluster");
     if (!resp.ok) return 0;
     const c = await resp.json();
+    // The owning node is the member whose API address the row carried; a row
+    // with no address was served by the node this page talks to.
+    const members = c.members || [];
     if (addr) {
-      const peer = (c.peers || []).find(p => p.addr === addr);
-      if (peer && peer.prompt_history) return peer.prompt_history;
+      const owner = members.find(m => m.status && (m.addr + ":" + m.status.api_port) === addr);
+      if (owner && owner.status.prompt_history) return owner.status.prompt_history;
     }
-    return (c.local && c.local.prompt_history) || 0;
+    const view = members.find(m => m.node === c.view);
+    return (view && view.status && view.status.prompt_history) || 0;
   } catch { return 0; }
 }
 
@@ -158,11 +162,27 @@ async function fetchEntry() {
   return await resp.json();
 }
 
+// The reply's size and average rate. gen_ms is the time from the first token
+// to the end, so the rate is generation alone. Without it (a plain reply, or a
+// request another node executed) the only time known is the whole request,
+// prompt reading and queueing included, and the label says so. Nothing is
+// shown when the node never saw a token count.
+function rateText(data) {
+  const n = data && data.output_tokens;
+  if (!n) return "";
+  const tokens = n + (n === 1 ? " token" : " tokens");
+  if (data.gen_ms >= 100) return tokens + " · " + (n / (data.gen_ms / 1000)).toFixed(1) + " tok/s";
+  if (data.elapsed_ms >= 100) return tokens + " · " + (n / (data.elapsed_ms / 1000)).toFixed(1) + " tok/s over the whole request";
+  return tokens;
+}
+
 function renderMeta(data, extra) {
   const bits = [];
   if (host) bits.push("@" + host);
   if (data && data.t) bits.push(new Date(data.t * 1000).toLocaleString());
   if (data && data.elapsed_ms) bits.push((data.elapsed_ms / 1000).toFixed(2) + "s");
+  const rate = rateText(data);
+  if (rate) bits.push(rate);
   if (extra) bits.push(extra);
   if (task) bits.push("task " + task);
   if (addr) bits.push(addr);

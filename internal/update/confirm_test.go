@@ -1,0 +1,204 @@
+package update
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/janit/viiwork/v2/meshapi"
+)
+
+type fakeClock struct{ t time.Time }
+
+func (c *fakeClock) now() time.Time { return c.t }
+
+func backends(states map[string]string, phase string) func() []meshapi.ModelStatus {
+	return func() []meshapi.ModelStatus {
+		var bs []meshapi.BackendStatus
+		for id, st := range states {
+			bs = append(bs, meshapi.BackendStatus{ID: id, Status: st, Phase: phase})
+		}
+		return []meshapi.ModelStatus{{Name: "m", Backends: bs}}
+	}
+}
+
+func pendingState(t *testing.T, baseline ...string) (string, *Confirmer, *fakeClock, *int) {
+	t.Helper()
+	dir := t.TempDir()
+	SaveState(dir, State{Current: "v2.6.0", LastGood: "v2.5.0", Pending: &Pending{Version: "v2.6.0", Baseline: baseline}})
+	clock := &fakeClock{t: time.Unix(1790000000, 0)}
+	restarts := 0
+	c := &Confirmer{Store: NewStore(dir), Running: "v2.6.0", Window: 10 * time.Minute, Now: clock.now,
+		Restart: func() { restarts++ }, Log: func(string, ...any) {}}
+	return dir, c, clock, &restarts
+}
+
+func TestConfirmWhenTheBaselineIsBack(t *testing.T) {
+	dir, c, clock, restarts := pendingState(t, "m/0", "m/1")
+	states := map[string]string{"m/0": meshapi.StatusStarting, "m/1": meshapi.StatusHealthy, "m/2": meshapi.StatusDead}
+	c.Backends = backends(states, "")
+	if c.Step() {
+		t.Fatal("confirmed while m/0 was still starting")
+	}
+	if _, ok := c.Deadline(); !ok {
+		t.Error("no deadline published")
+	}
+	states["m/0"] = meshapi.StatusHealthy // m/2 was dead before; it does not count
+	clock.t = clock.t.Add(time.Minute)
+	if !c.Step() {
+		t.Fatal("did not confirm")
+	}
+	s, _ := LoadState(dir)
+	if s.LastGood != "v2.6.0" || s.Pending != nil || *restarts != 0 {
+		t.Errorf("after confirm: %+v, restarts %d", s, *restarts)
+	}
+}
+
+func TestRollBackOnADeadBaselineBackend(t *testing.T) {
+	dir, c, _, restarts := pendingState(t, "m/0")
+	c.Backends = backends(map[string]string{"m/0": meshapi.StatusDead}, "")
+	if !c.Step() || *restarts != 1 {
+		t.Fatalf("restarts = %d", *restarts)
+	}
+	if s, _ := LoadState(dir); s.Current != "v2.5.0" || s.Pending != nil {
+		t.Errorf("after rollback: %+v", s)
+	}
+}
+
+func TestRollBackAtTheDeadlineButNotWhileFetching(t *testing.T) {
+	dir, c, clock, restarts := pendingState(t, "m/0")
+	fetching := backends(map[string]string{"m/0": meshapi.StatusStarting}, "fetching")
+	starting := backends(map[string]string{"m/0": meshapi.StatusStarting}, "")
+	c.Backends = starting
+	c.Step() // deadline = t0 + 10m
+	c.Backends = fetching
+	clock.t = clock.t.Add(5 * time.Minute)
+	c.Step() // 5 minutes of fetching: deadline moves to t0 + 15m
+	c.Backends = starting
+	clock.t = clock.t.Add(7 * time.Minute) // t0 + 12m
+	if c.Step() || *restarts != 0 {
+		t.Fatal("rolled back although fetching time does not count")
+	}
+	clock.t = clock.t.Add(4 * time.Minute) // t0 + 16m
+	if !c.Step() || *restarts != 1 {
+		t.Fatal("did not roll back after the deadline")
+	}
+	if s, _ := LoadState(dir); s.Current != "v2.5.0" {
+		t.Errorf("state = %+v", s)
+	}
+}
+
+func TestNothingToConfirm(t *testing.T) {
+	_, c, _, restarts := pendingState(t)
+	c.Backends = backends(nil, "")
+	if !c.Step() || *restarts != 0 {
+		t.Error("an empty baseline confirms at once")
+	}
+	dir, c2, _, _ := pendingState(t, "m/0")
+	c2.Running = "v2.5.0" // this process is not the pending release
+	c2.Backends = backends(map[string]string{"m/0": meshapi.StatusDead}, "")
+	if !c2.Step() {
+		t.Error("kept watching a release it is not running")
+	}
+	if s, _ := LoadState(dir); s.Pending == nil {
+		t.Error("changed a state it does not own")
+	}
+}
+
+// Once a release confirms, the engine builds no kept release is pinned to
+// may go: PruneEngines sees the state as confirmed, and only then.
+func TestConfirmPrunesEngines(t *testing.T) {
+	_, c, _, _ := pendingState(t, "m/0")
+	var kept []State
+	c.PruneEngines = func(s State) { kept = append(kept, s) }
+	c.Backends = backends(map[string]string{"m/0": meshapi.StatusStarting}, "")
+	c.Step()
+	if len(kept) != 0 {
+		t.Fatal("pruned before confirming")
+	}
+	c.Backends = backends(map[string]string{"m/0": meshapi.StatusHealthy}, "")
+	if !c.Step() {
+		t.Fatal("did not confirm")
+	}
+	if len(kept) != 1 || kept[0].Current != "v2.6.0" || kept[0].LastGood != "v2.6.0" || kept[0].Previous != "v2.5.0" {
+		t.Errorf("pruned with %+v", kept)
+	}
+}
+
+func TestRollbackDoesNotPruneEngines(t *testing.T) {
+	_, c, _, _ := pendingState(t, "m/0")
+	c.PruneEngines = func(State) { t.Error("pruned on a rollback") }
+	c.Backends = backends(map[string]string{"m/0": meshapi.StatusDead}, "")
+	c.Step()
+}
+
+// One unreadable state.json (a hand edit mid-write, a transient EIO) does not
+// end the confirmer for the rest of the run: it keeps polling and confirms
+// once the state reads again.
+func TestConfirmerSurvivesAnUnreadableState(t *testing.T) {
+	dir, c, clock, _ := pendingState(t, "m/0")
+	good, err := os.ReadFile(filepath.Join(dir, "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Backends = backends(map[string]string{"m/0": meshapi.StatusHealthy}, "")
+	os.WriteFile(filepath.Join(dir, "state.json"), []byte("{"), 0o644)
+	if c.Step() {
+		t.Fatal("finished on an unreadable state")
+	}
+	os.WriteFile(filepath.Join(dir, "state.json"), good, 0o644)
+	clock.t = clock.t.Add(5 * time.Second)
+	if !c.Step() {
+		t.Fatal("did not confirm once the state read again")
+	}
+	if s, _ := LoadState(dir); s.LastGood != "v2.6.0" {
+		t.Errorf("state %+v", s)
+	}
+}
+
+// The CLI follows a confirm, never a rollback.
+func TestFollowCLIOnConfirmOnly(t *testing.T) {
+	_, c, _, _ := pendingState(t, "m/0")
+	var followed []string
+	c.FollowCLI = func(s State) { followed = append(followed, s.LastGood) }
+	c.Backends = backends(map[string]string{"m/0": meshapi.StatusHealthy}, "")
+	if !c.Step() || len(followed) != 1 || followed[0] != "v2.6.0" {
+		t.Errorf("confirm: followed %v", followed)
+	}
+	_, c, _, _ = pendingState(t, "m/0")
+	followed = nil
+	c.FollowCLI = func(s State) { followed = append(followed, s.LastGood) }
+	c.Backends = backends(map[string]string{"m/0": meshapi.StatusDead}, "")
+	if !c.Step() || len(followed) != 0 {
+		t.Errorf("rollback: followed %v", followed)
+	}
+}
+
+// A baseline backend the operator parked or took out of the config during
+// the window is gone from the status on purpose. Waiting for it rolled a
+// good release back at the deadline.
+func TestABaselineBackendNoLongerWantedIsNotWaitedFor(t *testing.T) {
+	dir, c, clock, restarts := pendingState(t, "m/0", "parked/0")
+	c.Backends = backends(map[string]string{"m/0": meshapi.StatusHealthy}, "")
+	c.Wanted = func(id string) bool { return id != "parked/0" }
+	clock.t = clock.t.Add(time.Hour)
+	if !c.Step() {
+		t.Fatal("did not finish")
+	}
+	if s, _ := LoadState(dir); s.LastGood != "v2.6.0" || s.Pending != nil || *restarts != 0 {
+		t.Errorf("after confirm: %+v, restarts %d", s, *restarts)
+	}
+}
+
+// One that is wanted and missing is still waited for, and rolls back.
+func TestAMissingBaselineBackendStillWantedRollsBack(t *testing.T) {
+	_, c, clock, restarts := pendingState(t, "m/0", "n/0")
+	c.Backends = backends(map[string]string{"m/0": meshapi.StatusHealthy}, "")
+	c.Wanted = func(string) bool { return true }
+	c.Step()
+	clock.t = clock.t.Add(time.Hour)
+	if !c.Step() || *restarts != 1 {
+		t.Fatalf("restarts = %d, want a rollback", *restarts)
+	}
+}

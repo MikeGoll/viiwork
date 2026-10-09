@@ -1,0 +1,83 @@
+# Builds release archives for a v* tag and uploads them with an UNSIGNED
+# SHA256SUMS. Signing happens on the publisher's machine after a local rebuild
+# matches these bytes (scripts/release-sign.sh); this workflow holds no key.
+# The private repository carries no tags, so this only ever runs in the public
+# one. docs/releases.md. Checked by scripts/release-workflow_test.py.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to build again
+        required: true
+
+# Nothing by default; each job asks for what it needs.
+permissions: {}
+
+# A tag push and a manual run for the same tag never interleave their uploads.
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  # Through env, never interpolated into a script: build-release.sh validates
+  # it as a version before using it.
+  TAG: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+  # The build and every third-party action run here, with a token that can
+  # only read: none of them can move a tag or touch the release.
+  build:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Build
+        run: ./scripts/build-release.sh "$TAG" dist
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release
+          path: |
+            dist/*.tar.gz
+            dist/SHA256SUMS
+          if-no-files-found: error
+
+  # Only gh runs with write access.
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release
+          path: dist
+      - name: Publish (unsigned)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if gh release view "$TAG" --json assets --jq '.assets[].name' 2>/dev/null | grep -qx 'SHA256SUMS.sig'; then
+            echo "$TAG is already signed; re-uploading would put new archives under the old signature" >&2
+            exit 1
+          fi
+          # A beta is a pre-release, so it never becomes the latest release.
+          prerelease=
+          case "$TAG" in *-*) prerelease=--prerelease ;; esac
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --verify-tag --title "$TAG" $prerelease \
+              --notes "Unsigned until SHA256SUMS.sig is attached. Nodes refuse a release without a valid signature."
+          fi
+          gh release upload "$TAG" dist/*.tar.gz dist/SHA256SUMS --clobber

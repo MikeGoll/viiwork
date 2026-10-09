@@ -1,0 +1,395 @@
+package proxy
+
+// The fleet aggregator is a pure function over the capacity reports a node
+// already holds, so every rule in the design is testable without a mesh.
+// Design: docs/superpowers/specs/2026-09-13-fleet-capacity-api-design.md
+
+import (
+	"testing"
+	"time"
+
+	"github.com/janit/viiwork/v2/mesh/capacity"
+	"github.com/janit/viiwork/v2/meshapi"
+)
+
+var fleetNow = time.Date(2026, 9, 13, 15, 0, 0, 0, time.UTC)
+
+// rep is a member report received age ago.
+func rep(node, api string, age time.Duration, models ...meshapi.ModelCapacity) capacity.Report {
+	return capacity.Report{Node: node, APIAddr: api, Received: fleetNow.Add(-age), Models: models}
+}
+
+func mc(name string, slots, busy, queued int, ctx int64) meshapi.ModelCapacity {
+	return meshapi.ModelCapacity{Name: name, Engine: "llamacpp", Slots: slots, Busy: busy, Queued: queued, Ctx: ctx}
+}
+
+// model returns the named model from a response.
+func model(t *testing.T, r meshapi.FleetCapacityResponse, name string) meshapi.FleetModel {
+	t.Helper()
+	for _, m := range r.Models {
+		if m.Name == name {
+			return m
+		}
+	}
+	t.Fatalf("model %q not in response %+v", name, r.Models)
+	return meshapi.FleetModel{}
+}
+
+func host(t *testing.T, m meshapi.FleetModel, node string) meshapi.FleetHost {
+	t.Helper()
+	for _, h := range m.Hosts {
+		if h.Node == node {
+			return h
+		}
+	}
+	t.Fatalf("host %q not in %+v", node, m.Hosts)
+	return meshapi.FleetHost{}
+}
+
+// The headline case: three hosts of one model sum, which is the number
+// /v1/capacity cannot give.
+func TestFleetSumsFreshHosts(t *testing.T) {
+	got := aggregateFleet("gb1",
+		[]meshapi.ModelCapacity{mc("tg", 12, 1, 0, 4096)},
+		[]capacity.Report{
+			rep("gb2", "10.0.0.2:8086", 300*time.Millisecond, mc("tg", 12, 0, 0, 4096)),
+			rep("gb3", "10.0.0.3:8086", 400*time.Millisecond, mc("tg", 12, 2, 1, 4096)),
+		}, fleetNow, 3*time.Second)
+
+	m := model(t, got, "tg")
+	if m.Slots != 36 {
+		t.Errorf("slots = %d, want 36", m.Slots)
+	}
+	if m.Busy != 3 {
+		t.Errorf("busy = %d, want 3", m.Busy)
+	}
+	if m.Free != 33 {
+		t.Errorf("free = %d, want 33 (slots - busy)", m.Free)
+	}
+	// Decided in the design: queued is the fleet sum, not this node's.
+	if m.Queued != 1 {
+		t.Errorf("queued = %d, want 1 summed across hosts", m.Queued)
+	}
+	if len(m.Hosts) != 3 {
+		t.Errorf("hosts = %d, want 3", len(m.Hosts))
+	}
+}
+
+// The answering node is not in Reports(); it must be counted exactly once.
+func TestFleetCountsTheAnsweringNodeExactlyOnce(t *testing.T) {
+	got := aggregateFleet("gb1",
+		[]meshapi.ModelCapacity{mc("tg", 12, 0, 0, 4096)},
+		// A report from ourselves, which a mesh can produce transiently.
+		[]capacity.Report{rep("gb1", "10.0.0.1:8086", time.Millisecond, mc("tg", 12, 0, 0, 4096))},
+		fleetNow, 3*time.Second)
+
+	m := model(t, got, "tg")
+	if m.Slots != 12 {
+		t.Errorf("slots = %d, want 12: the answering node must not be double counted", m.Slots)
+	}
+	if len(m.Hosts) != 1 {
+		t.Errorf("hosts = %d, want 1", len(m.Hosts))
+	}
+}
+
+// A stale host is listed and excluded, and — the rule that matters — its
+// numbers are ABSENT rather than zero.
+func TestFleetListsStaleHostWithoutNumbers(t *testing.T) {
+	got := aggregateFleet("gb1",
+		[]meshapi.ModelCapacity{mc("tg", 12, 0, 0, 4096)},
+		[]capacity.Report{
+			rep("gb3", "10.0.0.3:8086", 9*time.Second, mc("tg", 12, 5, 0, 4096)),
+		}, fleetNow, 3*time.Second)
+
+	m := model(t, got, "tg")
+	if m.Slots != 12 {
+		t.Errorf("slots = %d, want 12: a stale host contributes nothing", m.Slots)
+	}
+	h := host(t, m, "gb3")
+	if !h.Stale {
+		t.Error("gb3 must be marked stale")
+	}
+	if h.Slots != nil || h.Busy != nil || h.Free != nil || h.Ctx != nil {
+		t.Errorf("a stale host must omit its numbers, not zero them: %+v", h)
+	}
+	if h.AgeMS < 8000 {
+		t.Errorf("age_ms = %d, want ~9000: age is the one thing still assertable", h.AgeMS)
+	}
+}
+
+// A fresh host's zero IS a measurement and must be present, which is why the
+// fields are pointers rather than omitempty ints.
+func TestFleetKeepsAFreshZeroAsAMeasurement(t *testing.T) {
+	got := aggregateFleet("gb1", nil,
+		[]capacity.Report{rep("gb2", "10.0.0.2:8086", time.Millisecond, mc("tg", 4, 0, 0, 4096))},
+		fleetNow, 3*time.Second)
+
+	h := host(t, model(t, got, "tg"), "gb2")
+	if h.Busy == nil {
+		t.Fatal("a fresh host's busy must be present even when 0")
+	}
+	if *h.Busy != 0 {
+		t.Errorf("busy = %d, want 0", *h.Busy)
+	}
+}
+
+// A model only a stale host serves must still appear. Vanishing reads as "no
+// such model", which is a different and wrong answer.
+func TestFleetKeepsAModelServedOnlyByAStaleHost(t *testing.T) {
+	got := aggregateFleet("gb1", nil,
+		[]capacity.Report{rep("gb3", "10.0.0.3:8086", 9*time.Second, mc("tg", 12, 0, 0, 4096))},
+		fleetNow, 3*time.Second)
+
+	m := model(t, got, "tg")
+	if m.Slots != 0 {
+		t.Errorf("slots = %d, want 0", m.Slots)
+	}
+	if len(m.Hosts) != 1 || !m.Hosts[0].Stale {
+		t.Errorf("the model must remain listed with its stale host: %+v", m.Hosts)
+	}
+}
+
+// Hosts may disagree about context. A consumer sizing prompts needs the floor.
+func TestFleetCtxIsTheMinimumAcrossFreshHosts(t *testing.T) {
+	got := aggregateFleet("gb1",
+		[]meshapi.ModelCapacity{mc("tg", 4, 0, 0, 8192)},
+		[]capacity.Report{
+			rep("gb2", "10.0.0.2:8086", time.Millisecond, mc("tg", 4, 0, 0, 4096)),
+			// A stale host must not drag the floor down with a value we do not
+			// currently stand behind.
+			rep("gb3", "10.0.0.3:8086", 9*time.Second, mc("tg", 4, 0, 0, 512)),
+		}, fleetNow, 3*time.Second)
+
+	m := model(t, got, "tg")
+	if m.Ctx != 4096 {
+		t.Errorf("ctx = %d, want 4096 (min over FRESH hosts)", m.Ctx)
+	}
+}
+
+// Free must never go negative, however the counters arrive.
+func TestFleetFreeNeverNegative(t *testing.T) {
+	got := aggregateFleet("gb1", []meshapi.ModelCapacity{mc("tg", 2, 5, 0, 4096)}, nil, fleetNow, 3*time.Second)
+
+	m := model(t, got, "tg")
+	if m.Free != 0 {
+		t.Errorf("free = %d, want 0", m.Free)
+	}
+	if h := host(t, m, "gb1"); h.Free == nil || *h.Free != 0 {
+		t.Errorf("per-host free must also clamp at 0: %+v", h)
+	}
+}
+
+// Free sums each host's clamped free: one oversubscribed host must not cancel
+// spare capacity on another, since the router can still place work there.
+func TestFleetFreeSumsPerHostClampedFree(t *testing.T) {
+	got := aggregateFleet("gb1",
+		[]meshapi.ModelCapacity{mc("tg", 2, 6, 0, 4096)}, // oversubscribed by 4
+		[]capacity.Report{rep("gb2", "10.0.0.2:8086", time.Second, mc("tg", 4, 1, 0, 4096))},
+		fleetNow, 3*time.Second)
+
+	m := model(t, got, "tg")
+	if m.Free != 3 {
+		t.Errorf("free = %d, want 3 (0 on gb1 + 3 on gb2)", m.Free)
+	}
+}
+
+// The view is the answering node, and stale_after is published so a consumer
+// can interpret age_ms without guessing.
+func TestFleetReportsItsOwnViewAndStaleAfter(t *testing.T) {
+	got := aggregateFleet("gb1", nil, nil, fleetNow, 3*time.Second)
+
+	if got.View != "gb1" {
+		t.Errorf("view = %q, want gb1", got.View)
+	}
+	if got.StaleAfterS != 3 {
+		t.Errorf("stale_after_s = %v, want 3", got.StaleAfterS)
+	}
+}
+
+// Models are ordered by name, so a consumer diffing two polls sees real
+// changes rather than map iteration order.
+func TestFleetModelsAreOrderedByName(t *testing.T) {
+	got := aggregateFleet("gb1",
+		[]meshapi.ModelCapacity{mc("zeta", 1, 0, 0, 1), mc("alpha", 1, 0, 0, 1)},
+		[]capacity.Report{rep("gb2", "10.0.0.2:8086", time.Millisecond, mc("mid", 1, 0, 0, 1))},
+		fleetNow, 3*time.Second)
+
+	var names []string
+	for _, m := range got.Models {
+		names = append(names, m.Name)
+	}
+	want := []string{"alpha", "mid", "zeta"}
+	for i := range want {
+		if i >= len(names) || names[i] != want[i] {
+			t.Fatalf("models %v, want %v", names, want)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ?model= filtering, and the alias resolution it does first.
+//
+// An alias is a name for capacity, so it has to name capacity here too: a
+// consumer configured with the alias we recommend must not be told the fleet
+// cannot serve it. The four rows below are Resolver's whole contract; the
+// resolver itself is tested in internal/alias.
+
+// fleetModels is a two-model fleet view to filter.
+func fleetModels() []meshapi.FleetModel {
+	return []meshapi.FleetModel{
+		{Name: "gemma-4-31B-it", Slots: 12},
+		{Name: "translategemma-27b-it", Slots: 36},
+	}
+}
+
+// names is the filtered result, for comparing without host detail.
+func names(models []meshapi.FleetModel) []string {
+	out := []string{}
+	for _, m := range models {
+		out = append(out, m.Name)
+	}
+	return out
+}
+
+func TestFilterModelResolvesALiveAlias(t *testing.T) {
+	resolve := func(requested string) (string, string, error) {
+		if requested == "stable-translate" {
+			return "translategemma-27b-it", "stable-translate", nil
+		}
+		return requested, "", nil
+	}
+
+	got, from := filterModel(fleetModels(), "stable-translate", resolve)
+
+	if len(got) != 1 || got[0].Name != "translategemma-27b-it" {
+		t.Errorf("filtered to %v, want the alias target", names(got))
+	}
+	if from != "stable-translate" {
+		t.Errorf("resolved_from = %q, want the alias that was asked for", from)
+	}
+}
+
+// The unserved alias: Resolve says 503, and the endpoint must not. Empty is
+// already this endpoint's word for "no capacity for that model", and a 503
+// reads to a consumer as "the platform is down".
+func TestFilterModelSwallowsAnUnresolvableAlias(t *testing.T) {
+	resolve := func(requested string) (string, string, error) {
+		return "", "", &ResolveError{Status: 503, Message: "no node serves it"}
+	}
+
+	got, from := filterModel(fleetModels(), "stable-prose-hq", resolve)
+
+	if len(got) != 0 {
+		t.Errorf("filtered to %v, want an empty list", names(got))
+	}
+	if from != "" {
+		t.Errorf("resolved_from = %q, want empty: nothing was resolved", from)
+	}
+}
+
+// A real name, an unknown name and a deleted alias all resolve to themselves.
+func TestFilterModelLeavesARealNameAlone(t *testing.T) {
+	identity := func(requested string) (string, string, error) { return requested, "", nil }
+
+	got, from := filterModel(fleetModels(), "gemma-4-31B-it", identity)
+	if len(got) != 1 || got[0].Name != "gemma-4-31B-it" {
+		t.Errorf("filtered to %v, want the real model", names(got))
+	}
+	if from != "" {
+		t.Errorf("resolved_from = %q, want empty for a real name", from)
+	}
+
+	none, from := filterModel(fleetModels(), "nope", identity)
+	if len(none) != 0 {
+		t.Errorf("unknown name gave %v, want an empty list", names(none))
+	}
+	if from != "" {
+		t.Errorf("resolved_from = %q, want empty for an unknown name", from)
+	}
+}
+
+// Shadowing: the resolver already answers "the real model wins" by returning
+// the requested name, so the fleet view must agree with the inference path.
+func TestFilterModelPrefersTheRealModelOverAnAliasOfTheSameName(t *testing.T) {
+	shadowing := func(requested string) (string, string, error) { return requested, "", nil }
+
+	got, from := filterModel(fleetModels(), "gemma-4-31B-it", shadowing)
+
+	if len(got) != 1 || got[0].Name != "gemma-4-31B-it" {
+		t.Errorf("filtered to %v, want the real model to win", names(got))
+	}
+	if from != "" {
+		t.Errorf("resolved_from = %q, want empty: the real model was not reached through an alias", from)
+	}
+}
+
+// Deps says "nil = identity" and this path must honour it, or a node built
+// without an alias store would filter on nothing.
+func TestFilterModelTreatsANilResolverAsIdentity(t *testing.T) {
+	got, from := filterModel(fleetModels(), "translategemma-27b-it", nil)
+
+	if len(got) != 1 || got[0].Name != "translategemma-27b-it" {
+		t.Errorf("filtered to %v, want the named model", names(got))
+	}
+	if from != "" {
+		t.Errorf("resolved_from = %q, want empty", from)
+	}
+}
+
+// No ?model= at all: the whole fleet, and no resolution attempted.
+func TestFilterModelWithoutAQueryReturnsEverything(t *testing.T) {
+	resolve := func(requested string) (string, string, error) {
+		t.Errorf("resolver called for an absent ?model=, with %q", requested)
+		return requested, "", nil
+	}
+
+	got, from := filterModel(fleetModels(), "", resolve)
+
+	if len(got) != 2 {
+		t.Errorf("filtered to %v, want both models untouched", names(got))
+	}
+	if from != "" {
+		t.Errorf("resolved_from = %q, want empty", from)
+	}
+}
+
+// A host with no slots contributes no capacity the router will ever use, so it
+// must not set the floor either. A draining backend reporting a small window
+// would otherwise depress the number every client sizes its prompts against,
+// while never accepting one of them.
+func TestFleetCtxIgnoresHostsWithNoSlots(t *testing.T) {
+	got := aggregateFleet("gb1",
+		[]meshapi.ModelCapacity{mc("tg", 4, 0, 0, 98304)},
+		[]capacity.Report{
+			rep("gb2", "10.0.0.2:8086", time.Millisecond, mc("tg", 0, 0, 0, 4096)),
+		}, fleetNow, 3*time.Second)
+
+	m := model(t, got, "tg")
+	if m.Ctx != 98304 {
+		t.Errorf("ctx = %d, want 98304 — a slotless host sets no floor", m.Ctx)
+	}
+	// It stays in the list with its real numbers: "gb2 is draining" and "gb2
+	// is gone" call for different reactions, as for a stale host.
+	if h := host(t, m, "gb2"); h.Slots == nil || *h.Slots != 0 || h.Ctx == nil || *h.Ctx != 4096 {
+		t.Errorf("gb2 = %+v, want its measured zero and its own window", h)
+	}
+}
+
+// When NO host has a slot, there is no window anyone can promise. Absent is
+// not zero: Ctx is omitempty, so the field simply does not appear, and every
+// serializer over it decides for itself what a format with no "unknown" does.
+func TestFleetCtxIsUnsetWhenNoHostHasSlots(t *testing.T) {
+	got := aggregateFleet("gb1",
+		[]meshapi.ModelCapacity{mc("tg", 0, 0, 0, 98304)},
+		[]capacity.Report{
+			rep("gb2", "10.0.0.2:8086", time.Millisecond, mc("tg", 0, 0, 0, 4096)),
+		}, fleetNow, 3*time.Second)
+
+	m := model(t, got, "tg")
+	if m.Ctx != 0 {
+		t.Errorf("ctx = %d, want 0 (absent) — nothing can serve it", m.Ctx)
+	}
+	if len(m.Hosts) != 2 {
+		t.Errorf("hosts = %+v, want both still listed", m.Hosts)
+	}
+}

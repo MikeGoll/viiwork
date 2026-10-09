@@ -106,13 +106,14 @@ func Open(cfg Config, logger *log.Logger) (*Store, error) {
 		slots   int
 		lanes   int
 		recSize int
+		period  int64
 	}{
-		{&s.nodeMinute, "node-minute.ring", cfg.MinuteSlots, 1, NodeRecordSize},
-		{&s.nodeHour, "node-hour.ring", cfg.HourSlots, 1, NodeRecordSize},
-		{&s.nodeDay, "node-day.ring", cfg.DaySlots, 1, NodeRecordSize},
-		{&s.gpuMinute, "gpu-minute.ring", cfg.MinuteSlots, lanes, GPURecordSize},
-		{&s.gpuHour, "gpu-hour.ring", cfg.HourSlots, lanes, GPURecordSize},
-		{&s.gpuDay, "gpu-day.ring", cfg.DaySlots, lanes, GPURecordSize},
+		{&s.nodeMinute, "node-minute.ring", cfg.MinuteSlots, 1, NodeRecordSize, 60},
+		{&s.nodeHour, "node-hour.ring", cfg.HourSlots, 1, NodeRecordSize, 3600},
+		{&s.nodeDay, "node-day.ring", cfg.DaySlots, 1, NodeRecordSize, 86400},
+		{&s.gpuMinute, "gpu-minute.ring", cfg.MinuteSlots, lanes, GPURecordSize, 60},
+		{&s.gpuHour, "gpu-hour.ring", cfg.HourSlots, lanes, GPURecordSize, 3600},
+		{&s.gpuDay, "gpu-day.ring", cfg.DaySlots, lanes, GPURecordSize, 86400},
 	}
 
 	for _, spec := range specs {
@@ -127,6 +128,7 @@ func Open(cfg Config, logger *log.Logger) (*Store, error) {
 			// look exactly like a node that had simply been quiet.
 			s.logger.Printf("%s geometry changed, history discarded", spec.name)
 		}
+		r.period = spec.period
 		*spec.target = r
 	}
 
@@ -220,11 +222,14 @@ func minuteBucket(ts time.Time) int64 { return ts.Unix() / 60 }
 func hourBucket(ts time.Time) int64   { return ts.Unix() / 3600 }
 
 // dayBucket keys on local midnight, so a "day" is the day the operator lives
-// in and matches the midnight reset cost tracking already does.
-func (s *Store) dayBucket(ts time.Time) (int64, int64) {
+// in and matches the midnight reset cost tracking already does. It returns the
+// bucket, the day's start and its end — the next local midnight, which is 23 or
+// 25 hours later across a DST change rather than a fixed 24.
+func (s *Store) dayBucket(ts time.Time) (bucket int64, start, end time.Time) {
 	local := ts.In(s.cfg.Location)
-	midnight := time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, s.cfg.Location)
-	return midnight.Unix() / 86400, midnight.Unix()
+	start = time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, s.cfg.Location)
+	end = time.Date(local.Year(), local.Month(), local.Day()+1, 0, 0, 0, 0, s.cfg.Location)
+	return start.Unix() / 86400, start, end
 }
 
 // WriteMinute records one finalised minute and refreshes the hour and day it
@@ -256,11 +261,10 @@ func (s *Store) rollUp(ts time.Time) error {
 		return err
 	}
 
-	dayBucket, dayStart := s.dayBucket(ts)
-	from := time.Unix(dayStart, 0)
-	return s.rollUpInto(s.nodeDay, s.gpuDay, dayBucket, dayStart,
-		s.readNodeRange(s.nodeHour, from, from.Add(24*time.Hour)),
-		s.readGPURange(s.gpuHour, from, from.Add(24*time.Hour)))
+	dayBucket, from, to := s.dayBucket(ts)
+	return s.rollUpInto(s.nodeDay, s.gpuDay, dayBucket, from.Unix(),
+		s.readNodeRange(s.nodeHour, from, to),
+		s.readGPURange(s.gpuHour, from, to))
 }
 
 func (s *Store) rollUpInto(nodeRing, gpuRing *ring, bucket, startTS int64, nodes []NodeRecord, gpus []GPURecord) error {
@@ -375,12 +379,12 @@ func (s *Store) ReadGPU(tier Tier, from, to time.Time) []GPURecord {
 }
 
 func (s *Store) readNodeRange(r *ring, from, to time.Time) []NodeRecord {
-	buf, err := r.all()
+	lo, hi := from.Unix(), to.Unix()
+	buf, err := r.window(lo, hi)
 	if err != nil {
 		s.logger.Printf("reading ring: %v", err)
 		return nil
 	}
-	lo, hi := from.Unix(), to.Unix()
 	var out []NodeRecord
 	for off := 0; off+NodeRecordSize <= len(buf); off += NodeRecordSize {
 		rec := decodeNode(buf[off : off+NodeRecordSize])
@@ -393,12 +397,12 @@ func (s *Store) readNodeRange(r *ring, from, to time.Time) []NodeRecord {
 }
 
 func (s *Store) readGPURange(r *ring, from, to time.Time) []GPURecord {
-	buf, err := r.all()
+	lo, hi := from.Unix(), to.Unix()
+	buf, err := r.window(lo, hi)
 	if err != nil {
 		s.logger.Printf("reading ring: %v", err)
 		return nil
 	}
-	lo, hi := from.Unix(), to.Unix()
 	var out []GPURecord
 	for off := 0; off+GPURecordSize <= len(buf); off += GPURecordSize {
 		rec := decodeGPU(buf[off : off+GPURecordSize])
@@ -422,6 +426,11 @@ func (s *Store) ModelIndex(name string) (uint16, error) { return s.models.Index(
 func (s *Store) ModelName(idx uint16) string { return s.models.Name(idx) }
 
 // ByModel totals attributed energy per model over a window.
+//
+// Use TierHour (or TierMinute) for energy totals. TierDay records carry
+// CoveredS saturated at 65535 s, so a day-tier total undercounts well-covered
+// days by up to ~24%; the day tier is for mean watts and for history older
+// than the hour ring retains.
 func (s *Store) ByModel(tier Tier, from, to time.Time) map[string]float64 {
 	out := make(map[string]float64)
 	for _, rec := range s.ReadGPU(tier, from, to) {
@@ -455,16 +464,18 @@ func (s *Store) KWh24h() float64 {
 
 // KWh30d is whole-node energy over the rolling last 30 days.
 //
-// Read from the day tier, not the hour tier: 30 days is 720 hourly buckets
-// against 30 daily ones, and nothing here needs the resolution. The current,
-// partly elapsed day is included — roll-ups rewrite a bucket's own slot rather
-// than appending, so today's is already there and already current.
+// Read from the hour tier, not the day tier. A day bucket's CoveredS is a
+// uint16 and saturates at 65535 s, three quarters of a full 86400 s day, so
+// day-tier kWh undercounts every well-covered day by up to ~24%. An hour
+// (3600 s) always fits. The 720 hourly buckets are read directly by slot, and
+// the current, partly elapsed hour is included — roll-ups rewrite a bucket's
+// own slot rather than appending, so it is already there and already current.
 //
-// Changes once a day plus once per roll-up of the current day, so like KWh24h
-// it does not trouble the pushed snapshot's change detection.
+// Changes once per roll-up, about once a minute, so like KWh24h it does not
+// trouble the pushed snapshot's change detection.
 func (s *Store) KWh30d() float64 {
 	now := time.Now()
-	return s.NodeKWh(TierDay, now.AddDate(0, 0, -30), now.Add(time.Minute))
+	return s.NodeKWh(TierHour, now.AddDate(0, 0, -30), now.Add(time.Minute))
 }
 
 func (s *Store) NodeKWh(tier Tier, from, to time.Time) float64 {

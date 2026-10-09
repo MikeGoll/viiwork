@@ -1,0 +1,16 @@
++-o AGXAcceleratorG15X  <class AGXAcceleratorG15X, id 0x10000070b, registered, matched, active, busy 0 (0 ms), retain 42>
+    {
+      "IOMatchedAtBoot" = Yes
+      "vendor-id" = <6b100000>
+      "GPURawCounterBundleName" = "AGXGPURawCounterBundle"
+      "MetalPluginClassName" = "AGXG15CDevice"
+      "IONameMatched" = "gpu,t6034"
+      "MetalPluginName" = "AGXMetalG15X_M1"
+      "PerformanceStatistics" = {"In use system memory (driver)"=0,"Alloc system memory"=9916399616,"Tiler Utilization %"=30,"recoveryCount"=0,"lastRecoveryTime"=0,"Renderer Utilization %"=29,"TiledSceneBytes"=4521984,"Device Utilization %"=30,"SplitSceneCount"=0,"Allocated PB Size"=236716032,"In use system memory"=2613116928}
+      "IOGLBundleName" = "AppleMetalOpenGLRenderer"
+      "IOSourceVersion" = "353.14"
+      "IOPersonalityPublisher" = "com.apple.AGXG15C"
+      "IOClass" = "AGXAcceleratorG15X"
+      "IOProviderClass" = "IOPCIDevice"
+    }
+

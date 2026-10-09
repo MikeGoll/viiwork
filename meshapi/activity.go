@@ -89,8 +89,12 @@ const (
 // The tensor-split form exists because a group has no single GPU id. Labelling
 // such a backend by its GPUID field alone rendered every backend in a
 // multi-group fleet as "gpu--1", leaving no way to attribute a request to a
-// backend from the client side — this label is also the X-GPU-Backend response
-// header, not just a log string.
+// backend from the client side.
+//
+// A viiwork 2 node does not emit this form: its local destination is the
+// backend ID (see BackendID and RequestStarted). BackendLabel stays because
+// this package is public and other implementations may still use it; a
+// dashboard treats the destination as an opaque string either way.
 func BackendLabel(gpuID int, gpuIDs []int) string {
 	if len(gpuIDs) > 0 {
 		parts := make([]string, len(gpuIDs))
@@ -107,8 +111,10 @@ func BackendLabel(gpuID int, gpuIDs []int) string {
 // dispatch, and once on the peer itself against its own local backend.
 func PeerLabel(addr string) string { return "peer " + addr }
 
-// RequestStarted builds the Message for a request beginning on dest, where
-// dest comes from BackendLabel or PeerLabel.
+// RequestStarted builds the Message for a request beginning on dest. A
+// viiwork 2 node passes the backend ID ("Qwen3.8-27B/0", see BackendID) for a
+// local backend and PeerLabel(node name) for a forward to a member. Readers
+// must treat dest as opaque: only the arrow and the terminal word are grammar.
 func RequestStarted(model, dest string) string {
 	return model + arrowSep + dest
 }

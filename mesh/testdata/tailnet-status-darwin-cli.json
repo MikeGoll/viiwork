@@ -1,0 +1,11 @@
+{"Version":"1.102.1","TUN":false,"BackendState":"Running","HaveNodeKey":true,"AuthURL":"",
+ "TailscaleIPs":["100.64.0.200","fd7a:115c:a1e0::200"],
+ "Self":{"ID":"n9","NodeID":"nodeid9","HostName":"mac-a","DNSName":"mac-a.example.ts.net.","OS":"macOS",
+         "TailscaleIPs":["100.64.0.200","fd7a:115c:a1e0::200"],"Online":true,"Active":true},
+ "MagicDNSSuffix":"example.ts.net",
+ "CurrentTailnet":{"Name":"example.github","MagicDNSSuffix":"example.ts.net","MagicDNSEnabled":true},
+ "CertDomains":null,"ExtraRecords":null,
+ "Peer":{
+   "nodekey:aa":{"HostName":"node-a","DNSName":"node-a.example.ts.net.","OS":"linux","TailscaleIPs":["100.64.0.2","fd7a:115c:a1e0::2"],"Online":true},
+   "nodekey:bb":{"HostName":"node-b","DNSName":"node-b.example.ts.net.","OS":"linux","TailscaleIPs":["100.64.0.3","fd7a:115c:a1e0::3"],"Online":false}},
+ "User":{},"ClientVersion":{"RunningLatest":true}}

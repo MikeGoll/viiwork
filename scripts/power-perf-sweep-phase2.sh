@@ -24,8 +24,8 @@
 #      above 1100 MHz (default 1000). These are conservative vs the rocm
 #      OD_RANGE.
 #
-# Phase 2 of the GPU power workstream from
-# docs/superpowers/specs/2026-04-09-gfx906-fork-phase-3-reassessment-addendum.md
+# Phase 2 of the GPU power workstream (design notes are internal and not part
+# of this repository)
 #
 # Usage:
 #   GPU=3 ./scripts/power-perf-sweep-phase2.sh
@@ -34,9 +34,10 @@
 set -euo pipefail
 
 GPU="${GPU:-3}"
-IMAGE="${IMAGE:-viiwork:gfx906}"
+IMAGE="${IMAGE:-viiwork}"
 MODEL_FILE="${MODEL_FILE:-gemma-4-26B-A4B-it-UD-Q3_K_XL.gguf}"
-MODELS_DIR="${MODELS_DIR:-/home/janit/viiwork-private/models}"
+REPO_DIR="${REPO_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+MODELS_DIR="${MODELS_DIR:-${REPO_DIR}/models}"
 PROMPT_FILE="${PROMPT_FILE:-/tmp/rocprof-prompts/helsinki.txt}"
 N_PREDICT="${N_PREDICT:-50}"
 RUNS="${RUNS:-2}"

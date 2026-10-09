@@ -14,6 +14,10 @@ import (
 
 var thinkBlockRe = regexp.MustCompile(`(?s)<think>.*?</think>\s*`)
 
+// maxSSELine is the longest SSE line the think rewriter reads. A longer one
+// aborts the response rather than being passed on in part.
+const maxSSELine = 256 << 10
+
 // closeThinkTag is the byte form of the closing tag, used to disqualify the
 // suppress fast path before any decoding happens.
 var closeThinkTag = []byte("</think>")
@@ -233,10 +237,13 @@ func rewriteThinkResponse(body []byte) []byte {
 		if !hasReasoning {
 			continue
 		}
+		// A tool call is the answer: reasoning in front of one is dropped,
+		// not moved into content beside the call.
+		if calls, _ := msg["tool_calls"].([]any); len(calls) > 0 {
+			continue
+		}
 
 		if reasoning == "" {
-			delete(msg, "reasoning_content")
-			modified = true
 			continue
 		}
 
@@ -249,8 +256,6 @@ func rewriteThinkResponse(body []byte) []byte {
 			cleaned = strings.TrimSpace(reasoning)
 		}
 		msg["content"] = cleaned
-		delete(msg, "reasoning_content")
-		modified = true
 	}
 
 	if !modified {
@@ -274,15 +279,18 @@ func rewriteThinkResponse(body []byte) []byte {
 // and emitted as a final content chunk so the client gets something.
 //
 // Returns true if the client disconnected early.
-func streamThinkDisabled(w http.ResponseWriter, body io.Reader, cancel func()) (clientAborted bool) {
+func streamThinkDisabled(w http.ResponseWriter, body io.Reader, cancel func()) (clientAborted bool, upstreamErr error) {
 	f, ok := w.(http.Flusher)
 	if !ok {
-		io.Copy(w, body)
-		return false
+		_, err := io.Copy(w, body)
+		return false, err
 	}
 
+	// The buffer starts small and grows to the 256 KiB line cap only for a
+	// stream that needs it: a fixed 256 KiB per request was pure garbage for
+	// the ordinary few-hundred-byte chunk.
 	scanner := bufio.NewScanner(body)
-	scanner.Buffer(make([]byte, 256*1024), 256*1024)
+	scanner.Buffer(make([]byte, 0, 4096), maxSSELine)
 
 	inThinkBlock := false
 	var thinkBuf strings.Builder         // buffer reasoning tokens for salvage on truncation
@@ -326,7 +334,12 @@ func streamThinkDisabled(w http.ResponseWriter, body io.Reader, cancel func()) (
 			// Empty lines, SSE comments — pass through
 			if _, err := writeRawLine(w, line); err != nil {
 				cancel()
-				return true
+				return true, nil
+			}
+			// A keep-alive comment is all a client sees while thinking is
+			// suppressed: it must leave now, not with the next chunk.
+			if len(line) > 0 {
+				f.Flush()
 			}
 			continue
 		}
@@ -335,7 +348,7 @@ func streamThinkDisabled(w http.ResponseWriter, body io.Reader, cancel func()) (
 		if bytes.Equal(payload, donePayload) {
 			if _, err := io.WriteString(w, "data: [DONE]\n\n"); err != nil {
 				cancel()
-				return true
+				return true, nil
 			}
 			f.Flush()
 			continue
@@ -355,7 +368,7 @@ func streamThinkDisabled(w http.ResponseWriter, body io.Reader, cancel func()) (
 		if !inThinkBlock && !bytes.Contains(payload, reasoningKey) {
 			if _, err := writeSSEData(w, payload); err != nil {
 				cancel()
-				return true
+				return true, nil
 			}
 			f.Flush()
 			continue
@@ -380,6 +393,9 @@ func streamThinkDisabled(w http.ResponseWriter, body io.Reader, cancel func()) (
 				probe.Choices[0].Delta.Content == nil &&
 				(probe.Choices[0].FinishReason == nil || *probe.Choices[0].FinishReason == "") {
 				reasoning := *probe.Choices[0].Delta.ReasoningContent
+				if reasoning != "" {
+					noteGenerated(w)
+				}
 				// Mirrors the else-branch of the in-think-block case below.
 				if thinkBuf.Len()+len(reasoning) <= maxThinkBufSize {
 					thinkBuf.WriteString(reasoning)
@@ -388,11 +404,29 @@ func streamThinkDisabled(w http.ResponseWriter, body io.Reader, cancel func()) (
 			}
 		}
 
+		// RENAME FAST PATH. A model whose server splits reasoning out without
+		// <think> tags (llama-server's reasoning format) sends every token as
+		// delta.reasoning_content, and outside a think block the slow path
+		// below only renames that key to content. Doing the rename on the
+		// bytes gives the same chunk without the map decode and re-encode.
+		// Like the suppress path it is a strict subset: anything it cannot
+		// prove falls through unchanged.
+		if !inThinkBlock && renameFastPath {
+			if at, ok := untaggedReasoningKey(payload); ok {
+				if _, err := writeRenamedReasoning(w, payload, at); err != nil {
+					cancel()
+					return true, nil
+				}
+				f.Flush()
+				continue
+			}
+		}
+
 		var chunk map[string]any
 		if err := json.Unmarshal(payload, &chunk); err != nil {
 			if _, err := writeSSEData(w, payload); err != nil {
 				cancel()
-				return true
+				return true, nil
 			}
 			f.Flush()
 			continue
@@ -412,7 +446,7 @@ func streamThinkDisabled(w http.ResponseWriter, body io.Reader, cancel func()) (
 		if !ok {
 			if _, err := emitSSE(w, chunk); err != nil {
 				cancel()
-				return true
+				return true, nil
 			}
 			f.Flush()
 			continue
@@ -431,7 +465,7 @@ func streamThinkDisabled(w http.ResponseWriter, body io.Reader, cancel func()) (
 				// If we're in an unclosed think block, salvage before emitting.
 				if fr, _ := cm["finish_reason"].(string); fr != "" && inThinkBlock && thinkBuf.Len() > 0 {
 					if aborted := emitSalvage(w, f, cancel, &thinkBuf, ensureTemplate()); aborted {
-						return true
+						return true, nil
 					}
 					inThinkBlock = false
 				}
@@ -440,11 +474,16 @@ func streamThinkDisabled(w http.ResponseWriter, body io.Reader, cancel func()) (
 			}
 
 			reasoning, hasReasoning := delta["reasoning_content"].(string)
+			if reasoning != "" {
+				// Generated, whether it is then suppressed or renamed: the
+				// reply's token count includes it, so its time must too.
+				noteGenerated(w)
+			}
 			if !hasReasoning {
 				// No reasoning_content — check for finish_reason with unclosed think
 				if fr, _ := cm["finish_reason"].(string); fr != "" && inThinkBlock && thinkBuf.Len() > 0 {
 					if aborted := emitSalvage(w, f, cancel, &thinkBuf, ensureTemplate()); aborted {
-						return true
+						return true, nil
 					}
 					inThinkBlock = false
 				}
@@ -507,15 +546,18 @@ func streamThinkDisabled(w http.ResponseWriter, body io.Reader, cancel func()) (
 			if _, err := emitSSE(w, chunk); err != nil {
 				log.Printf("[debug] stream think-disabled: client write error: %v", err)
 				cancel()
-				return true
+				return true, nil
 			}
 			f.Flush()
 		}
 	}
+	// A read error, or a line longer than maxSSELine (bufio.ErrTooLong), ends
+	// the stream before the backend did. Returned, not logged: the caller
+	// aborts the response so the client cannot take it for a complete one.
 	if err := scanner.Err(); err != nil {
-		log.Printf("[debug] stream think-disabled: scanner error (backend may have died): %v", err)
+		return false, err
 	}
-	return false
+	return false, nil
 }
 
 // emitSalvage extracts clean content from buffered reasoning and emits it
@@ -563,6 +605,60 @@ func extractAfterThinkClose(s string) string {
 		return ""
 	}
 	return strings.TrimLeft(s[idx+len("</think>"):], "\n\r")
+}
+
+// renameFastPath enables the rename fast path; tests turn it off to compare
+// its output with the slow path's.
+var renameFastPath = true
+
+var (
+	quotedReasoningKey = []byte(`"reasoning_content"`)
+	quotedContentKey   = []byte(`"content"`)
+	openThinkTag       = []byte("<think>")
+	jsonEscapeU        = []byte(`\u`)
+	sseFrameOpen       = []byte("data: ")
+	sseFrameEnd        = []byte("\n\n")
+)
+
+// untaggedReasoningKey reports where the "reasoning_content" key of a chunk
+// sits when renaming that key to "content" is exactly what the slow path of
+// streamThinkDisabled would do outside a think block: one choice, whose delta
+// has a string reasoning_content, no content, and no <think> tag in it.
+//
+// Every guard is on the safe side. No \u escape anywhere, because one could
+// spell "<think>" in a way the byte check cannot see. No "content" key
+// anywhere, because a delta that has one keeps it and drops the reasoning.
+// Exactly one "reasoning_content" token, so the one found is the delta's key
+// (inside a JSON string the quotes would be escaped).
+func untaggedReasoningKey(payload []byte) (int, bool) {
+	if bytes.Contains(payload, openThinkTag) || bytes.Contains(payload, jsonEscapeU) ||
+		bytes.Contains(payload, quotedContentKey) || bytes.Count(payload, quotedReasoningKey) != 1 {
+		return 0, false
+	}
+	var probe sseChunkProbe
+	if err := json.Unmarshal(payload, &probe); err != nil ||
+		len(probe.Choices) != 1 ||
+		probe.Choices[0].Delta == nil ||
+		probe.Choices[0].Delta.ReasoningContent == nil ||
+		probe.Choices[0].Delta.Content != nil {
+		return 0, false
+	}
+	return bytes.Index(payload, quotedReasoningKey), true
+}
+
+// writeRenamedReasoning writes payload as an SSE data frame with the key at
+// offset at renamed from "reasoning_content" to "content". The value is kept
+// byte for byte.
+func writeRenamedReasoning(w io.Writer, payload []byte, at int) (int, error) {
+	n := 0
+	for _, part := range [...][]byte{sseFrameOpen, payload[:at], quotedContentKey, payload[at+len(quotedReasoningKey):], sseFrameEnd} {
+		m, err := w.Write(part)
+		n += m
+		if err != nil {
+			return n, err
+		}
+	}
+	return n, nil
 }
 
 // writeSSEData writes an already-encoded chunk as an SSE data frame without

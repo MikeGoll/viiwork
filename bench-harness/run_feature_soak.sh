@@ -179,10 +179,10 @@ log "configs: ${SORTED_CONFIGS[*]}"
 # Pre-flight: stop anything on the soak GPUs
 if docker ps --format '{{.Names}}' | grep -qx viiwork-gfx906; then
   log "stopping legacy viiwork-gfx906 (overlaps soak GPUs)"
-  (cd "${REPO_DIR}" && docker compose -f configs/docker-compose.gfx906.yaml down 2>/dev/null || true)
+  (cd "${REPO_DIR}" && docker compose -f configs/private/v1-archive/docker-compose.gfx906.yaml down 2>/dev/null || true)
 fi
-(cd "${REPO_DIR}" && docker compose -f configs/docker-compose.soak-prod.yaml down 2>/dev/null || true)
-(cd "${REPO_DIR}" && docker compose -f configs/docker-compose.soak-fork.yaml down 2>/dev/null || true)
+(cd "${REPO_DIR}" && docker compose -f configs/private/v1-archive/docker-compose.soak-prod.yaml down 2>/dev/null || true)
+(cd "${REPO_DIR}" && docker compose -f configs/private/v1-archive/docker-compose.soak-fork.yaml down 2>/dev/null || true)
 teardown
 
 for name in "${SORTED_CONFIGS[@]}"; do

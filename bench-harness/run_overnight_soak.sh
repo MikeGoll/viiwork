@@ -59,8 +59,8 @@ teardown_all() {
   # project with production and a sweep would kill the prod container.
   # Each soak compose file now sets its own `name:` so this is belt-and-
   # braces, but the rule still stands.
-  (cd "${REPO_DIR}" && docker compose -f configs/docker-compose.soak-prod.yaml down >/dev/null 2>&1 || true)
-  (cd "${REPO_DIR}" && docker compose -f configs/docker-compose.soak-fork.yaml down >/dev/null 2>&1 || true)
+  (cd "${REPO_DIR}" && docker compose -f configs/private/v1-archive/docker-compose.soak-prod.yaml down >/dev/null 2>&1 || true)
+  (cd "${REPO_DIR}" && docker compose -f configs/private/v1-archive/docker-compose.soak-fork.yaml down >/dev/null 2>&1 || true)
 }
 
 wait_healthy() {
@@ -78,7 +78,7 @@ wait_healthy() {
 
 run_phase() {
   local phase="$1"        # prod | fork
-  local compose="$2"      # configs/docker-compose.soak-prod.yaml
+  local compose="$2"      # configs/private/v1-archive/docker-compose.soak-prod.yaml
   local container="$3"    # viiwork-soak-prod
   local csv_label="$4"    # prod | fork
   local csv_out="$5"
@@ -125,14 +125,14 @@ log "GPU pool: ${GPUS[*]}; backend ports: ${BACKEND_PORTS[*]}; concurrency=${CON
 # and any leftover soak containers. Production viiwork (GPUs 0-2) untouched.
 if docker ps --format '{{.Names}}' | grep -qx viiwork-gfx906; then
   log "stopping legacy viiwork-gfx906 (uses GPUs 4-6, overlaps soak pool)"
-  (cd "${REPO_DIR}" && docker compose -f configs/docker-compose.gfx906.yaml down)
+  (cd "${REPO_DIR}" && docker compose -f configs/private/v1-archive/docker-compose.gfx906.yaml down)
 fi
 teardown_all
 
-run_phase prod configs/docker-compose.soak-prod.yaml viiwork-soak-prod prod \
+run_phase prod configs/private/v1-archive/docker-compose.soak-prod.yaml viiwork-soak-prod prod \
   "${PROD_CSV}" "${PROD_LOG}" "${PROD_CONTAINER_LOG}"
 
-run_phase fork configs/docker-compose.soak-fork.yaml viiwork-soak-fork fork \
+run_phase fork configs/private/v1-archive/docker-compose.soak-fork.yaml viiwork-soak-fork fork \
   "${FORK_CSV}" "${FORK_LOG}" "${FORK_CONTAINER_LOG}"
 
 log "writing comparison summary"

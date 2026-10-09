@@ -46,6 +46,7 @@ type TemplateData struct {
 // StepError is returned when a pipeline step fails at the HTTP level.
 type StepError struct {
 	Step    string
+	Model   string
 	Status  int
 	Message string
 }
@@ -193,20 +194,20 @@ func (e *Executor) callModel(ctx context.Context, stepName, model, systemPrompt,
 
 	if resp.StatusCode == http.StatusServiceUnavailable {
 		log.Printf("[debug] pipeline step %q: 503 from backend: %s", stepName, string(body))
-		return "", &StepError{Step: stepName, Status: 503, Message: string(body)}
+		return "", &StepError{Step: stepName, Model: model, Status: 503, Message: string(body)}
 	}
 	if resp.StatusCode != http.StatusOK {
 		log.Printf("[debug] pipeline step %q: HTTP %d from backend: %s", stepName, resp.StatusCode, string(body))
-		return "", &StepError{Step: stepName, Status: resp.StatusCode, Message: string(body)}
+		return "", &StepError{Step: stepName, Model: model, Status: resp.StatusCode, Message: string(body)}
 	}
 
 	var chatResp chatResponse
 	if err := json.Unmarshal(body, &chatResp); err != nil {
-		return "", &StepError{Step: stepName, Status: resp.StatusCode, Message: fmt.Sprintf("parse response: %v", err)}
+		return "", &StepError{Step: stepName, Model: model, Status: resp.StatusCode, Message: fmt.Sprintf("parse response: %v", err)}
 	}
 
 	if len(chatResp.Choices) == 0 || chatResp.Choices[0].Message.Content == "" {
-		return "", &StepError{Step: stepName, Status: resp.StatusCode, Message: "empty content in response"}
+		return "", &StepError{Step: stepName, Model: model, Status: resp.StatusCode, Message: "empty content in response"}
 	}
 
 	return chatResp.Choices[0].Message.Content, nil

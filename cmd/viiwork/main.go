@@ -1,383 +1,403 @@
+// Command viiwork is a viiwork 2 node: one process per machine that runs its
+// models, joins the mesh and serves the API. `viiwork alias ...` manages the
+// mesh's model aliases through a node's API, `viiwork top` watches the mesh,
+// `viiwork init` sets up a machine, `viiwork stop` and `start` stop and
+// start its node, and `viiwork down` and `up` park and unpark its models.
 package main
 
 import (
 	"context"
-	"crypto/rand"
+	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
-	"log"
+	"io"
 	"net/http"
 	"os"
 	"os/signal"
-	"strings"
+	"runtime"
 	"syscall"
 	"time"
 
-	"github.com/janit/viiwork/energy"
-	"github.com/janit/viiwork/internal/activity"
-	"github.com/janit/viiwork/internal/balancer"
-	"github.com/janit/viiwork/internal/config"
-	"github.com/janit/viiwork/internal/cost"
-	"github.com/janit/viiwork/internal/gpu"
-	"github.com/janit/viiwork/internal/logging"
-	"github.com/janit/viiwork/internal/model"
-	"github.com/janit/viiwork/internal/peer"
-	"github.com/janit/viiwork/internal/pipeline"
-	"github.com/janit/viiwork/internal/power"
-	"github.com/janit/viiwork/internal/process"
-	"github.com/janit/viiwork/internal/proxy"
+	"github.com/janit/viiwork/v2/internal/aliascli"
+	"github.com/janit/viiwork/v2/internal/config"
+	"github.com/janit/viiwork/v2/internal/cost"
+	"github.com/janit/viiwork/v2/internal/engine"
+	"github.com/janit/viiwork/v2/internal/enginesync"
+	"github.com/janit/viiwork/v2/internal/joincode"
+	"github.com/janit/viiwork/v2/internal/modelscli"
+	"github.com/janit/viiwork/v2/internal/node"
+	"github.com/janit/viiwork/v2/internal/parrot"
+	"github.com/janit/viiwork/v2/internal/release"
+	"github.com/janit/viiwork/v2/internal/setup"
+	"github.com/janit/viiwork/v2/internal/setup/install"
+	"github.com/janit/viiwork/v2/internal/setup/nodectl"
+	"github.com/janit/viiwork/v2/internal/setup/prompt"
+	"github.com/janit/viiwork/v2/internal/setup/uninstall"
+	"github.com/janit/viiwork/v2/internal/top"
+	"github.com/janit/viiwork/v2/internal/top/term"
+	"github.com/janit/viiwork/v2/internal/update"
+	"github.com/janit/viiwork/v2/internal/updatecli"
 )
 
+// version is stamped at build time: -ldflags "-X main.version=...".
 var version = "dev"
 
-func generateNodeID() string {
-	b := make([]byte, 8)
-	rand.Read(b)
-	return fmt.Sprintf("viiwork-%x", b)
+// llamaCppPin is the llama.cpp release this build was cut against
+// (docker/pins.env), stamped by scripts/gobuild.sh. Empty when unstamped.
+var llamaCppPin = ""
+
+// llamaCppMacSHA256 is the sha256 of the pin's macOS arm64 asset, stamped
+// beside it. The release signature covers this binary, so it covers the
+// engine a Mac downloads by it too.
+var llamaCppMacSHA256 = ""
+
+type runEnv struct {
+	stdout, stderr io.Writer
+	lookupEnv      func(string) (string, bool)
+	hostname       func() (string, error)
+	exec           func(path string, argv, envv []string) error
+	stdin          io.Reader
+	// interactive reports whether stdin is a terminal: only then does a
+	// missing config start the setup wizard. nil means no.
+	interactive func() bool
+	euid        func() int // nil = os.Geteuid
 }
 
 func main() {
-	proxy.Version = version
+	os.Exit(run(os.Args[1:], runEnv{stdout: os.Stdout, stderr: os.Stderr, lookupEnv: os.LookupEnv, hostname: os.Hostname, exec: syscall.Exec,
+		stdin: os.Stdin, interactive: func() bool { return interactive(os.Stdin, os.Stdout) }}))
+}
 
+// interactive reports whether a person is at the terminal: only then may a
+// missing config start the setup wizard.
+func interactive(in, out *os.File) bool {
+	return term.IsTerminal(in) && term.IsTerminal(out)
+}
+
+// run is the whole command; it returns the exit code.
+func run(args []string, env runEnv) int {
+	if len(args) > 0 && args[0] == "alias" {
+		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+		defer stop()
+		return aliascli.Run(ctx, args[1:], aliascli.Env{
+			Stdout: env.stdout, Stderr: env.stderr, LookupEnv: env.lookupEnv,
+			Hostname: env.hostname, Client: &http.Client{}, ReadFile: os.ReadFile,
+			Plist: launchAgentPlist(),
+		})
+	}
+
+	if len(args) > 0 && args[0] == "top" {
+		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+		defer stop()
+		return top.Run(ctx, args[1:], top.Env{
+			Stdout: env.stdout, Stderr: env.stderr, Client: &http.Client{},
+			ReadFile: os.ReadFile, LookupEnv: env.lookupEnv, Now: time.Now,
+			Interactive: func() bool { return term.IsTerminal(os.Stdin) && term.IsTerminal(os.Stdout) },
+			OpenScreen:  func() (top.Screen, error) { return term.Open(os.Stdin, os.Stdout) },
+			Keys:        os.Stdin,
+		})
+	}
+	if len(args) > 0 && args[0] == "update" {
+		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+		defer stop()
+		return updatecli.Run(ctx, args[1:], updatecli.Env{
+			Stdout: env.stdout, Stderr: env.stderr, LookupEnv: env.lookupEnv, Hostname: env.hostname,
+			Plist: launchAgentPlist(), DefaultConfig: osConfigPath(),
+		})
+	}
+	if len(args) > 0 && args[0] == "join-code" {
+		return joincode.Run(context.Background(), args[1:], joincode.Env{
+			Stdout: env.stdout, Stderr: env.stderr, LookupEnv: env.lookupEnv,
+			Client: &http.Client{}, ReadFile: os.ReadFile, Plist: launchAgentPlist(),
+		})
+	}
+
+	if len(args) > 0 && args[0] == "engine-sync" {
+		return engineSync(args[1:], env)
+	}
+	if len(args) > 0 && args[0] == "uninstall" {
+		in := env.stdin
+		if in == nil {
+			in = os.Stdin
+		}
+		return uninstall.Main(context.Background(), args[1:], uninstall.Env{Stdin: in, Stdout: env.stdout, Stderr: env.stderr})
+	}
+	if len(args) > 0 && (args[0] == "stop" || args[0] == "start") {
+		return nodectl.Main(context.Background(), args[0], args[1:], nodectl.Env{Stdout: env.stdout, Stderr: env.stderr})
+	}
+	if len(args) > 0 && (args[0] == "down" || args[0] == "up") {
+		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+		defer stop()
+		return modelscli.Run(ctx, args[0], args[1:], updatecli.Env{
+			Stdout: env.stdout, Stderr: env.stderr, LookupEnv: env.lookupEnv, Hostname: env.hostname,
+			Plist: launchAgentPlist(),
+		})
+	}
+	if len(args) > 0 && args[0] == "init" {
+		fs := flag.NewFlagSet("init", flag.ContinueOnError)
+		fs.SetOutput(io.Discard)
+		configPath := fs.String("config", osConfigPath(), "")
+		if err := fs.Parse(args[1:]); err != nil || fs.NArg() > 0 {
+			fmt.Fprint(env.stderr, "usage: viiwork init [--config path]\n\nAsks a few questions, shows every file it will write, and on a yes writes them and starts the node.\n")
+			return 2
+		}
+		return runInit(*configPath, env)
+	}
+
+	// The config file is the only input: v1's --section.key overrides are gone
+	// (P6 Decision 4), so a v1 invocation fails here, loudly.
+	fs := flag.NewFlagSet("viiwork", flag.ContinueOnError)
+	fs.SetOutput(env.stderr)
+	configPath := fs.String("config", osConfigPath(), "path to viiwork.yaml")
+	showVersion := fs.Bool("version", false, "print the version and exit")
+	engineReqs := fs.Bool("engine-requirements", false, "print the minimum engine versions this binary needs, as JSON, and exit")
+	buildInfo := fs.Bool("build-info", false, "print the version, the llama.cpp pin and its macOS digest as JSON, and exit")
+	fs.Usage = func() {
+		fmt.Fprintf(env.stderr, "usage: viiwork [--config path] [--version]\n       viiwork alias <command> ...\n       viiwork top [--node host:port] [--host name] [--once]\n       viiwork update [status|rollback] ...\n       viiwork update cli [--to PATH] [--dry-run]   (this machine's CLI onto the release its node runs; sudo where the CLI is root's)\n       viiwork join-code [--open] [--config path]\n       viiwork init\n       viiwork stop | start   (this machine's node: it leaves the mesh, every model stops)\n       viiwork down | up [model...]   (this machine's models only: GPUs freed, the node stays in the mesh)\n       viiwork uninstall [--yes] [--delete-models] [--keep-images] [--from-config]\n       viiwork engine-sync   (run by systemd on a Docker install; see docs/releases.md)\n\n")
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() > 0 {
+		fmt.Fprintf(env.stderr, "viiwork: unexpected argument %q\n", fs.Arg(0))
+		fs.Usage()
+		return 2
+	}
+	if *showVersion {
+		fmt.Fprintln(env.stdout, version)
+		return 0
+	}
+	if *engineReqs {
+		b, _ := json.Marshal(engine.Requirements())
+		fmt.Fprintln(env.stdout, string(b))
+		return 0
+	}
+	if *buildInfo {
+		info := map[string]string{"version": version}
+		if llamaCppPin != "" {
+			info["llama_cpp"] = llamaCppPin
+		}
+		if llamaCppMacSHA256 != "" {
+			info["llama_cpp_macos_sha256"] = llamaCppMacSHA256
+		}
+		b, _ := json.Marshal(info)
+		fmt.Fprintln(env.stdout, string(b))
+		return 0
+	}
+
+	// Catch SIGHUP before anything slow: its default action ends the process,
+	// which systemd's Restart=on-failure treats as a clean stop. A HUP during
+	// startup waits here and reloads once the node is up.
+	hup := catchHUP()
+	defer signal.Stop(hup)
+
+	if _, err := os.Stat(*configPath); os.IsNotExist(err) && env.interactive != nil && env.interactive() {
+		fmt.Fprintf(env.stderr, "No config at %s: starting setup (viiwork init).\n\n", *configPath)
+		return runInit(*configPath, env)
+	}
+
+	// The handover comes before the strict load: the release this launcher
+	// hands over to may understand config keys this binary does not.
+	managed := managedInstall(*configPath)
+	if stateDir, enabled, err := config.PeekUpdate(*configPath); err == nil && enabled {
+		if code, done := handover(stateDir, managed, args, env); done {
+			return code
+		}
+	}
 	cost.LoadDotEnv(".env")
-
-	configPath := flag.String("config", "", "path to viiwork.yaml")
-	flag.Parse()
-
-	overrides := parseDotpathArgs(os.Args[1:])
-
-	var cfg *config.Config
-	var err error
-
-	if *configPath != "" {
-		cfg, err = config.Load(*configPath)
-		if err != nil {
-			log.Fatalf("loading config: %v", err)
-		}
-	} else {
-		d := config.Defaults()
-		cfg = &d
+	cfg, err := config.Load(*configPath, env.lookupEnv)
+	if err != nil {
+		// A v1 file's error already names docs/migrating-to-v2.md.
+		fmt.Fprintf(env.stderr, "viiwork: %v\n", err)
+		return 1
+	}
+	n, err := node.New(cfg, node.Options{
+		ConfigPath: *configPath, Version: version, Log: env.stdout,
+		LookupEnv: env.lookupEnv, Hostname: env.hostname, Managed: managed,
+		LlamaPin: llamaCppPin, InstallManifest: macManifest(),
+	})
+	if err != nil {
+		fmt.Fprintf(env.stderr, "viiwork: %v\n", err)
+		return 1
 	}
 
-	if len(overrides) > 0 {
-		if err := cfg.ApplyOverrides(overrides); err != nil {
-			log.Fatalf("applying overrides: %v", err)
-		}
-	}
-
-	if err := cfg.Validate(); err != nil {
-		log.Fatalf("config validation: %v", err)
-	}
-
-	// Load pipelines
-	var pipelines []*pipeline.Pipeline
-	for name, rawCfg := range cfg.Pipelines {
-		p, err := pipeline.LoadPipeline(name, rawCfg)
-		if err != nil {
-			log.Fatalf("loading pipeline %s: %v", name, err)
-		}
-		pipelines = append(pipelines, p)
-		log.Printf("pipeline '%s' loaded with %d locales, %d steps", name, len(p.Locales), len(p.Steps))
-	}
-
-	nodeID := generateNodeID()
-	log.Printf("viiwork %s starting with %d GPUs, model: %s", nodeID, cfg.GPUs.Count, cfg.Model.Path)
-
-	sampler := power.NewSampler(cfg.Power.Source)
-
-	// Build peer list
-	var peers []*peer.PeerState
-	for _, host := range cfg.Peers.Hosts {
-		peers = append(peers, peer.NewPeerState(host))
-	}
-
-	var tracker *cost.Tracker
-	apiKey := os.Getenv("ENTSOE_API_KEY")
-	if cfg.Cost.BiddingZone != "" && apiKey != "" {
-		fetcher := cost.NewSpotFetcher(apiKey, cfg.Cost.BiddingZone, "https://web-api.tp.entsoe.eu/api")
-		costCfg := cost.CostConfig{
-			Transfer: cost.TransferConfig{
-				Winter: cost.WinterTransferConfig{
-					PeakCentsKWh:    cfg.Cost.Transfer.Winter.PeakCentsKWh,
-					OffpeakCentsKWh: cfg.Cost.Transfer.Winter.OffpeakCentsKWh,
-				},
-				Summer: cost.SummerTransferConfig{
-					FlatCentsKWh: cfg.Cost.Transfer.Summer.FlatCentsKWh,
-				},
-			},
-			ElectricityTaxCentsKWh: cfg.Cost.ElectricityTaxCentsKWh,
-			VATPercent:             cfg.Cost.VATPercent,
-			Timezone:               cfg.Cost.Timezone,
-		}
-		tracker = cost.NewTracker(fetcher, costCfg, sampler)
-		log.Printf("cost tracking enabled (zone: %s)", cfg.Cost.BiddingZone)
-	} else if cfg.Cost.BiddingZone != "" {
-		log.Println("WARNING: cost section configured but ENTSOE_API_KEY not set, cost tracking disabled")
-	}
-
-	var costTracker process.CostTracker
-	if tracker != nil {
-		costTracker = tracker
-	}
-
-	hist := gpu.NewHistory(720)
-	bcast := gpu.NewBroadcaster()
-	collector := gpu.NewStatCollector(hist, bcast)
-
-	actLog := activity.NewLogWithPromptHistory(cfg.Activity.PromptHistory)
-
-	mgr := process.NewManager(cfg, nil, sampler, costTracker, collector, actLog)
-	for _, b := range mgr.Backends {
-		b.LogWriter = logging.NewPrefixWriter(os.Stdout, fmt.Sprintf("[gpu-%d] ", b.GPUID))
-	}
-
-	bal := balancer.New(
-		mgr.States(),
-		cfg.Balancer.HighLoadThreshold,
-		cfg.Balancer.MaxInFlightPerGPU,
-	)
-
-	localModel := model.IDFromPath(cfg.Model.Path)
-	reg := peer.NewRegistry(nodeID, localModel, mgr.States(), peers, cfg.Peers.Timeout.Duration)
-	reg.SetPowerReader(sampler)
-	if tracker != nil {
-		reg.SetCostReader(tracker)
-	}
-	hostname, _ := os.Hostname()
-	reg.SetLocation(hostname, fmt.Sprintf("%s:%d", hostname, cfg.Server.Port))
-	reg.SetPromptHistory(actLog.PromptHistoryMax())
-	handler := proxy.NewMeshHandler(bal, reg, cfg.Balancer.LatencyWindow.Duration)
-	handler.SetMetrics(hist, bcast, collector.Available)
-	if ctl := newPowerController(cfg, hostname); ctl != nil {
-		handler.SetPowerControl(ctl)
-		proxy.SetStatusPowerControl(ctl)
-	}
-	// Publish GPU load to peers as well as locally. Without this the /mesh view
-	// can show GPU% for this node only, because peers learn everything they know
-	// about us from /v1/status.
-	proxy.SetStatusGPUSource(hist)
-	handler.SetActivity(actLog)
-	handler.SetEvictOnHardFailure(cfg.Health.EvictOnHardFailure)
-	if len(cfg.Server.CORS.AllowOrigins) > 0 {
-		tailnetIPs := cfg.Server.CORS.AllowTailnetIPs == nil || *cfg.Server.CORS.AllowTailnetIPs
-		handler.SetCORS(&proxy.CORS{Origins: cfg.Server.CORS.AllowOrigins, TailnetIPs: tailnetIPs})
-		log.Printf("CORS enabled for origins %v (tailnet IPs: %v)", cfg.Server.CORS.AllowOrigins, tailnetIPs)
-	}
-
-	if len(pipelines) > 0 {
-		resolver := proxy.NewPipelineResolver(pipelines)
-		execURL := fmt.Sprintf("http://localhost:%d", cfg.Server.Port)
-		client := &http.Client{}
-		exec := pipeline.NewExecutor(execURL, client)
-		handler.SetPipelines(resolver, exec)
-		log.Printf("pipeline virtual models: %v", resolver.VirtualModelNames())
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
-
-	if err := mgr.StartAll(ctx); err != nil {
-		log.Fatalf("starting backends: %v", err)
-	}
-
-	go mgr.RunHealthLoop(ctx)
-	go reg.Run(ctx, cfg.Peers.PollInterval.Duration)
-
-	if cfg.Energy.Enabled {
-		startEnergyRecorder(ctx, cfg, hist, sampler, reg)
-	}
-
-	if len(peers) > 0 {
-		log.Printf("mesh enabled with %d peer(s)", len(peers))
-	}
-
-	server := &http.Server{
-		Addr:              fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port),
-		Handler:           handler,
-		ReadHeaderTimeout: 10 * time.Second,
-		IdleTimeout:       120 * time.Second,
-	}
-
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 	go func() {
-		log.Printf("listening on %s:%d", cfg.Server.Host, cfg.Server.Port)
-		if err := server.ListenAndServe(); err != http.ErrServerClosed {
-			log.Fatalf("server error: %v", err)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-hup:
+				_ = n.Reload() // errors are logged by Reload
+			}
 		}
 	}()
-
-	// A second, well-known port whose "/" is the mesh dashboard. Every
-	// instance on the host asks for it and one gets it, so the address is the
-	// same everywhere and does not depend on knowing which model this node
-	// serves. Skipped when it would be the node's own port, which already
-	// answers.
-	if mp := cfg.Server.MeshPort; mp > 0 {
-		if mp == cfg.Server.Port {
-			log.Printf("server.mesh_port equals server.port (%d), not starting a second listener", mp)
-		} else {
-			go proxy.ServeMeshPort(ctx, fmt.Sprintf("%s:%d", cfg.Server.Host, mp), handler)
-		}
+	err = n.Run(ctx)
+	if errors.Is(err, node.ErrRestart) {
+		return restart(ctx, cfg.Node.StateDir, args, env)
 	}
-
-	<-sigCh
-	log.Println("shutdown signal received")
-
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer shutdownCancel()
-
-	server.Shutdown(shutdownCtx)
-	cancel()
-	bcast.Close()
-	mgr.Shutdown(shutdownCtx)
-
-	log.Println("viiwork stopped")
-}
-
-func parseDotpathArgs(args []string) map[string]string {
-	overrides := make(map[string]string)
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		if !strings.HasPrefix(arg, "--") {
-			continue
-		}
-		key := strings.TrimPrefix(arg, "--")
-		if key == "config" {
-			i++
-			continue
-		}
-		if strings.Contains(key, ".") && i+1 < len(args) {
-			i++
-			overrides[key] = args[i]
-		}
-	}
-	return overrides
-}
-
-// startEnergyRecorder wires the durable kWh store to the power sampler and the
-// GPU collector. A failure here disables energy tracking and leaves the node
-// serving, matching how power, cost and GPU metrics already degrade: a node
-// that cannot write history is still a node that can answer requests.
-func startEnergyRecorder(ctx context.Context, cfg *config.Config, hist *gpu.History, sampler *power.Sampler, reg *peer.Registry) {
-	// Every GPU rocm-smi reports, not just this instance's. Attribution divides
-	// by total marginal draw across the host, so omitting a co-tenant's cards
-	// would charge their load to this instance's models.
-	gpuIDs := hist.GPUIDs()
-	if len(gpuIDs) == 0 {
-		gpuIDs = cfg.GPUs.ResolvedDevices()
-	}
-
-	loc, err := time.LoadLocation(cfg.Cost.Timezone)
 	if err != nil {
-		loc = time.UTC
+		fmt.Fprintf(env.stderr, "viiwork: %v\n", err)
+		return 1
 	}
-
-	// Stamp the history with which reading it was measured from. The sampler
-	// has already probed by now (NewSampler does it synchronously), so this is
-	// the source actually adopted rather than the one configured. When power
-	// is unavailable the label is left empty: nothing will be recorded anyway,
-	// and writing SourceName()'s "ipmitool" placeholder would claim a
-	// provenance no reading ever had.
-	powerSource := ""
-	if sampler.Available() {
-		powerSource = sampler.SourceName()
-	}
-
-	store, err := energy.Open(energy.Config{
-		Dir:         cfg.Energy.Dir,
-		GPUIDs:      gpuIDs,
-		MinuteSlots: cfg.Energy.MinuteSlots,
-		HourSlots:   cfg.Energy.HourSlots,
-		DaySlots:    cfg.Energy.DaySlots,
-		Location:    loc,
-		Source:      powerSource,
-	}, nil)
-	if err != nil {
-		log.Printf("[energy] disabled: %v", err)
-		return
-	}
-
-	nodeWatts := func() (float64, bool) { return sampler.Watts(), sampler.Available() }
-	readings := func() []energy.GPUReading {
-		// Resolved per sample, not once: peers may not have been polled yet
-		// at startup, and the host's GPU-to-model layout changes.
-		owned := reg.GPUModels()
-		out := make([]energy.GPUReading, 0, len(gpuIDs))
-		for _, id := range gpuIDs {
-			samples := hist.Samples(id)
-			if len(samples) == 0 {
-				continue
-			}
-			latest := samples[len(samples)-1]
-			if latest.PowerW <= 0 {
-				continue
-			}
-			out = append(out, energy.GPUReading{GPUID: id, Watts: latest.PowerW, Model: owned[id]})
-		}
-		return out
-	}
-
-	// Publish the cumulative total on /v1/status and /v1/cluster, so the mesh
-	// view can show kWh beside live watts without a second endpoint to poll.
-	proxy.SetStatusEnergySource(store)
-
-	recorder := energy.NewRecorder(store, cfg.Energy.SampleInterval.Duration, nodeWatts, readings, nil)
-	go func() {
-		recorder.Run(ctx)
-		store.Close()
-	}()
-	log.Printf("[energy] recording every %s for %d GPUs (node wattage is per-host: enable this on one instance per host)",
-		cfg.Energy.SampleInterval.Duration, len(gpuIDs))
+	return 0
 }
 
-// newPowerController builds the chassis power controller, or nil when power
-// control is not configured. Nil rather than a disabled instance so the
-// endpoints answer "not enabled on this node" from one check.
-func newPowerController(cfg *config.Config, hostname string) *power.Controller {
-	pc := cfg.Power.Control
-	if !pc.Enabled {
-		return nil
+// restart follows an update's ordered shutdown: start again at the launcher,
+// which reads state.json and runs whatever it now names. A stop that arrived
+// meanwhile (ctx ended: SIGTERM, docker stop) wins — exec'ing would start the
+// pending release only for it to be killed at the grace timeout, burning one
+// of its starts.
+func restart(ctx context.Context, stateDir string, args []string, env runEnv) int {
+	if ctx.Err() != nil {
+		fmt.Fprintln(env.stderr, "viiwork: update: stopped during the restart; exiting instead")
+		return 0
 	}
+	target, err := update.RestartTarget(update.ReleasesDir(stateDir))
+	if err != nil {
+		fmt.Fprintf(env.stderr, "viiwork: update: %v\n", err)
+		return 1
+	}
+	xerr := env.exec(target, append([]string{target}, args...), os.Environ())
+	fmt.Fprintf(env.stderr, "viiwork: update: exec %s: %v\n", target, xerr)
+	return 1
+}
 
-	pass := pc.BMC.Password
-	if pass == "" {
-		env := pc.BMC.PasswordEnv
-		if env == "" {
-			env = "BMC_PASSWORD"
+// handover is the update launcher. Before the node is built, a node that takes
+// part in updates runs the release its state names, exec'ing it in place so
+// Docker, launchd and pid: host see one process.
+func handover(stateDir string, managed bool, args []string, env runEnv) (int, bool) {
+	_, handedOver := env.lookupEnv(update.HandoverEnv)
+	// A later restart must start at the launcher again, so the variable does
+	// not outlive this check.
+	os.Unsetenv(update.HandoverEnv)
+	target, logs, err := update.Startup(update.StartupEnv{
+		StateDir: stateDir, Running: version, HandedOver: handedOver, Managed: managed, Self: update.SelfLauncher,
+	})
+	for _, l := range logs {
+		fmt.Fprintf(env.stderr, "viiwork: update: %s\n", l)
+	}
+	if err != nil {
+		fmt.Fprintf(env.stderr, "viiwork: update: %v\n", err)
+		return 1, true
+	}
+	if target == "" {
+		return 0, false
+	}
+	xerr := env.exec(target, append([]string{target}, args...), append(os.Environ(), update.HandoverEnv+"=1"))
+	fmt.Fprintf(env.stderr, "viiwork: update: exec %s: %v\n", target, xerr)
+	return 1, true
+}
+
+// managedInstall reports whether this node is a Docker install whose image
+// the host's engine helper swaps: the install's manifest, which the container
+// sees in the /etc/viiwork it mounts read-only, records the helper. Only for
+// the install's own config path, so a node started any other way behaves as
+// a hand-built one.
+func managedInstall(configPath string) bool {
+	return runtime.GOOS == "linux" && configPath == install.ConfigFile && install.ManagedInstall(install.ManifestFile)
+}
+
+// engineSync is the engine helper, run as root on a Docker install's host by
+// viiwork-engine.service.
+func engineSync(args []string, env runEnv) int {
+	if len(args) > 0 {
+		fmt.Fprint(env.stderr, "usage: viiwork engine-sync\n\nRun by systemd (viiwork-engine.service) on a Docker install: makes the compose file's image follow the node's release. docs/releases.md\n")
+		return 2
+	}
+	euid := os.Geteuid
+	if env.euid != nil {
+		euid = env.euid
+	}
+	if runtime.GOOS != "linux" || euid() != 0 {
+		fmt.Fprintln(env.stderr, "viiwork engine-sync: runs as root on a Linux Docker install (systemctl start viiwork-engine.service)")
+		return 1
+	}
+	keys, err := release.Keys()
+	if err != nil {
+		fmt.Fprintf(env.stderr, "viiwork engine-sync: %v\n", err)
+		return 1
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.ResponseHeaderTimeout = time.Minute
+	h := &enginesync.Helper{
+		Paths: enginesync.DefaultPaths(), Version: version,
+		Target: release.Target{OS: runtime.GOOS, Arch: runtime.GOARCH}, Keys: keys,
+		Client: &http.Client{Transport: tr}, Run: enginesync.Command(env.stderr),
+		Log: func(format string, a ...any) { fmt.Fprintf(env.stderr, format+"\n", a...) },
+	}
+	// The same parrot as the node's; without one the helper uses GitHub.
+	if api, err := config.PeekParrotAPI(h.Config); err == nil {
+		pc := parrot.New(api)
+		h.Local = func(ctx context.Context, version string) (string, error) {
+			return pc.AwaitRelease(ctx, config.UpdateRepo(), version, nil, parrot.Await{})
 		}
-		pass = os.Getenv(env)
 	}
+	if err := h.Sync(ctx); err != nil {
+		fmt.Fprintf(env.stderr, "viiwork engine-sync: %v\n", err)
+		return 1
+	}
+	return 0
+}
 
-	bmcs := make(map[string]power.BMC, len(pc.BMC.Addresses))
-	for host, addr := range pc.BMC.Addresses {
-		bmcs[host] = power.BMC{Addr: addr, Username: pc.BMC.Username, Password: pass}
+// runInit is the setup wizard. Its prompts read stdin, and nothing is written
+// before its last confirmation.
+func runInit(configPath string, env runEnv) int {
+	in := env.stdin
+	if in == nil {
+		in = os.Stdin
 	}
-	// A host named for control but given no address still gets an entry, so it
-	// can pick up the address it reports for itself while it is up. Written
-	// addresses go stale here -- these BMCs are on DHCP.
-	for _, host := range pc.Hosts {
-		if _, ok := bmcs[host]; !ok {
-			bmcs[host] = power.BMC{Username: pc.BMC.Username, Password: pass}
-		}
+	err := setup.Run(context.Background(), setup.DefaultHost(version, llamaCppPin, llamaCppMacSHA256, env.stdout), prompt.NewLine(in, env.stdout), configPath)
+	switch {
+	case err == nil:
+		return 0
+	case errors.Is(err, prompt.ErrAbort):
+		fmt.Fprintln(env.stderr, "\nviiwork init: aborted")
+		return 1
+	default:
+		fmt.Fprintf(env.stderr, "viiwork init: %v\n", err)
+		return 1
 	}
+}
 
-	ctl := power.NewController(power.ControlConfig{
-		Enabled: true, Hosts: pc.Hosts, BMCs: bmcs,
-	}, hostname)
+// defaultConfig is the config a node reads, and init writes, when --config is
+// not given: /etc/viiwork on Linux, the user's ~/.config/viiwork on a Mac.
+func defaultConfig(goos, home string) string { return setup.DefaultConfigPath(goos, home) }
 
-	// Learn this host's own BMC address and publish it, so peers can reach it
-	// once this node is no longer running to be asked.
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if addr := power.LocalBMCAddr(ctx); addr != "" {
-		ctl.LearnBMCAddr(hostname, addr)
-		log.Printf("[power] chassis control enabled for %v (own BMC at %s)", pc.Hosts, addr)
-	} else {
-		log.Printf("[power] chassis control enabled for %v (own BMC address unknown)", pc.Hosts)
+func osConfigPath() string {
+	home, _ := os.UserHomeDir()
+	return defaultConfig(runtime.GOOS, home)
+}
+
+// launchAgentPlist is where a Mac install keeps the mesh secret, for
+// join-code; "" elsewhere.
+func launchAgentPlist() string {
+	if runtime.GOOS != "darwin" {
+		return ""
 	}
-	if pass == "" {
-		log.Printf("[power] no BMC password set: hosts that are powered off cannot be reached (set BMC_PASSWORD)")
+	home, _ := os.UserHomeDir()
+	return install.MacLayout(home).Plist
+}
+
+// macManifest is a Mac install's install.json, whose llama root the node's
+// managed llama.cpp builds live under; "" elsewhere, where the engine stays
+// with the image or install it came with.
+func macManifest() string {
+	if runtime.GOOS != "darwin" {
+		return ""
 	}
-	return ctl
+	home, _ := os.UserHomeDir()
+	return install.MacLayout(home).ManifestFile
+}
+
+// catchHUP holds SIGHUP for the node's reload loop.
+func catchHUP() chan os.Signal {
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+	return hup
 }
