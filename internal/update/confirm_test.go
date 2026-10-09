@@ -174,3 +174,31 @@ func TestFollowCLIOnConfirmOnly(t *testing.T) {
 		t.Errorf("rollback: followed %v", followed)
 	}
 }
+
+// A baseline backend the operator parked or took out of the config during
+// the window is gone from the status on purpose. Waiting for it rolled a
+// good release back at the deadline.
+func TestABaselineBackendNoLongerWantedIsNotWaitedFor(t *testing.T) {
+	dir, c, clock, restarts := pendingState(t, "m/0", "parked/0")
+	c.Backends = backends(map[string]string{"m/0": meshapi.StatusHealthy}, "")
+	c.Wanted = func(id string) bool { return id != "parked/0" }
+	clock.t = clock.t.Add(time.Hour)
+	if !c.Step() {
+		t.Fatal("did not finish")
+	}
+	if s, _ := LoadState(dir); s.LastGood != "v2.6.0" || s.Pending != nil || *restarts != 0 {
+		t.Errorf("after confirm: %+v, restarts %d", s, *restarts)
+	}
+}
+
+// One that is wanted and missing is still waited for, and rolls back.
+func TestAMissingBaselineBackendStillWantedRollsBack(t *testing.T) {
+	_, c, clock, restarts := pendingState(t, "m/0", "n/0")
+	c.Backends = backends(map[string]string{"m/0": meshapi.StatusHealthy}, "")
+	c.Wanted = func(string) bool { return true }
+	c.Step()
+	clock.t = clock.t.Add(time.Hour)
+	if !c.Step() || *restarts != 1 {
+		t.Fatalf("restarts = %d, want a rollback", *restarts)
+	}
+}

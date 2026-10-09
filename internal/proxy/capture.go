@@ -122,7 +122,7 @@ func (c *captureWriter) usageTail() []byte {
 
 // usage lazily decodes this response's usage exactly once, so that a caller
 // asking for both CompletionTokens and PromptUsage on the same captureWriter
-// — Task 5's wiring calls both per request — shares one scan of the buffer
+// (the dispatch asks for both per request) shares one scan of the buffer
 // and one JSON decode per usage-bearing payload, not two.
 func (c *captureWriter) usage() decodedUsage {
 	if !c.usageDone {
@@ -146,7 +146,7 @@ func (c *captureWriter) CompletionTokens() (int64, bool) {
 func (c *captureWriter) Unwrap() http.ResponseWriter { return c.ResponseWriter }
 
 // flushCaptureWriter is captureWriter for an underlying writer that flushes.
-// The split is not cosmetic: both proxyRequest and streamThinkDisabled branch
+// The split is not cosmetic: both stream and streamThinkDisabled branch
 // on w.(http.Flusher), and streamThinkDisabled degrades to a plain io.Copy
 // when the assertion fails. A wrapper that always advertised Flush would make
 // a non-flushing writer look flushable; one that never did would silently turn
@@ -437,12 +437,9 @@ func completionTokensFromEvent(ev []byte) (int64, bool) {
 // (0, false): a streaming client that did not ask for usage is counted as a
 // request with no tokens.
 //
-// extractCompletionTokens and extractPromptUsage are both thin views onto
-// this: each usage-bearing payload is decoded once here for both fields
-// together, rather than once per field as two independent scans would. A
-// caller wanting both counts from the same buffer — captureWriter.usage()
-// does, so that CompletionTokens and PromptUsage share one call here — pays
-// for exactly one pass.
+// Each usage-bearing payload is decoded once here for both fields together:
+// captureWriter.usage() wants both, so CompletionTokens and PromptUsage
+// share one pass.
 func extractUsage(raw []byte) (completion int64, completionOK bool, prompt promptUsage, promptOK bool) {
 	if d := decodeUsage(bytes.TrimSpace(raw)); d.completionOK || d.promptOK {
 		return d.completion, d.completionOK, d.prompt, d.promptOK
@@ -468,13 +465,6 @@ func extractUsage(raw []byte) (completion int64, completionOK bool, prompt promp
 func extractCompletionTokens(raw []byte) (int64, bool) {
 	completion, completionOK, _, _ := extractUsage(raw)
 	return completion, completionOK
-}
-
-// extractPromptUsage is extractCompletionTokens for prompt counts. See
-// extractUsage.
-func extractPromptUsage(raw []byte) (promptUsage, bool) {
-	_, _, prompt, promptOK := extractUsage(raw)
-	return prompt, promptOK
 }
 
 // PromptUsage is CompletionTokens for the prompt counts.

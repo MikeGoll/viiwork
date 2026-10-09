@@ -167,7 +167,7 @@ models:
   names the key: `model_name` (or an alias) with `name`, `--max-context` with
   `context`, and `lazy_load`, `idle_unload_s` and `api_key` off. See
   [configuration.md](configuration.md#models).
-- **`parallel` must be 1.** Strata v0.1.39 reports one slot whatever its own
+- **`parallel` must be 1.** Strata v0.1.40.1 reports one slot whatever its own
   `parallel` says, so the node refuses more. Capacity comes from more backends.
 - **Preparing the model is upstream's job.** The pack, the GGUF shards and the
   MTP layer come from Strata's own `setup.py`; viiwork does not fetch or build
@@ -187,8 +187,15 @@ models:
   there: it borrowed expert-cache slots for its larger chunks and prompt
   reading fell to between a quarter and a half.
 - **A backend waits 30 seconds after loading** (`strata: {warmup: 30s}`, phase
-  `warming up`). A long prompt that reached a v0.1.39 backend sooner than that
-  failed at its first checkpoint and cost a reload.
+  `warming up`). The wait was added for `saving a checkpoint part failed` on
+  Radeon VIIs and does not prevent it; `warmup: 0s` turns it off.
+- **`saving a checkpoint part failed` on Radeon VIIs is fixed in the
+  `viiwork-strata` image from Strata v0.1.40.1** (the gfx906 patch,
+  [BUILDS.md](../BUILDS.md)). It was the first long prompt after a load, on a
+  backend of more than one card: the engine saves a checkpoint every 16,384
+  prompt tokens while another thread is still capturing its prompt graphs,
+  and the ROCm runtime refuses that copy. An image built before that still
+  fails that way, and the backend reloads.
 
 ### Measured on Radeon VII
 

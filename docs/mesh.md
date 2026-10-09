@@ -54,10 +54,29 @@ See [security.md](security.md).
 
 ## Routing
 
-A request for a model goes to a local backend with a free slot, else to the
-member with the most free slots, else it waits in a FIFO queue on the node that
-received it for up to `routing.queue_timeout` (20 s), then gets 429 with
+A request for a model goes to a host with a free slot, chosen by measured
+speed. When no host has one it waits in a FIFO queue on the node that received
+it for up to `routing.queue_timeout` (20 s), then gets 429 with
 `Retry-After: 2`.
+
+- **Routing follows measured speed** (`routing.performance`, on by default).
+  Every node measures its own time to first token per model and publishes the
+  score on `/v1/capacity`. For a request, each host with a free slot gets a
+  predicted time from its score and the prompt's size, and only hosts within
+  1.25 times the best count. Among those the node that received the request
+  runs it when it is one of them; otherwise the faster a host, the more often
+  it is chosen. A host with no score yet is priced at the fleet's median and
+  gets one request in twenty, so it can earn one.
+- **A session stays on one host.** A request carrying `X-Session-Affinity` or
+  `X-Session-Id` goes to the same host among those that count, whichever node
+  it enters by, and to the same backend on that host while it has a free
+  slot, so a conversation's turns reuse one warm prompt cache. A coding agent
+  should send one of the two headers with a value that is stable for the
+  session.
+- **With no score anywhere, or `routing.performance: false`,** a request goes
+  to a local backend with a free slot, else to the member with the most free
+  slots. With no scores a session header still picks one host; with the key
+  set to false it is ignored.
 
 - **Capacity is polled, membership is gossiped.** Every node polls every alive
   member's `/v1/capacity` once a second. A report older than
@@ -73,6 +92,15 @@ received it for up to `routing.queue_timeout` (20 s), then gets 429 with
 - **`?host=<node name>` pins a request to one machine.** The value only filters
   candidates by name; it is never dialled as an address, and a forwarded request
   ignores it.
+- **`?prefer=<node>,<node>` asks for machines in order, when they are free.**
+  The first named node with a free slot for the model runs the request, ahead
+  of measured speed and of the session rule. When none of them has room the
+  request routes as if the list were absent, so a preference never fails or
+  delays a request; a queued request walks its list again each time a slot
+  frees. A name the mesh does not know, or a node that is off, is passed
+  over. `X-Viiwork-Prefer` carries the same list for a client that can set a
+  header but not a query parameter. Like the pin, the names are only compared,
+  and a forwarded request ignores them.
 
 ## Aliases
 

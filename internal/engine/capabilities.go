@@ -67,8 +67,10 @@ type Versioner interface {
 // about token usage (performance routing, spec §4).
 type UsageReporting struct {
 	// Unasked: a streamed response ends with a usage chunk even when the
-	// client did not set stream_options.include_usage. When false the proxy
-	// asks for usage and strips the chunk again for a client that did not.
+	// client did not set stream_options.include_usage. When false, and
+	// CachedTokens is true, the proxy asks for usage and strips the chunk
+	// again for a client that did not; without CachedTokens it never asks,
+	// because a sample needs the cached count.
 	Unasked bool
 	// CachedTokens: usage.prompt_tokens_details.cached_tokens is present
 	// whenever any prompt token came from cache, so its absence means zero.

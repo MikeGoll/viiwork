@@ -68,7 +68,7 @@ func options(path string, s engine.Spec) (Options, error) {
 		return opts, fmt.Errorf("%s.path is required for engine %s: Strata's JSON config (source: is not supported)", path, name)
 	}
 	if s.Parallel != 1 {
-		return opts, fmt.Errorf("%s.parallel must be 1 for engine %s: Strata v0.1.39 reports one slot on /slots whatever its \"parallel\" says, so the node could not publish the rest (got %d)", path, name, s.Parallel)
+		return opts, fmt.Errorf("%s.parallel must be 1 for engine %s: Strata v0.1.40.1 reports one slot on /slots whatever its \"parallel\" says, so the node could not publish the rest (got %d)", path, name, s.Parallel)
 	}
 	for _, flag := range []string{"--config", "--api-key"} {
 		if slices.ContainsFunc(s.Args, func(a string) bool { return a == flag || strings.HasPrefix(a, flag+"=") }) {

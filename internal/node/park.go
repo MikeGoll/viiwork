@@ -149,6 +149,10 @@ func (n *Node) Park(names []string, down bool) (meshapi.ParkResponse, error) {
 		n.logf("models down: %s parked; in-flight requests get %s, then their engines stop (viiwork up brings them back)",
 			strings.Join(changed, ", "), cfg.Health.RespawnGrace.Duration)
 	} else {
+		// An engine's own config file is read when a backend starts, so the
+		// file may have changed since the keys were last taken: a baseline
+		// measured under the old file goes now, not at the next reload.
+		n.perf.SetKeys(perfKeys(cfg.Models))
 		n.logf("models up: %s loading again", strings.Join(changed, ", "))
 	}
 	return resp, nil
@@ -269,6 +273,19 @@ func (h *parkHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	var req meshapi.ParkRequest
 	if len(strings.TrimSpace(string(body))) > 0 {
+		// An empty list means every model, so a body that names none must
+		// say so on purpose: a misspelt key ("model", "names") or a null
+		// must not park the whole node. Keys beside "models" are ignored,
+		// as everywhere on the wire.
+		var keys map[string]json.RawMessage
+		if err := json.Unmarshal(body, &keys); err != nil || keys == nil {
+			httpjson.Error(w, http.StatusBadRequest, "invalid_request", "the body must be a JSON object")
+			return
+		}
+		if _, ok := keys["models"]; !ok && len(keys) > 0 {
+			httpjson.Error(w, http.StatusBadRequest, "invalid_request", `the body has no "models": name them, or send {} for every model`)
+			return
+		}
 		if err := json.Unmarshal(body, &req); err != nil {
 			httpjson.Error(w, http.StatusBadRequest, "invalid_request", "the body must be a JSON object: "+err.Error())
 			return

@@ -104,7 +104,9 @@ func TestV2UnmeasurableFieldsAreOmitempty(t *testing.T) {
 	}{
 		{NodeStatus{}, []string{"host_mem_total_mb", "host_mem_used_mb", "gpus", "energy_kwh_24h", "energy_kwh_30d", "prompt_history"}},
 		{GPUInfo{}, []string{"uuid", "name", "vendor", "power_w"}},
-		{ModelStatus{}, []string{"requests_total", "tokens_total", "parked"}},
+		{ModelStatus{}, []string{"requests_total", "tokens_total", "parked", "perf"}},
+		{PerfScore{}, []string{"samples", "baseline_age_s"}},
+		{PromptEntry{}, []string{"elapsed_ms", "output_tokens", "gen_ms"}},
 		{BackendStatus{}, []string{"gpus", "phase", "pid", "rss_mb", "tok_decoded", "tok_remain"}},
 		{PowerInfo{}, []string{"source"}},
 		{CostInfo{}, []string{"eur_per_hour", "today_eur", "breakdown"}},
