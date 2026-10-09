@@ -68,7 +68,17 @@ type model struct {
 	cacheHas bool
 	cache    Score // BaselineAge is filled in per call
 	rebase   bool  // the window is the baseline: refresh its time per call
+
+	// A baseline whose values changed is saved at the next Save; one whose
+	// time alone moves, as it does on every Score of a busy model, only
+	// every saveAge.
+	baseNew bool
+	markAt  time.Time
 }
+
+// saveAge is how far a saved baseline's time may fall behind the one in
+// memory. Without it a busy node rewrote perf.json, durably, every minute.
+const saveAge = 10 * time.Minute
 
 // Score is what a host publishes for one model. Values are rounded to two
 // significant figures and never below 1, so a published 0 cannot happen and
@@ -196,6 +206,16 @@ func (m *model) window() (overhead, rate float64, n, nBig int, hasRate, ovOK boo
 			break // nothing left to refine against
 		}
 	}
+	if hasRate && rate < 1 {
+		// Most big samples answered within the overhead, so the fit says
+		// prefill costs nothing. That is no measurement: published it would
+		// be rounded up to 1 ms per 1k tokens, and every peer would predict
+		// this host an order of magnitude faster than any other.
+		hasRate, rate = false, 0
+		if m.base != nil {
+			rate = m.base.MsPer1k
+		}
+	}
 	if !hasRate && m.base == nil {
 		rate = 0
 	}
@@ -228,7 +248,10 @@ func (t *Tracker) Score(name string) (Score, bool) {
 		// The window is the baseline, refreshed as of every Score, exactly as
 		// if it were recomputed: same values, so only its time moves.
 		m.base.At = now
-		t.dirty = true
+		if m.baseNew || now.Sub(m.markAt) >= saveAge {
+			m.baseNew, m.markAt = false, now
+			t.dirty = true
+		}
 	}
 	if !m.cacheHas {
 		return Score{}, false
@@ -251,6 +274,9 @@ func (m *model) compute(now time.Time) {
 		bov := ov
 		if !ovOK && m.base != nil {
 			bov = m.base.OverheadMs
+		}
+		if m.base == nil || round2(m.base.OverheadMs) != round2(bov) || round2(m.base.MsPer1k) != round2(rate) || m.base.Key != m.key {
+			m.baseNew = true
 		}
 		m.base = &baseline{OverheadMs: bov, MsPer1k: rate, At: now, Key: m.key}
 	}

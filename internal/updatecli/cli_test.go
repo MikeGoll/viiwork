@@ -33,6 +33,8 @@ type fakeNode struct {
 	// stageTook is how long a stage takes to answer.
 	stageTook time.Duration
 	activate  int      // status code for activate; 0 = 202
+	loading   int      // this many activates answer 409: a model is still loading
+	already   bool     // activate answers 409: another rollout put it on the release
 	models    []string // what its status lists as served
 	parked    []string // what its status lists as parked (viiwork down)
 	drop      bool     // the GET that set it, and every one while set, gets a closed connection
@@ -90,6 +92,19 @@ func (n *fakeNode) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			n.st.Staged = append(n.st.Staged, req.Version)
 		case meshapi.PathUpdateActivate:
+			if n.loading > 0 {
+				n.loading--
+				n.calls = append(n.calls, "activate refused: loading")
+				w.WriteHeader(http.StatusConflict)
+				json.NewEncoder(w).Encode(meshapi.ErrorResponse{Error: meshapi.ErrorBody{Message: "model m is still loading (backend m/0, warming up): activate when it is healthy", Type: "update_error"}})
+				return
+			}
+			if n.already {
+				n.st.Running, n.st.Current, n.st.LastGood = req.Version, req.Version, req.Version
+				w.WriteHeader(http.StatusConflict)
+				json.NewEncoder(w).Encode(meshapi.ErrorResponse{Error: meshapi.ErrorBody{Message: req.Version + " is already running", Type: "update_error"}})
+				return
+			}
 			if n.activate != 0 {
 				w.WriteHeader(n.activate)
 				json.NewEncoder(w).Encode(meshapi.ErrorResponse{Error: meshapi.ErrorBody{Message: "activate refused", Type: "update_error"}})
@@ -790,5 +805,39 @@ func TestRolloutActivateRefusedMidWave(t *testing.T) {
 		if !strings.Contains(errOut, want) {
 			t.Errorf("stderr lacks %q:\n%s", want, errOut)
 		}
+	}
+}
+
+// A host whose model is still loading refuses the activate with a 409 that
+// ends by itself: the rollout asks again instead of stopping with the fleet
+// on two versions.
+func TestRolloutWaitsForALoadingModel(t *testing.T) {
+	m := newFakeMesh(t, "node-a", "node-b", "node-c")
+	m.node("node-b").loading = 2
+	code, out, errOut := run(t, m, Phrase+"\n")
+	if code != 0 {
+		t.Fatalf("exit %d\n%s\n%s", code, out, errOut)
+	}
+	if got := strings.Join(m.order, ","); got != "node-a,node-b,node-c" {
+		t.Errorf("activations %s", got)
+	}
+	if !strings.Contains(out, "node-b: model m is still loading") || !strings.Contains(out, "waiting up to") {
+		t.Errorf("the wait was not said:\n%s", out)
+	}
+}
+
+// A host another rollout activated in the meantime is done, not a failure.
+func TestRolloutCountsAnAlreadyRunningHostAsDone(t *testing.T) {
+	m := newFakeMesh(t, "node-a", "node-b", "node-c")
+	m.node("node-a").already = true
+	code, out, errOut := run(t, m, Phrase+"\n")
+	if code != 0 {
+		t.Fatalf("exit %d\n%s\n%s", code, out, errOut)
+	}
+	if got := strings.Join(m.order, ","); got != "node-b,node-c" {
+		t.Errorf("activations %s", got)
+	}
+	if !strings.Contains(out, "node-a: already running v2.6.0") {
+		t.Errorf("stdout:\n%s", out)
 	}
 }

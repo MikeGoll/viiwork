@@ -69,7 +69,9 @@ func (r *Router) pickScoredLocked(req Request, backends []LocalBackend, localEli
 		if !serves {
 			continue
 		}
-		scored := mc.PrefillMsPer1k > 0
+		// A negative overhead is no measurement: a peer publishing one would
+		// be predicted faster than any real host.
+		scored := mc.PrefillMsPer1k > 0 && mc.TTFTOverheadMs >= 0
 		if scored && pool < maxScored {
 			ovs[pool], rates[pool] = float64(mc.TTFTOverheadMs), float64(mc.PrefillMsPer1k)
 			pool++

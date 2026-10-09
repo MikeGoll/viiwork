@@ -233,6 +233,12 @@ Free capacity is `slots - busy`, and `healthy_backends` of `0` means the model
 is listed but can serve nothing. A model appears here whatever state its
 backends are in, so check both.
 
+A model the node has measured also carries its performance score (v2.7.0):
+`ttft_overhead_ms`, `prefill_ms_per_1k` (milliseconds to read 1,000 prompt
+tokens) and `perf_samples`. All three are absent when the node cannot say —
+no measurement yet, an older version, or `routing.performance: false` —
+and absent never means zero.
+
 ### `GET /v1/aliases`
 
 The mesh-wide alias table. Aliases give clients a stable name for a model whose
@@ -262,6 +268,25 @@ The asked node only. It is exactly the `status` object shown inside each member
 above — same fields, same meanings — and it is what members poll each other
 with. Use it when you are addressing one specific machine; otherwise
 `/v1/cluster` already contains it for every member.
+
+Two fields on a model are newer than the example above and absent on older
+nodes: `parked: true` for a model taken down with `viiwork down` (it has no
+backends until `viiwork up`), and `perf`, the node's measured score for it
+(`overhead_ms`, `prefill_ms_per_1k`, `samples`, `baseline_age_s`).
+
+### `POST /v1/models/down`, `POST /v1/models/up` — park a node's models
+
+What `viiwork down` and `up` send: the node stops (or starts again) the named
+models and stays in the mesh. Writing needs a signature, as for aliases (§2).
+
+```json
+{ "models": ["some-model-27B"] }
+```
+
+`{}` or no body means every model the node is configured with. A body with
+other keys and no `models` is refused with 400, so a misspelt key cannot park
+everything. The answer lists each model with `parked` and `changed`; an
+unknown name is 400 and changes nothing.
 
 ### `POST /v1/power`, `POST /v1/mesh/power` — chassis power
 
@@ -420,6 +445,13 @@ A queue sits in front of this, so a brief burst above capacity waits rather
 than failing: `routing.queue_timeout` is 20 s by default. Treat `429` as real
 backpressure, not as a retry-immediately signal.
 
+**Keeping a session on one host.** Send `X-Session-Affinity` (or
+`X-Session-Id`) with a value that is stable for one conversation, and its
+turns go to the same host and backend while that host is among the fastest
+with a free slot, from whichever node they enter. That is what lets a long
+conversation reuse the engine's prompt cache instead of reading the whole
+history again on another machine.
+
 **Pinning a host.** `?host=<hostname>` on any of the three inference endpoints
 narrows routing to one machine — `POST /v1/chat/completions?host=node-b`. Absent
 or `mesh` routes as usual. The name is a member name (`node-b`), not `host:port`, and it is matched
@@ -431,6 +463,20 @@ value is only compared against hostnames the node already knows and is never
 dialled, so it cannot reach anything normal routing could not. Through the
 gateway a pinned request may take two hops (gateway → a node serving the
 model → the pinned host); that is expected and invisible to the caller.
+
+**Preferring hosts.** `?prefer=node-a,node-b` names machines in order of
+preference: the first one with a free slot for the model runs the request,
+and when none has room the request goes wherever it would have gone without
+the list. It is the soft form of the pin: an unknown name or a powered-off
+host is passed over rather than answered with `404`, and only a malformed
+value, or more than eight names, is `400`. A client that cannot add a query
+parameter (most OpenAI SDKs append the path to a base URL) sends the same
+list as the `X-Viiwork-Prefer` header; the parameter wins when both are
+present, and `?host=` wins over both. A preferred host is taken even when the
+mesh has measured another as faster, and even when the request's session
+lives elsewhere, so a session that spilled to another host while the
+preferred one was full moves back on its next turn and reads its prompt
+again there. `X-Viiwork-Node` on the response names the machine that ran it.
 
 ## 5. Prompt and output history
 
@@ -467,6 +513,8 @@ what makes lookups work when the caller cannot reach that peer directly.
 | `prompt` | Last user message, or the raw `prompt` field for legacy completions. Can be absent — a multimodal request with array content parts yields none. |
 | `output` | **Absent while the request is still running**, present once it finishes. For a failed request this is the error body, which is usually the most useful thing to see. |
 | `elapsed_ms` | Wall time, recorded with the output. Absent until then. |
+| `output_tokens` | The reply's `usage.completion_tokens` (v2.8.0). Absent when the node keeping the entry saw no usage object — never a measured zero. |
+| `gen_ms` | Milliseconds from the first token to the end of the reply (v2.8.0); `output_tokens` over this is the average rate. Absent for a non-streamed reply and for a request another node executed. |
 
 **Reasoning models.** With thinking enabled a model puts its answer in a
 separate reasoning channel. `output` then arrives labelled —

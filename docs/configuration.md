@@ -77,7 +77,7 @@ with the `models[]` entry:
 |---|---|
 | `model_name`, or one of `aliases` | `name` |
 | `--max-context` in `args` | `context` |
-| `parallel` | absent or 1, and the entry's `parallel` must be 1: Strata v0.1.39 reports one slot whatever its own `parallel` says |
+| `parallel` | absent or 1, and the entry's `parallel` must be 1: Strata v0.1.40.1 reports one slot whatever its own `parallel` says |
 | `lazy_load`, `idle_unload_s` | off — an unloaded server looks dead to the node |
 | `api_key` | not set — the node probes and forwards without a key, and the backend listens on loopback only |
 
@@ -190,6 +190,24 @@ A pipeline is node-local: it is absent from capacity reports and status, and is
 dispatched only on the node that received the request. It therefore cannot be an
 alias target — see [mesh.md](mesh.md#aliases).
 
+## Routing (`routing`)
+
+Shown with the defaults; the section can be left out.
+
+```yaml
+routing:
+  performance: true     # route by each host's measured time to first token
+  queue_max: 64         # requests that may wait per model on this node; 0 = no queue
+  queue_timeout: 20s    # how long one may wait before 429
+  forward_retry: 1      # other routes tried after a refusal before the first byte
+  stale_after: 3s       # a member's capacity report older than this is not routed on
+```
+
+`performance: false` restores the routing of v2.6 and earlier — a local backend
+with a free slot, else the member with the most free slots — stops this node
+publishing its scores, and makes it ignore session headers. What the scores
+are and how a session header is used: [mesh.md](mesh.md#routing).
+
 ## Client discovery
 
 `/v1/models` and `/v1/model/info` need no configuration. The OpenCode catalogue on
@@ -284,6 +302,11 @@ restart. See docs/releases.md.
 | `VIIWORK_DEBUG=1` | Verbose `[debug]` logging on the request path. Off by default — these sit on hot paths, and on a host whose cores are shared with `llama-server` writing a line per request costs CPU that inference needs. Turn it on when diagnosing routing. |
 | `ENTSOE_API_KEY` | ENTSO-E API key for cost tracking — see [power-and-energy.md](power-and-energy.md#cost-tracking) |
 | `BMC_PASSWORD` | BMC password for out-of-band power control — see [power-and-energy.md](power-and-energy.md#power-control) |
+
+The mesh secrets, `ENTSOE_API_KEY` and the BMC password (under whatever names
+the config gives them) are the node's own: they are taken out of the
+environment an engine process starts with. A model that needs one of those
+names sets it in its own `env:`.
 
 ## Host requirements
 

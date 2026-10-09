@@ -21,9 +21,14 @@ type Confirmer struct {
 	Running  string
 	Window   time.Duration // config.ConfirmWindow
 	Backends func() []meshapi.ModelStatus
-	Restart  func()
-	Now      func() time.Time
-	Log      func(format string, args ...any)
+	// Wanted reports whether the node still means to run the backend of
+	// that ID; nil means every one. A baseline backend the operator parked
+	// or took out of the config during the window is not waited for:
+	// counted as "not healthy yet" it rolled a good release back.
+	Wanted  func(id string) bool
+	Restart func()
+	Now     func() time.Time
+	Log     func(format string, args ...any)
 	// PruneEngines removes engine builds no release kept in the confirmed
 	// state is pinned to; nil removes none. It runs after the releases are
 	// pruned, and only on a confirm: a rollback must find its engine there.
@@ -88,6 +93,7 @@ func (c *Confirmer) Step() bool {
 	for _, id := range p.Baseline {
 		b, ok := byID[id]
 		switch {
+		case !ok && c.Wanted != nil && !c.Wanted(id):
 		case ok && b.Status == meshapi.StatusDead:
 			c.rollback("backend " + id + " is dead")
 			return true

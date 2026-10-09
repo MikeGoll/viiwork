@@ -283,7 +283,11 @@ const phaseWarmingUp = "warming up"
 func (l *loop) warmedUp(ready bool) bool {
 	b := l.b
 	if !ready {
-		l.readySince = time.Time{}
+		if !l.readySince.IsZero() {
+			// It stopped answering ready mid-wait: it is not warming up.
+			l.readySince = time.Time{}
+			b.setPhase("")
+		}
 		return false
 	}
 	b.mu.Lock()

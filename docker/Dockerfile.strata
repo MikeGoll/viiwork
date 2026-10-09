@@ -4,11 +4,21 @@
 # they are two files because the engine is compiled differently for each.
 #
 # AMD's ROCm no longer ships gfx906 libraries, so the base is the community
-# image upstream itself documents (docs/AMD_HIP.md, "gfx906"). Strata v0.1.39
-# does not compile for gfx906 as released: docker/strata/gfx906-<version>.patch
-# carries two fixes to strata_hip.h (cudaFuncSetAttribute as a template
-# function, and an alias for the shared-memory carveout attribute). Not
-# reported upstream as of 2026-10-04.
+# image upstream itself documents (docs/AMD_HIP.md, "gfx906"). Strata v0.1.40.1
+# does not compile for gfx906 as released, and once compiled fails the first
+# long prompt after a load. docker/strata/gfx906-<version>.patch carries four
+# fixes, each inside the gfx906 build only:
+#   - fused_gr.cu: fused_gr_read_multi became a bool function in v0.1.40 and
+#     its gfx906-only branch still returns nothing;
+#   - vmm.cpp: the CUDA driver API is compiled out for STRATA_USE_HIP but not
+#     for STRATA_HIP_GFX906;
+#   - strata_hip.h: two stream-priority names had no HIP alias;
+#   - conversation_state.cpp: a checkpoint's state is copied on a stream of
+#     the saving thread's own. On the default stream HIP refuses the copy
+#     while another thread captures a graph ("saving a checkpoint part
+#     failed", seen since v0.1.39) and the refusal invalidates that capture.
+# The two strata_hip.h fixes v0.1.39 needed are upstream since v0.1.40. None
+# of the four is reported upstream as of 2026-10-07.
 #
 # WHAT AN OPERATOR WILL NOT GUESS:
 #   - The model is not in the image. Mount the pack, the GGUF shards and the
@@ -38,8 +48,8 @@ RUN CGO_ENABLED=0 go build -ldflags "-X main.version=${VERSION}" -o /viiwork ./c
 
 # Stage 2: Strata, built for gfx906, and the runtime.
 FROM ${STRATA_ROCM_BASE}
-ARG STRATA_VERSION=v0.1.39
-ARG STRATA_COMMIT=6f32ec070f23ced9f50e704d854d775da52591ab
+ARG STRATA_VERSION=v0.1.40.1
+ARG STRATA_COMMIT=82f46a8c8f475f001ad76d92f58f4a4f8ffb0253
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \

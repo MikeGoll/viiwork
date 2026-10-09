@@ -77,9 +77,13 @@ func (e *Engine) SeparatesReasoning() bool { return true }
 // that reached a backend within 30 seconds of /health saying loaded failed at
 // its first checkpoint ("saving a checkpoint part failed") and the server lost
 // its slot, so the backend was reloaded; a backend whose first long prompt
-// came 108 seconds after loaded read it. The cause inside Strata is not known,
-// so this is a wait, not a fix. Options that do not validate give no warm-up:
-// Command is what refuses them.
+// came 108 seconds after loaded read it. The wait turned out not to prevent
+// it: on gfx906 a checkpoint's copy on the default stream is refused while
+// another thread captures its prompt graphs, which is a matter of the first
+// long prompt and not of time. docker/strata's gfx906 patch fixes it from
+// v0.1.40.1; a build without that patch still fails that way, with or without
+// this wait. Options that do not validate give no warm-up: Command is what
+// refuses them.
 func (e *Engine) WarmUp(s engine.Spec) time.Duration {
 	opts, err := options("model", s)
 	if err != nil {

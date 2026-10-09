@@ -28,7 +28,6 @@ const (
 	strataThink2 = `{"id": "c1", "object": "chat.completion.chunk", "model": "m", "choices": [{"index": 0, "delta": {"reasoning_content": " That is 391."}, "finish_reason": null}]}`
 	strataAnswer = `{"id": "c1", "object": "chat.completion.chunk", "model": "m", "choices": [{"index": 0, "delta": {"content": "391"}, "finish_reason": null}]}`
 	strataStop   = `{"id": "c1", "object": "chat.completion.chunk", "model": "m", "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 69, "completion_tokens": 54}}`
-	strataLength = `{"id": "c1", "object": "chat.completion.chunk", "model": "m", "choices": [{"index": 0, "delta": {}, "finish_reason": "length"}]}`
 )
 
 // Through the handler: which think-off stream a request gets depends on what
@@ -162,8 +161,8 @@ func TestSuppressedThinkBlockStartsGenerationTime(t *testing.T) {
 	}
 }
 
-// The plain reply's rewrite and the stream must agree on a tool call too:
-// reasoning in front of one is dropped, not moved into content.
+// In a plain reply, reasoning in front of a tool call is dropped, not moved
+// into content beside the call.
 func TestPlainToolCallReplyDropsReasoning(t *testing.T) {
 	body := `{"choices":[{"message":{"role":"assistant","content":null,"reasoning_content":"We need the tool.","tool_calls":[{"id":"c","type":"function","function":{"name":"f","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}`
 	out := string(rewriteThinkResponse([]byte(body)))

@@ -27,6 +27,15 @@ const (
 	HeaderModel = "X-Viiwork-Model"
 	// QueryHost pins a request to a node by name (?host=gb1).
 	QueryHost = "host"
+	// QueryPrefer names nodes in order of preference (?prefer=gb1,gb2): the
+	// first with a free slot takes the request, and with none free the
+	// request routes as if the list were absent. Unlike QueryHost it never
+	// fails a request.
+	QueryPrefer = "prefer"
+	// HeaderPrefer is QueryPrefer for a client that can set a header but not
+	// a query parameter (request, client to node). The parameter wins when
+	// both are present. It is never sent on to a member or an engine.
+	HeaderPrefer = "X-Viiwork-Prefer"
 )
 
 // BackendID names backend index of model, e.g. "Qwen3.8-27B/0".

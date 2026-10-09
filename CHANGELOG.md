@@ -1,5 +1,122 @@
 # Changelog
 
+## v2.9.0
+
+**A request can name the machines it would rather run on.**
+
+- **`?prefer=node-a,node-b`** on an inference endpoint names nodes in order of
+  preference. The first one with a free slot for the model runs the request,
+  ahead of performance routing and of session affinity; when none of them has
+  room the request routes exactly as it would without the list, and a queued
+  request walks its list again each time a slot frees. Unlike the `?host=`
+  pin it never fails a request: an unknown name, a host that is off or one
+  that is full is passed over. A malformed value, or more than eight names,
+  is `400`.
+- **`X-Viiwork-Prefer`** carries the same list for a client that can set a
+  header but not a query parameter. The parameter wins when both are present,
+  `?host=` wins over both, and the header is not sent on to a member or an
+  engine.
+- A session that ran elsewhere while its preferred host was full moves to
+  that host on its next turn and reads its prompt there again; send no list
+  with a session whose cache matters more than the machine.
+
+## v2.8.3
+
+**Strata v0.1.40.1, and the Radeon VII checkpoint failure fixed.**
+
+- **Both Strata images build Strata v0.1.40.1** (`docker/pins.env`). Upstream
+  rewrote its git history on 2026-10-06, which moved every tag: the v0.1.39
+  commit that v2.8.0 to v2.8.2 pin is no longer what the tag names, so
+  `make docker-strata` of those versions refuses to build.
+- **`saving a checkpoint part failed` is fixed in the gfx906 image.** It was
+  the first long prompt after a load, on a backend of more than one card.
+  The engine saves a checkpoint every 16,384 prompt tokens with a copy on the
+  default stream, while another thread is still capturing its prompt graphs.
+  CUDA lets that through; the ROCm runtime refuses it (`operation would make
+  the legacy stream depend on a capturing blocking stream`), and the refusal
+  invalidates the capture as well. The image's gfx906 patch makes the copy on
+  a stream of the saving thread's own. On nine Radeon VIIs, v0.1.40.1 without
+  the fix failed that prompt two times in two; with it, seven cold first long
+  prompts were read (41,000 to 47,000 tokens, six of them three at once on
+  three backends), and a 200,244-token prompt at 837 tokens per second.
+- **v0.1.40.1 does not compile for gfx906 as released.** The patch carries
+  three more fixes for that ([BUILDS.md](BUILDS.md)); the two v0.1.39 needed
+  are upstream.
+- **The 30-second warm-up stays at its default** and still does not matter to
+  this failure; `strata: {warmup: 0s}` turns it off.
+- **The CUDA image served at v0.1.40.1** on three RTX A4000 at 262,144
+  context: a 200,244-token cold prompt read at 2,527 tokens per second, a
+  41,221-token first prompt after the load at 2,474, 57 to 74 tokens per
+  second generated, cache reuse, streamed reasoning and a tool call, with no
+  respawn. It needs no patch.
+- **Measured, no pin change:** llama.cpp b11451 against the pinned b11371 on
+  two Radeon VIIs (Qwen3.8-27B, 98,304 context): the same answers, tool call
+  and cache reuse, the same decode speed, prompt reading 200 against 208
+  tokens per second at 41,000 tokens. Nothing to gain; the pin stays.
+
+## v2.8.2
+
+**Fixes from a six-lens review** of the tree, mostly of what v2.7 and v2.8
+added: security, error handling, type safety, performance, architecture and
+simplicity. No new keys; nothing to change in a config.
+
+- **Routing: a host can no longer publish a prefill rate of zero.** When most
+  long prompts in a host's window answered within its overhead, the fitted
+  rate was zero, was published as 1 ms per 1,000 tokens and was saved as the
+  host's baseline. Every other node then predicted that host an order of
+  magnitude faster than any other for a long prompt and sent it all of them.
+  Such a window now measures no rate, a saved baseline without one is dropped
+  at start, and a peer's score with a negative overhead is not used.
+- **Routing: a request that waited in the queue keeps its session.** The
+  queue dropped the session header's key and the prompt's size, so on a busy
+  fleet a session's turn went to whichever host the choice fell on, onto a
+  cold prompt cache.
+- **Routing: a think block that is generated and held back is not counted as
+  prompt reading.** With `think` off, a llama.cpp model's `<think>` block is
+  suppressed; the performance sample ran to the first byte the client saw,
+  so a model that reasons made its host look slow at reading prompts.
+- **Updates: `viiwork update` no longer stops on two refusals that are not
+  failures.** A host with a model still loading (after a crash, a rollback or
+  a restart, or in a Strata warm-up) is asked again until the model is
+  healthy, for up to 30 minutes, and a host another rollout already put on
+  the release counts as done. Both used to end the rollout with
+  `activate failed: HTTP 409` and the fleet on two versions.
+- **Updates: parking or removing a model during a release's confirmation
+  window no longer rolls the release back.** The confirmer waited for that
+  model's backends, which were gone on purpose, until the deadline.
+- **Updates (Mac):** the record of the CLI a node installed is written before
+  the binary is put in place. A failure between the two made the next start
+  read the new launcher as an out-of-band install and forget every staged
+  release.
+- **`POST /v1/models/down` and `up` refuse a body that names no models by
+  accident.** No models means every model, so `{"model": "x"}`, a list or
+  `null` parked the whole node. `{}` and no body still mean every model;
+  `viiwork down` and `up` always sent the right key.
+- **`viiwork up` after editing a Strata JSON drops the model's saved
+  performance baseline**, as the documentation said it would. Only a reload
+  or a restart did.
+- **An engine process no longer inherits the node's secrets.** The mesh
+  secrets, `ENTSOE_API_KEY` and the BMC password are taken out of the
+  environment a backend starts with. A model that needs one of those names
+  sets it in its own `env:`.
+- **A Strata backend that stops answering ready during its warm-up** no
+  longer shows `warming up` while it is not loaded.
+- **`perf.json` is written when a baseline's values change, and otherwise at
+  most every ten minutes.** A busy node rewrote it, with two fsyncs, every
+  minute.
+- **Docs:** routing by measured speed, the session headers and the `routing`
+  keys ([mesh.md](docs/mesh.md#routing),
+  [configuration.md](docs/configuration.md#routing-routing)); the score,
+  `parked`, `output_tokens`, `gen_ms` and the park endpoints
+  ([api-integration.md](docs/api-integration.md)).
+
+**A correction to v2.8.1.** The 30-second Strata warm-up does not prevent
+`saving a checkpoint part failed`: under v2.8.1 a backend that had been ready
+for five minutes still failed its first long prompt that way. The cause is
+inside Strata v0.1.39 and is still not known. The wait stays, as it costs 30
+seconds per load, but it is not a workaround; `strata: {warmup: 0s}` turns it
+off.
+
 ## v2.8.1
 
 **A Strata backend waits 30 seconds after loading before it takes work.**

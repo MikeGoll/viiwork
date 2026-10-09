@@ -72,7 +72,7 @@ type Deps struct {
 	// PublishPerf adds the scores to /v1/capacity (routing.performance).
 	PublishPerf bool
 	// Usage says how a model's engine reports usage. nil = the zero value:
-	// ask for usage, and treat an absent cached_tokens as unknown.
+	// usage is not asked for, and an absent cached_tokens is unknown.
 	Usage func(model string) engine.UsageReporting
 	// SeparateReasoning says whether a model's engine streams reasoning apart
 	// from the answer (engine.ReasoningSeparator). nil = no: untagged
@@ -221,20 +221,42 @@ func (h *Handler) handleInference(w http.ResponseWriter, r *http.Request, dialec
 	// The pin is compared against member names by the router and never
 	// dialled. A forward ignores it: it already reached the pinned node.
 	// Guarded on RawQuery so the common request parses nothing.
+	//
+	// The preference list arrives as a parameter or, for a client that can
+	// only set headers, as a header; the parameter wins. The header is
+	// removed either way, so neither a member nor an engine receives it.
 	var host string
+	preferRaw := r.Header.Get(meshapi.HeaderPrefer)
+	r.Header.Del(meshapi.HeaderPrefer)
 	if !forwarded && r.URL.RawQuery != "" {
-		pin, ok := sanitizeHost(r.URL.Query().Get(meshapi.QueryHost))
+		q := r.URL.Query()
+		pin, ok := sanitizeHost(q.Get(meshapi.QueryHost))
 		if !ok {
 			httpjson.Error(w, http.StatusBadRequest, errTypeInvalidRequest, "invalid host parameter")
 			return
 		}
 		host = pin
+		if v := q.Get(meshapi.QueryPrefer); v != "" {
+			preferRaw = v
+		}
+	}
+	var prefer []string
+	if !forwarded && preferRaw != "" {
+		list, ok := parsePrefer(preferRaw)
+		if !ok {
+			httpjson.Error(w, http.StatusBadRequest, errTypeInvalidRequest, "invalid prefer parameter")
+			return
+		}
+		// The pin is the stricter wish; with one, the list has nothing to say.
+		if host == "" {
+			prefer = list
+		}
 	}
 
 	w, capture := newCaptureWriter(w)
 	// Forwards leave no prompt history: the origin already has it (Decision 12).
 	d := &dispatch{
-		model: model, alias: alias, host: host, taskID: taskID, body: body,
+		model: model, alias: alias, host: host, prefer: prefer, taskID: taskID, body: body,
 		forwarded: forwarded, thinkDisabled: thinkDisabled,
 		record: !forwarded && h.d.Activity != nil, start: start, capture: capture,
 	}
@@ -260,6 +282,7 @@ func (h *Handler) handleInference(w http.ResponseWriter, r *http.Request, dialec
 type dispatch struct {
 	model, alias, host, taskID string
 	body                       []byte
+	prefer                     []string // ?prefer= list, nil with a pin or on a forward
 	forwarded, thinkDisabled   bool
 	outTokens, genMS           int64 // the reply's completion tokens and generation time, 0 = not known
 	record                     bool  // emit activity events (the origin only)
@@ -307,7 +330,7 @@ func sessionKey(r *http.Request) uint64 {
 func (h *Handler) dispatch(w http.ResponseWriter, r *http.Request, d *dispatch) {
 	estK := float64(len(d.body)) / 4000 // ~4 bytes per token; the entry cannot see caches
 	session := sessionKey(r)
-	lease, queued, err := h.d.Router.Acquire(r.Context(), route.Request{Model: d.model, Host: d.host, Forwarded: d.forwarded, EstK: estK, SessionKey: session})
+	lease, queued, err := h.d.Router.Acquire(r.Context(), route.Request{Model: d.model, Host: d.host, Prefer: d.prefer, Forwarded: d.forwarded, EstK: estK, SessionKey: session})
 	if err != nil {
 		if d.forwarded && errors.Is(err, route.ErrModelNotFound) {
 			// The origin chose this node from a report that still listed
@@ -346,13 +369,20 @@ func (h *Handler) dispatch(w http.ResponseWriter, r *http.Request, d *dispatch) 
 		res := h.attempt(w, r, lease, d, label)
 
 		if res.Outcome == outcomeServed {
-			if d.record {
-				// For the /prompt page's average rate. The response is
-				// complete, so the capture's usage decode sees all of it.
-				d.outTokens, _ = d.capture.CompletionTokens()
+			// The response is complete here, so the capture's usage decode
+			// (cached on first use) sees the whole body. The capture never
+			// sees a stripped usage chunk, so without the stripped event
+			// every such request would count no tokens.
+			var tokens int64
+			if d.record || t.Local {
+				tokens, _ = d.capture.CompletionTokens()
 				if n, ok := completionTokensFromEvent(res.StrippedUsage); ok {
-					d.outTokens = n
+					tokens = n
 				}
+			}
+			if d.record {
+				// For the /prompt page's average rate.
+				d.outTokens = tokens
 				if !res.GenStart.IsZero() {
 					d.genMS = time.Since(res.GenStart).Milliseconds()
 				}
@@ -366,14 +396,6 @@ func (h *Handler) dispatch(w http.ResponseWriter, r *http.Request, d *dispatch) 
 			// Counted where the request ran, so a forward is counted by its
 			// receiver and not twice (spec).
 			if t.Local {
-				// The response is complete here, so the capture's usage
-				// decode (cached on first use) sees the whole body. The
-				// capture never sees a stripped usage chunk, so without the
-				// stripped event tokens_total would lose every such request.
-				tokens, _ := d.capture.CompletionTokens()
-				if n, ok := completionTokensFromEvent(res.StrippedUsage); ok {
-					tokens = n
-				}
 				h.d.Counters.Add(d.model, tokens)
 				h.recordPerf(d.model, res, d.capture)
 			}
@@ -416,7 +438,7 @@ func (h *Handler) dispatch(w http.ResponseWriter, r *http.Request, d *dispatch) 
 		tried[t.Key()] = true
 		if retries < h.d.ForwardRetry {
 			retries++
-			if next, err := h.d.Router.Pick(route.Request{Model: d.model, Host: d.host, Exclude: tried, EstK: estK, SessionKey: session}); err == nil {
+			if next, err := h.d.Router.Pick(route.Request{Model: d.model, Host: d.host, Prefer: d.prefer, Exclude: tried, EstK: estK, SessionKey: session}); err == nil {
 				lease = next
 				continue
 			}
@@ -429,7 +451,7 @@ func (h *Handler) dispatch(w http.ResponseWriter, r *http.Request, d *dispatch) 
 			budget = -1
 		}
 		var waited time.Duration
-		lease, waited, err = h.d.Router.Acquire(r.Context(), route.Request{Model: d.model, Host: d.host, QueueBudget: budget, EstK: estK, SessionKey: session})
+		lease, waited, err = h.d.Router.Acquire(r.Context(), route.Request{Model: d.model, Host: d.host, Prefer: d.prefer, QueueBudget: budget, EstK: estK, SessionKey: session})
 		queued += waited
 		if err != nil {
 			h.endUnserved(d, label)
@@ -456,7 +478,7 @@ func (h *Handler) usage(model string) engine.UsageReporting {
 func (h *Handler) localBodyFor(d *dispatch) ([]byte, bool) {
 	if !d.localBuilt {
 		d.localBuilt, d.localBody = true, d.body
-		if h.d.Perf != nil && h.usage(d.model) == (engine.UsageReporting{CachedTokens: true}) {
+		if u := h.usage(d.model); h.d.Perf != nil && u.CachedTokens && !u.Unasked {
 			d.localBody, d.localStrip = injectIncludeUsage(d.body)
 		}
 	}
@@ -482,7 +504,14 @@ func (h *Handler) recordPerf(model string, res execResult, c *captureWriter) {
 	if uncached < 0 {
 		return
 	}
-	h.d.Perf.Record(model, res.FirstToken, uncached, res.FirstToken.Sub(res.Granted))
+	// The engine's first token, not the client's first byte: with think off
+	// a tagged think block is generated and held back, and counting it made
+	// a host that reasons look slow at reading prompts.
+	first := res.FirstToken
+	if !res.GenStart.IsZero() && res.GenStart.Before(first) {
+		first = res.GenStart
+	}
+	h.d.Perf.Record(model, first, uncached, first.Sub(res.Granted))
 }
 
 // attempt runs one dispatch on the lease's target and releases the lease on

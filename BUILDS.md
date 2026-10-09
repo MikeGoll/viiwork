@@ -137,7 +137,7 @@ installed release resolves to the published
 ## `docker/Dockerfile.strata` and `docker/Dockerfile.strata-cuda`
 
 [Strata](https://github.com/Niko1221/Strata) at the tag `STRATA_VERSION` pins in
-`docker/pins.env` (currently `v0.1.39`), with `viiwork` added. Two files rather
+`docker/pins.env` (currently `v0.1.40.1`), with `viiwork` added. Two files rather
 than one with a build argument, because the engine is compiled differently for
 each accelerator. In both images the checkout is `/opt/strata`, which is what
 `models[].strata.dir` names.
@@ -149,12 +149,20 @@ each accelerator. In both images the checkout is `/opt/strata`, which is what
   upstream's own `docs/AMD_HIP.md` documents. AMD's ROCm no longer ships
   gfx906 libraries, so this image does not sit on the ROCm 6.2.4 base the
   llama.cpp image uses.
-- **Strata v0.1.39 does not compile for gfx906 as released.**
-  `docker/strata/gfx906-v0.1.39.patch` carries two fixes to `strata_hip.h`
-  (`cudaFuncSetAttribute` as a template function, and an alias for the
-  shared-memory carveout attribute). The patch is named for the version and
-  must be re-cut when `STRATA_VERSION` changes. Not reported upstream as of
-  2026-10-04.
+- **Strata v0.1.40.1 does not compile for gfx906 as released, and compiled it
+  fails the first long prompt after a load.**
+  `docker/strata/gfx906-v0.1.40.1.patch` carries four fixes, all inside the
+  gfx906 build: `fused_gr_read_multi` became a `bool` function in v0.1.40 and
+  its gfx906-only branch (`STRATA_GR_SPLIT=1`, off by default) still returns
+  nothing; `vmm.cpp` compiles the CUDA driver API out for `STRATA_USE_HIP` but
+  not for `STRATA_HIP_GFX906`; two stream-priority names have no HIP alias;
+  and a checkpoint's state is copied on a stream of the saving thread's own.
+  The last is the cause of `saving a checkpoint part failed`: on the default
+  stream HIP refuses the copy while another thread captures its prompt graphs
+  (CUDA's thread-local capture mode lets it through), and the refusal
+  invalidates that capture too. The patch is named for the version and must
+  be re-cut when `STRATA_VERSION` changes. Not reported upstream as of
+  2026-10-07.
 - The engine binary is `/opt/strata/build-906/strata`: the Strata JSON's `exe`.
 - The image has no group named `render`. Give the container the host's render
   group by number, as `docker/compose.strata.yaml` does (`RENDER_GID`); with

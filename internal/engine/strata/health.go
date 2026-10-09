@@ -81,7 +81,7 @@ func (e *Engine) Load(ctx context.Context, s engine.Spec, addr string) (engine.L
 // LoadProgress is engine.TokenProgressReader.
 //
 // /slots is the part routing depends on. Anything wrong with it is an error,
-// never a zero. As of v0.1.39 it lists exactly one slot whatever the server's
+// never a zero. As of v0.1.40.1 it lists exactly one slot whatever the server's
 // "parallel" is, which is why this engine accepts only models[].parallel 1.
 //
 // /status adds the server's own queue and the running request's token counts.

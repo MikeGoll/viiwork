@@ -238,14 +238,12 @@ func rewriteThinkResponse(body []byte) []byte {
 			continue
 		}
 		// A tool call is the answer: reasoning in front of one is dropped,
-		// as the stream drops it, not moved into content beside the call.
+		// not moved into content beside the call.
 		if calls, _ := msg["tool_calls"].([]any); len(calls) > 0 {
 			continue
 		}
 
 		if reasoning == "" {
-			delete(msg, "reasoning_content")
-			modified = true
 			continue
 		}
 
@@ -258,8 +256,6 @@ func rewriteThinkResponse(body []byte) []byte {
 			cleaned = strings.TrimSpace(reasoning)
 		}
 		msg["content"] = cleaned
-		delete(msg, "reasoning_content")
-		modified = true
 	}
 
 	if !modified {

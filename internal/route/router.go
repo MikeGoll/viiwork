@@ -2,9 +2,11 @@ package route
 
 import (
 	"errors"
+	"log"
 	"sync"
 	"time"
 
+	"github.com/janit/viiwork/v2/internal/logging"
 	"github.com/janit/viiwork/v2/internal/supervisor"
 	"github.com/janit/viiwork/v2/mesh/capacity"
 	"github.com/janit/viiwork/v2/meshapi"
@@ -49,8 +51,14 @@ func (t Target) Key() string {
 }
 
 type Request struct {
-	Model       string
-	Host        string          // ?host= pin, "" = none
+	Model string
+	Host  string // ?host= pin, "" = none
+	// Prefer is the ?prefer= list: node names in order of preference. The
+	// first one with a free slot takes the request, ahead of scores and
+	// sessions; with none free the request routes as if the list were
+	// absent. Compared against known names only, like the pin, and ignored
+	// with a pin or on a forward.
+	Prefer      []string
 	Exclude     map[string]bool // Target.Key() values already tried
 	Forwarded   bool
 	QueueBudget time.Duration // how long Acquire may queue; 0 = QueueTimeout, < 0 = do not queue (Decision 17)
@@ -192,6 +200,11 @@ func (r *Router) pickWithReportsLocked(req Request, reports []capacity.Report) (
 		}
 	}
 
+	if len(req.Prefer) > 0 && !req.Forwarded && req.Host == "" {
+		if l := r.pickPreferredLocked(req, backends, localOK && admitting, reports); l != nil {
+			return l, nil
+		}
+	}
 	if r.c.Performance && !req.Forwarded && req.Host == "" {
 		if l, handled := r.pickScoredLocked(req, backends, localOK && admitting, reports); handled {
 			if l != nil {
@@ -218,6 +231,42 @@ func (r *Router) pickWithReportsLocked(req Request, reports []capacity.Report) (
 		}
 	}
 	return nil, ErrNoFreeSlot
+}
+
+// pickPreferredLocked takes a slot on the first host of req.Prefer that has
+// one, this node included when it is named. A name that is unknown, stale,
+// full, refused or excluded is passed over, which is the difference from the
+// pin: a preference never fails a request. Nil when none of them has room.
+func (r *Router) pickPreferredLocked(req Request, backends []LocalBackend, localEligible bool, reports []capacity.Report) *Lease {
+	now := r.c.Now()
+	for _, name := range req.Prefer {
+		if name == r.c.Self {
+			if localEligible {
+				if l := r.pickLocalLocked(req, backends); l != nil {
+					logPreferredPick(req, name)
+					return l
+				}
+			}
+			continue
+		}
+		for _, rep := range reports {
+			if rep.Node != name {
+				continue
+			}
+			if _, free, _ := r.peerFreeLocked(req, rep, now); free > 0 {
+				logPreferredPick(req, name)
+				return r.peerLeaseLocked(rep, req.Model, now)
+			}
+			break
+		}
+	}
+	return nil
+}
+
+func logPreferredPick(req Request, name string) {
+	if logging.DebugEnabled() {
+		log.Printf("[debug] route %s: * %s [prefer %v]", req.Model, name, req.Prefer)
+	}
 }
 
 func (r *Router) pickLocalLocked(req Request, backends []LocalBackend) *Lease {
