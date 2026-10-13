@@ -126,6 +126,10 @@ viiwork nodes, and the fields belong to a third party.
 - **`api` is the node the client reached**, not a name baked in at build time.
   Any node is an entry point and every node serves the whole mesh, so the
   address that fetched the catalogue is the address that will serve inference.
+- **`modalities.input` is `["text"]`, or `["text", "image"]`** for a model
+  that some host with slots says it reads images with (v2.10.0). A client
+  that reads `image` there attaches pictures, so the word appears only when a
+  request with one has somewhere to go.
 - **`tool_call` is true** and `npm` is `@ai-sdk/openai-compatible`. Without the
   latter OpenCode treats the provider as one of its own native APIs and never
   reaches the node at all.
@@ -209,6 +213,10 @@ The document:
 }
 ```
 
+`model_info` also carries `"supports_vision": true` for a model that some
+host with slots says it reads images with (v2.10.0). The field is left out
+otherwise, which this format reads as unknown.
+
 Serving this shape does **not** make a node a LiteLLM proxy. Only the discovery
 document is LiteLLM's; inference stays on the OpenAI-compatible endpoints the
 node already serves, which is the transport these clients speak anyway. That is
@@ -231,7 +239,9 @@ them is the client's to choose. Any output figure could only be a guess, so
 document's `limit.output`, which is required by that format — and it is
 documented there as a client-side budgeting hint, not a server capability.
 
-**No cost, and no modality beyond text.** Local inference is free at the point
+**No cost, and no modality beyond text and images.** Images are listed only
+on a host's own word (see [models.md](models.md#models-that-read-images));
+audio and video are never claimed. Local inference is free at the point
 of use; the electricity is in the energy store, not in a per-token price.
 
 **No architectural maximum.** No node knows the largest context a checkpoint

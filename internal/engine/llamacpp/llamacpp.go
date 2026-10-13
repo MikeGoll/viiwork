@@ -157,6 +157,13 @@ func (e *Engine) Command(s engine.Spec) (engine.Command, error) {
 		}
 	}
 
+	if o.Mmproj != "" {
+		if _, err := os.Stat(o.Mmproj); err != nil {
+			return engine.Command{}, fmt.Errorf("llamacpp: model %s: llamacpp.mmproj %s: %w", s.Name, o.Mmproj, err)
+		}
+		args = append(args, "--mmproj", o.Mmproj)
+	}
+
 	// Operator args last, so their flag wins. One of them is translated: a
 	// --no-mmap written for a build that read it makes a build that only has
 	// --load-mode exit at argument parsing, under a config that did not

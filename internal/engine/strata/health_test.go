@@ -194,3 +194,27 @@ func TestLoadErrors(t *testing.T) {
 		}
 	})
 }
+
+// /health says whether the vision encoder is running; a server that does not
+// say is unknown, never "no".
+func TestReadsImagesFromHealth(t *testing.T) {
+	cases := []struct {
+		name, body string
+		reads, ok  bool
+	}{
+		{"off", file(t, "health-ready.json"), false, true},
+		{"on", strings.Replace(file(t, "health-ready.json"), `"images": false`, `"images": true`, 1), true, true},
+		{"an older server", `{"status": "ok", "loaded": true, "service": "strata"}`, false, false},
+		{"another service", `{"status": "ok", "images": true, "service": "other"}`, false, false},
+	}
+	for _, c := range cases {
+		addr := backend(t, map[string]string{"/health": c.body})
+		reads, ok, err := New().ReadsImages(context.Background(), engine.Spec{}, addr)
+		if err != nil || reads != c.reads || ok != c.ok {
+			t.Errorf("%s: reads %v ok %v err %v, want %v %v", c.name, reads, ok, err, c.reads, c.ok)
+		}
+	}
+	if _, ok, err := New().ReadsImages(context.Background(), engine.Spec{}, "127.0.0.1:1"); err == nil || ok {
+		t.Errorf("no server: ok %v err %v, want an error", ok, err)
+	}
+}

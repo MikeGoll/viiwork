@@ -1,6 +1,7 @@
 package node
 
 import (
+	"math"
 	"net/netip"
 	"regexp"
 	"sort"
@@ -63,10 +64,13 @@ type StatusSources struct {
 	Vendor         gpu.Vendor
 	Power          NodePower
 	Energy         EnergyReader // nil = none
-	Cost           CostReader   // nil = none
-	PromptHistory  int
-	HostMemory     func() (totalMB, usedMB int64) // nil = hostinfo.HostMemoryMB
-	Now            func() time.Time
+	// ClientEnergy is the store's energy per named client; nil = none. False
+	// from it means no client is named, and the field stays off the status.
+	ClientEnergy  func() (energy.ClientEnergy, bool)
+	Cost          CostReader // nil = none
+	PromptHistory int
+	HostMemory    func() (totalMB, usedMB int64) // nil = hostinfo.HostMemoryMB
+	Now           func() time.Time
 }
 
 // BuildStatus is this node's C4 NodeStatus.
@@ -147,6 +151,11 @@ func BuildStatus(s StatusSources) meshapi.NodeStatus {
 	if s.Power != nil {
 		st.Power = meshapi.PowerInfo{Watts: s.Power.Watts(), Available: s.Power.Available(), Source: s.Power.Source()}
 	}
+	if s.ClientEnergy != nil {
+		if ce, ok := s.ClientEnergy(); ok {
+			st.ClientEnergy = clientEnergyStatus(ce)
+		}
+	}
 	if s.Energy != nil {
 		st.EnergyKWh24h, st.EnergyKWh30d = s.Energy.KWh24h(), s.Energy.KWh30d()
 	}
@@ -166,6 +175,25 @@ func BuildStatus(s StatusSources) meshapi.NodeStatus {
 	}
 	return st
 }
+
+// clientEnergyStatus is the store's client figures in their wire form. The
+// rounding is to what the measurement supports and no further: a tenth of a
+// watt-hour on the counter, a watt-hour on the kWh sums. A rounded counter is
+// still a counter: it never goes down.
+func clientEnergyStatus(ce energy.ClientEnergy) *meshapi.ClientEnergy {
+	out := &meshapi.ClientEnergy{Since: ce.Since, Through: ce.Through, Clients: make([]meshapi.ClientEnergyEntry, len(ce.Clients))}
+	for i, c := range ce.Clients {
+		out.Clients[i] = meshapi.ClientEnergyEntry{
+			Name:    c.Name,
+			WhTotal: roundTo(c.Wh, 10), W1m: roundTo(c.W1m, 10),
+			KWh24h: roundTo(c.KWh24h, 1000), KWh30d: roundTo(c.KWh30d, 1000),
+			BusySTotal: c.BusyS, TokensTotal: c.Tokens,
+		}
+	}
+	return out
+}
+
+func roundTo(v, scale float64) float64 { return math.Round(v*scale) / scale }
 
 // versionRe is what an engine version may look like on a status: a build or
 // a release number.

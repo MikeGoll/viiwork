@@ -148,7 +148,7 @@ func Build(cfg Config, models []discovery.Model, baseURL string) Catalog {
 			Temperature: true,
 			ToolCall:    m.Tools,
 			Limit:       Limit{Context: window, Output: outputLimit(window)},
-			Modalities:  Modalities{Input: []string{"text"}, Output: []string{"text"}},
+			Modalities:  Modalities{Input: inputs(m), Output: []string{"text"}},
 		}
 	}
 	name := cfg.ProviderName
@@ -163,6 +163,17 @@ func Build(cfg Config, models []discovery.Model, baseURL string) Catalog {
 		API:    baseURL,
 		Models: out,
 	}}
+}
+
+// inputs is what a client may put in a message for m. "image" is listed only
+// when a host the router can use says it reads images: a client that reads
+// "image" here attaches pictures, and a request with one is refused when
+// every host says no.
+func inputs(m discovery.Model) []string {
+	if m.Images {
+		return []string{"text", "image"}
+	}
+	return []string{"text"}
 }
 
 // Output limits, in tokens: the cap is the most worth asking a local model

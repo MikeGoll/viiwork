@@ -302,7 +302,7 @@ func TestForwardToPeerX7X8(t *testing.T) {
 	signer := mustAuth(t, "self", k1, nil, fakeMembers{})
 	rec := httptest.NewRecorder()
 	target := route.Target{Node: "P", Addr: peer.Listener.Addr().String()}
-	res := forwardToPeer(rec, chatRequest("/v1/chat/completions?host=P", `{"model":"m"}`), []byte(`{"model":"m"}`), target, signer, "self")
+	res := forwardToPeer(rec, chatRequest("/v1/chat/completions?host=P", `{"model":"m"}`), []byte(`{"model":"m"}`), target, signer, "self", "")
 	if !gotOK || gotOrigin != "self" || gotQuery != "host=P" {
 		t.Errorf("X7: verify=%q,%v query=%q", gotOrigin, gotOK, gotQuery)
 	}
@@ -319,13 +319,13 @@ func TestForwardToPeerX9X10(t *testing.T) {
 	auth := mustAuth(t, "self", nil, nil, fakeMembers{})
 	full := engineServer(t, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(429) })
 	w := &trackingWriter{ResponseRecorder: httptest.NewRecorder()}
-	if res := forwardToPeer(w, chatRequest("/v1/chat/completions", "{}"), []byte("{}"), route.Target{Node: "P", Addr: full.Listener.Addr().String()}, auth, "self"); res.Outcome != outcomeRetryable || w.wroteHeader {
+	if res := forwardToPeer(w, chatRequest("/v1/chat/completions", "{}"), []byte("{}"), route.Target{Node: "P", Addr: full.Listener.Addr().String()}, auth, "self", ""); res.Outcome != outcomeRetryable || w.wroteHeader {
 		t.Errorf("X9: res=%+v wrote=%v", res, w.wroteHeader)
 	}
 	gone := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	addr := gone.Listener.Addr().String()
 	gone.Close()
-	if res := forwardToPeer(httptest.NewRecorder(), chatRequest("/v1/chat/completions", "{}"), []byte("{}"), route.Target{Node: "P", Addr: addr}, auth, "self"); res.Outcome != outcomeRetryable || !strings.Contains(res.Reason, "peer P") {
+	if res := forwardToPeer(httptest.NewRecorder(), chatRequest("/v1/chat/completions", "{}"), []byte("{}"), route.Target{Node: "P", Addr: addr}, auth, "self", ""); res.Outcome != outcomeRetryable || !strings.Contains(res.Reason, "peer P") {
 		t.Errorf("X10: res=%+v", res)
 	}
 }
@@ -336,7 +336,7 @@ func TestForwardToPeerX11Unbuffered(t *testing.T) {
 	auth := mustAuth(t, "self", nil, nil, fakeMembers{})
 	r := streamingClient(t, func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
-		forwardToPeer(w, r, body, route.Target{Node: "P", Addr: peer.Listener.Addr().String()}, auth, "self")
+		forwardToPeer(w, r, body, route.Target{Node: "P", Addr: peer.Listener.Addr().String()}, auth, "self", "")
 	})
 	if first := readEvent(t, r, 2*time.Second); !strings.Contains(first, "one") {
 		t.Fatalf("first event = %q", first)
@@ -359,7 +359,7 @@ func TestForwardToPeerX12CutAfterFirstByte(t *testing.T) {
 	})
 	auth := mustAuth(t, "self", nil, nil, fakeMembers{})
 	rec := httptest.NewRecorder()
-	res := forwardToPeer(rec, chatRequest("/v1/chat/completions", "{}"), []byte("{}"), route.Target{Node: "P", Addr: peer.Listener.Addr().String()}, auth, "self")
+	res := forwardToPeer(rec, chatRequest("/v1/chat/completions", "{}"), []byte("{}"), route.Target{Node: "P", Addr: peer.Listener.Addr().String()}, auth, "self", "")
 	if res.Outcome != outcomeServed || !strings.Contains(rec.Body.String(), "chunk1") {
 		t.Errorf("res=%+v body=%q", res, rec.Body.String())
 	}

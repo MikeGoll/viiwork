@@ -18,6 +18,25 @@ type healthDoc struct {
 	Status  string `json:"status"`
 	Service string `json:"service"`
 	Loaded  *bool  `json:"loaded"`
+	// Images is whether the server started its vision encoder (a "vision"
+	// section in its config). A pointer: an older server does not say.
+	Images *bool `json:"images"`
+}
+
+// ReadsImages is engine.ImageReader: /health's own "images". The Spec cannot
+// answer, because vision is a section of Strata's JSON that the server may
+// also refuse to start.
+func (e *Engine) ReadsImages(ctx context.Context, _ engine.Spec, addr string) (reads, ok bool, err error) {
+	resp, err := e.get(ctx, addr, "/health")
+	if err != nil {
+		return false, false, err
+	}
+	defer drain(resp)
+	var h healthDoc
+	if resp.StatusCode != http.StatusOK || json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&h) != nil || h.Service != name || h.Images == nil {
+		return false, false, nil
+	}
+	return *h.Images, true, nil
 }
 
 // Probe reads /health. Ready needs all three of service "strata", status "ok"

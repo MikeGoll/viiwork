@@ -24,6 +24,7 @@ import (
 	"github.com/janit/viiwork/v2/internal/activity"
 	"github.com/janit/viiwork/v2/internal/alias"
 	"github.com/janit/viiwork/v2/internal/catalog"
+	"github.com/janit/viiwork/v2/internal/clientuse"
 	"github.com/janit/viiwork/v2/internal/config"
 	"github.com/janit/viiwork/v2/internal/cost"
 	"github.com/janit/viiwork/v2/internal/discovery"
@@ -83,6 +84,8 @@ type Options struct {
 	// ImageHelperWait bounds a stage's wait for the helper's image. Test
 	// seam; 0 = update.ImageHelper's default.
 	ImageHelperWait time.Duration
+	// Power replaces the probed node power. Test seam; nil = probed.
+	Power NodePower
 }
 
 // Node is one viiwork 2 node: its models, its mesh membership, its router and
@@ -113,7 +116,13 @@ type Node struct {
 	power       NodePower
 	costTracker *cost.Tracker
 	energyStore *energy.Store
-	activity    *activity.Log
+	// clients is the clients section as a table; a nil table names nobody.
+	// Reload swaps it when clients_reload is set.
+	clients atomic.Pointer[clientuse.Table]
+	// ledger measures busy time per client for the energy store. nil when
+	// the node has no store or energy.clients is false.
+	ledger   *clientuse.Ledger
+	activity *activity.Log
 
 	sup          *supervisor.Supervisor
 	counters     *proxy.Counters
@@ -248,6 +257,9 @@ func New(cfg *config.Config, o Options) (*Node, error) {
 		gpus = n.history
 	}
 	n.power = NewNodePower(n.sampler, gpus, n.vendor, gpuPower)
+	if o.Power != nil {
+		n.power = o.Power
+	}
 	apiKey, _ := o.LookupEnv("ENTSOE_API_KEY")
 	n.costTracker = newCostTracker(cfg.Cost, apiKey, n.power, n.logf)
 	if cfg.Energy.Enabled {
@@ -258,6 +270,22 @@ func New(cfg *config.Config, o Options) (*Node, error) {
 		if n.energyStore, err = openEnergy(cfg.Energy, cfg.Cost.Timezone, ids, n.power, n.logf); err != nil {
 			n.logf("[energy] disabled: %v", err)
 			n.energyStore = nil
+		}
+	}
+	// Client energy. The table makes this node label what it receives; the
+	// ledger makes it count. Either can exist without the other: an entry
+	// node with no store still labels its forwards, and a node that only
+	// receives forwards counts without a table.
+	table, err := clientuse.ParseTable(cfg.Clients)
+	if err != nil {
+		return nil, err
+	}
+	n.clients.Store(table)
+	if n.energyStore != nil && cfg.Energy.ClientsOn() {
+		n.ledger = clientuse.NewLedger(nil)
+		if table != nil || n.energyStore.HasClients() {
+			// A reason to count already exists; see clientuse.Ledger.
+			n.ledger.Activate()
 		}
 	}
 	n.activity = activity.NewLogWithHistory(cfg.Activity.PromptHistory, cfg.Activity.EventHistory)
@@ -302,6 +330,7 @@ func New(cfg *config.Config, o Options) (*Node, error) {
 		StaleAfter: cfg.Routing.StaleAfter.Duration, QueueMax: cfg.Routing.QueueMax,
 		QueueTimeout: cfg.Routing.QueueTimeout.Duration,
 		Performance:  cfg.Routing.PerformanceOn(),
+		LocalImages:  n.sup.Images,
 		LocalScore: func(model string) (int, int, bool) {
 			s, ok := n.perf.Score(model)
 			return s.OverheadMs, s.MsPer1k, ok
@@ -348,6 +377,7 @@ func New(cfg *config.Config, o Options) (*Node, error) {
 		Resolve: n.resolver.Resolve, ExtraModels: n.resolver.ModelEntries,
 		Perf: n.perf, PublishPerf: cfg.Routing.PerformanceOn(), Usage: n.usageReporting,
 		SeparateReasoning: n.separatesReasoning,
+		Clients:           n.clients.Load, ClientUse: n.ledger,
 	})
 
 	// 8. Member statuses and chassis power control.
@@ -467,6 +497,10 @@ func (n *Node) status() meshapi.NodeStatus {
 	if n.energyStore != nil {
 		energyReader = n.energyStore
 	}
+	var clientEnergy func() (energy.ClientEnergy, bool)
+	if n.energyStore != nil {
+		clientEnergy = n.energyStore.ClientEnergy
+	}
 	var costReader CostReader
 	if n.costTracker != nil {
 		costReader = n.costTracker
@@ -482,7 +516,7 @@ func (n *Node) status() meshapi.NodeStatus {
 		Started: n.started, Models: n.modelStatuses, QueueLen: n.router.QueueLen, Counters: n.counters.Get,
 		Perf: n.perf.Score, EngineVersions: n.engines.Known,
 		GPUs: gpus, Inventory: n.inventory, Vendor: n.vendor, Power: n.power,
-		Energy: energyReader, Cost: costReader, PromptHistory: n.activity.PromptHistoryMax(),
+		Energy: energyReader, ClientEnergy: clientEnergy, Cost: costReader, PromptHistory: n.activity.PromptHistoryMax(),
 	})
 }
 
@@ -603,6 +637,9 @@ func (n *Node) Run(ctx context.Context) error {
 			ids = modelGPUIDs(cfg.Models)
 		}
 		recorder := newRecorder(n.energyStore, cfg.Energy.SampleInterval.Duration, n.power, gpuReadings(n.history, ids, n.owners))
+		if n.ledger != nil {
+			recorder.SetClientUse(clientUse(n.ledger))
+		}
 		goLoop(func(ctx context.Context) {
 			recorder.Run(ctx) // flushes the bucket in progress on the way out
 			n.energyStore.Close()

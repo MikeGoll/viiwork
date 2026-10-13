@@ -107,6 +107,30 @@
 // obtained. Compare models within a host freely; compare across hosts with
 // care; do not present it as billing grade.
 //
+// # The client dimension
+//
+// A store can also say which client a model's energy was spent on. It is off
+// unless [Config.Clients] is set, and even then the store gains no file until
+// a client is named.
+//
+// The seam is one more function, [ClientUseFunc]: for a finished minute, how
+// many slot-seconds each client held of each model, and how many completion
+// tokens it received. [Recorder.SetClientUse] installs it. When the recorder
+// finalises a minute it splits each model's attributed energy between that
+// model's clients in proportion to their slot-seconds ([SplitClients]), and
+// writes one [ClientRecord] per pair. A model that drew above its floor with
+// no request running is recorded against nobody, and baseline is not divided
+// at all, so the shares of a model add up to the model and no total is
+// invented.
+//
+// The split is by slot time and not by tokens because reading a long prompt
+// draws full power and yields no completion tokens, and slot time is known
+// for every request on every engine.
+//
+// [Store.ClientEnergy] returns cumulative watt-hours per client. They are
+// counters: a consumer keeps one per store and adds differences, and must not
+// sum them across hosts that come and go.
+//
 // # Operational constraints
 //
 // Node wattage is a whole-host measurement. A host running several instances of

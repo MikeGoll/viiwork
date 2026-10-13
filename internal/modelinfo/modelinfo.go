@@ -89,6 +89,10 @@ type Info struct {
 	// It is a property of the seam — one OpenAI-compatible endpoint that
 	// passes tool definitions straight through — rather than of a checkpoint.
 	SupportsFunctionCalling bool `json:"supports_function_calling"`
+	// SupportsVision is set when a host the router can use says the model
+	// reads images. Omitted otherwise, which covers both "no host does" and
+	// "no host can say": this format reads a missing field as unknown.
+	SupportsVision bool `json:"supports_vision,omitempty"`
 }
 
 // Build renders the fleet's models in LiteLLM's shape.
@@ -105,6 +109,7 @@ func Build(models []discovery.Model) Response {
 				MaxInputTokens:          m.ServedContext,
 				Mode:                    "chat",
 				SupportsFunctionCalling: m.Tools,
+				SupportsVision:          m.Images,
 			},
 		})
 	}

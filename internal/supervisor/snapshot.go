@@ -25,6 +25,7 @@ type backendView struct {
 	Remain    int64
 	InFlight  int
 	Respawns  int
+	Images    imageAnswer
 	Uptime    time.Duration
 }
 
@@ -41,6 +42,7 @@ func (b *Backend) view(now time.Time, staleAfter time.Duration) backendView {
 		Decoded:  b.decoded,
 		Remain:   b.remain,
 		InFlight: b.InFlight(),
+		Images:   b.images,
 	}
 	if b.ladder != nil {
 		v.State = b.ladder.State()
@@ -121,7 +123,7 @@ func totals(cfg config.Model, views []backendView) (slots, busy, healthy int, ct
 // queue and the proxy the counters, and the node merges them in (P4, P6).
 func modelStatus(cfg config.Model, views []backendView) meshapi.ModelStatus {
 	slots, busy, _, ctx := totals(cfg, views)
-	s := meshapi.ModelStatus{Name: cfg.Name, Engine: cfg.Engine, Slots: slots, Busy: busy, Ctx: ctx}
+	s := meshapi.ModelStatus{Name: cfg.Name, Engine: cfg.Engine, Slots: slots, Busy: busy, Ctx: ctx, Images: modelImages(views)}
 	s.Backends = make([]meshapi.BackendStatus, 0, len(views))
 	for _, v := range views {
 		s.Backends = append(s.Backends, v.status(cfg))
@@ -133,6 +135,6 @@ func modelCapacity(cfg config.Model, views []backendView) meshapi.ModelCapacity 
 	slots, busy, healthy, ctx := totals(cfg, views)
 	return meshapi.ModelCapacity{
 		Name: cfg.Name, Engine: cfg.Engine, Slots: slots, Busy: busy, Ctx: ctx,
-		Backends: len(views), HealthyBackends: healthy,
+		Backends: len(views), HealthyBackends: healthy, Images: modelImages(views),
 	}
 }

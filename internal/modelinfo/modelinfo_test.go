@@ -192,3 +192,23 @@ func TestHandlerServesGetOnly(t *testing.T) {
 		t.Errorf("POST = %d, want 404", rec.Code)
 	}
 }
+
+// supports_vision is present only when the fleet reads images with the
+// model. Absent is this format's "unknown".
+func TestSupportsVisionOnlyWhenTheFleetReadsImages(t *testing.T) {
+	yes := true
+	eyes := served("eyes", 8192)
+	eyes.Images = &yes
+	got := build(fakeSource{
+		entries: []meshapi.ModelEntry{entry("eyes", meshapi.OwnedByLocal), entry("tg", meshapi.OwnedByLocal)},
+		fleet:   []meshapi.FleetModel{eyes, served("tg", 8192)},
+	})
+	if e, _ := byName(got, "eyes"); !e.ModelInfo.SupportsVision {
+		t.Error("eyes: supports_vision must be true")
+	}
+	e, _ := byName(got, "tg")
+	b, _ := json.Marshal(e.ModelInfo)
+	if strings.Contains(string(b), "supports_vision") {
+		t.Errorf("tg: supports_vision must be absent: %s", b)
+	}
+}

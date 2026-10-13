@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/janit/viiwork/v2/energy"
 	"github.com/janit/viiwork/v2/internal/gpu"
 	"github.com/janit/viiwork/v2/internal/perf"
 	"github.com/janit/viiwork/v2/internal/proxy"
@@ -122,6 +123,41 @@ func TestBuildStatusOptional(t *testing.T) {
 	s.Vendor, s.GPUs = gpu.VendorNone, nil
 	if st := BuildStatus(s); len(st.GPUs) != 0 {
 		t.Errorf("no GPUs: %+v", st.GPUs)
+	}
+}
+
+func TestBuildStatusClientEnergy(t *testing.T) {
+	src := statusFixture()
+	src.ClientEnergy = func() (energy.ClientEnergy, bool) {
+		return energy.ClientEnergy{Since: 1790000040, Through: 1790000100, Clients: []energy.ClientTotal{
+			{Name: "factory-a", Wh: 18234.5123, W1m: 212.04, KWh24h: 1.4204, KWh30d: 31.8, BusyS: 412300, Tokens: 9120044},
+		}}, true
+	}
+	ce := BuildStatus(src).ClientEnergy
+	if ce == nil || ce.Since != 1790000040 || ce.Through != 1790000100 || len(ce.Clients) != 1 {
+		t.Fatalf("client energy = %+v", ce)
+	}
+	want := meshapi.ClientEnergyEntry{Name: "factory-a", WhTotal: 18234.5, W1m: 212, KWh24h: 1.42, KWh30d: 31.8, BusySTotal: 412300, TokensTotal: 9120044}
+	if ce.Clients[0] != want {
+		t.Errorf("entry = %+v, want %+v", ce.Clients[0], want)
+	}
+}
+
+// Off: a node that has nothing to say about clients serves the status it
+// served before, byte for byte.
+func TestBuildStatusWithoutClientsIsUnchanged(t *testing.T) {
+	plain, err := json.Marshal(BuildStatus(statusFixture()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(plain), "client_energy") {
+		t.Fatalf("a status with no client source mentions client_energy: %s", plain)
+	}
+	src := statusFixture()
+	src.ClientEnergy = func() (energy.ClientEnergy, bool) { return energy.ClientEnergy{}, false }
+	unnamed, _ := json.Marshal(BuildStatus(src))
+	if string(unnamed) != string(plain) {
+		t.Errorf("a store with no named client changed the status:\n%s\n%s", unnamed, plain)
 	}
 }
 

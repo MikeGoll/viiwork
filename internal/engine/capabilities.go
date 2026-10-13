@@ -127,6 +127,32 @@ type PerfKeyer interface {
 	PerfKey(s Spec) string
 }
 
+// ImageReader is implemented by an engine that can say whether a backend
+// reads images (image_url parts of a chat request). It is asked once per
+// launch, on the transition to healthy, with the Spec the backend was started
+// with. ok is false when the engine cannot say for this backend, which is not
+// "no": the router sends a request with an image only to a backend that says
+// yes while one exists, to one that cannot say when none does, and never to
+// one that says no. An engine that would have to guess does not implement
+// this.
+type ImageReader interface {
+	ReadsImages(ctx context.Context, s Spec, addr string) (reads, ok bool, err error)
+}
+
+// ImagesOf asks e whether the backend at addr reads images. ok is false for
+// an engine without the capability, for one that cannot say, and on an error.
+func ImagesOf(ctx context.Context, e Engine, s Spec, addr string) (reads, ok bool) {
+	r, is := e.(ImageReader)
+	if !is {
+		return false, false
+	}
+	reads, ok, err := r.ReadsImages(ctx, s, addr)
+	if err != nil || !ok {
+		return false, false
+	}
+	return reads, true
+}
+
 // WarmUpper is implemented by an engine whose server answers its probe as
 // ready before it is safe to send it work. WarmUp is how long a backend must
 // have been ready, without a break, before the node calls it healthy; until

@@ -2,9 +2,11 @@
 
 This is the on-disk contract for `github.com/janit/viiwork/energy`. It is
 specified here rather than left to the Go source because the format has more
-than one producer: `viiwork` writes it from `ipmitool` and `rocm-smi`, and
-`viiwork-nvidia` writes it from `nvidia-smi`. The Go package is the reference
-implementation; this document is what a second one is written against.
+than one producer. `viiwork` writes it from `ipmitool`, `rocm-smi` or
+`nvidia-smi`; `viiwork-nvidia`, which wrote it from `nvidia-smi`, is frozen
+since 2026-09-13, and stores it wrote are still read. The Go package is the
+reference implementation; this document is what a second one is written
+against.
 
 **Status:** frozen as of v1.6.0. See [Compatibility](#compatibility) before
 changing anything in it.
@@ -29,10 +31,18 @@ to another machine and read without its `viiwork.yaml`.
 | `gpu-day.ring` | 365 | *G* | 24 | 32 + 8,760·*G* |
 | `models.txt` | — | — | — | grows, bounded by 65,535 names |
 | `source` | — | — | — | one line |
+| `client-minute.ring` | 1440 | *L* | 24 | 32 + 34,560·*L* |
+| `client-hour.ring` | 8760 | *L* | 24 | 32 + 210,240·*L* |
+| `clients.txt` | — | — | — | grows, bounded by 65,535 names |
+| `client-totals` | — | — | — | a few lines |
 
 *G* is the number of GPUs on the host. The six rings are **preallocated in
 full** at creation and never grow: 2.6 MB total for *G*=10. Retention is the
 wrap, not a purge job.
+
+The four client files exist only in a store where a client has been named. *L*
+is `energy.client_lanes`, 8 by default: 1.9 MB for the two rings. See
+[Client energy](#client-energy).
 
 The slot counts above are the defaults (24 hours of minutes, one year of hours,
 one year of days). They are configurable per deployment — see
@@ -244,6 +254,113 @@ A producer that cannot name its source leaves the file alone rather than
 writing a placeholder, so a label already earned by a history is not erased by a
 build that happens not to know it.
 
+## Client energy
+
+Added in v2.10.0 as sibling files. Nothing above changes: the six rings,
+`models.txt` and `source` are byte for byte what they were, and the magic is
+still `VIIWENG1`. A reader that does not know these files ignores them. A
+reader that does treats a store without them as one where no client was ever
+named.
+
+The files are created by the first minute that names a client, never by
+opening the store.
+
+### `ClientRecord` — 24 bytes
+
+| offset | size | type | field | meaning |
+|---|---|---|---|---|
+| 0 | 8 | int64 | `TS` | bucket start, Unix seconds. `0` = never written |
+| 8 | 2 | uint16 | `ClientIdx` | row in `clients.txt`; `0` = nobody |
+| 10 | 2 | uint16 | `ModelIdx` | row in `models.txt` |
+| 12 | 4 | float32 | `Wh` | energy attributed to this pair in the bucket |
+| 16 | 4 | uint32 | `BusyS` | slot-seconds of this pair in the bucket |
+| 20 | 4 | uint32 | `Tokens` | completion tokens of requests that ended in it |
+
+A record carries energy, not power, so there is no `CoveredS` and a coarser
+bucket is a plain sum.
+
+The two rings have the header and the slot derivation of every other ring.
+A lane holds one (client, model) pair of the bucket. **Which pair is in which
+lane is not fixed**: read by `ClientIdx` and `ModelIdx`, never by lane number.
+
+- Every write of a bucket writes all *L* lanes in one `pwrite`. Lanes not
+  needed are zero, so a record of a previous lap cannot survive beside new
+  ones.
+- A bucket with more than *L* pairs keeps the *L* − 1 largest by `Wh`. The
+  rest are added into one record with the client `other` and `ModelIdx` 0. No
+  energy is lost.
+- `ClientIdx` 0 is "nobody": energy a model drew in a bucket where no request
+  was running. Baseline is in no client record at all.
+
+For one model in one minute, the `Wh` of its records add up to the sum of
+`AttrW × CoveredS / 3600` over that model's `GPURecord`s, unless the bucket was
+folded: the folded `other` record has `ModelIdx` 0, so the per-model sum no
+longer holds, while the total over all records still does.
+
+At the default slot counts (1,440 minute slots, 8,760 hour slots, 8 lanes) the
+two rings are about 2 MB together.
+
+### `clients.txt`
+
+The grammar of `models.txt`: newline-separated, append-only, line *N* is
+`ClientIdx` *N*, every line ends in `\n`, an append is synced before its index
+is used, and a last line without its newline is a torn append to be dropped.
+**Line 0 is the empty string.** A name has no whitespace, is not `-`, and is at
+most 64 bytes (`maxClientNameLen`; the node's own rule for the names an
+operator writes is stricter, 32 characters).
+
+### `client-hour.ring`
+
+Writing a minute recomputes its hour from the minute ring: records are grouped
+by pair and `Wh`, `BusyS` and `Tokens` are summed. The hour is rewritten, not
+added to. There is no day ring: the hour ring holds a year at the default 8,760 slots.
+
+### `client-totals`
+
+Cumulative counters, as text, replaced by writing `client-totals.tmp` and
+renaming it:
+
+```
+since 1790000040 through 1791526500
+- 310.250 0 0
+factory-a 18234.512 412300 9120044
+other 2210.004 51020 804113
+```
+
+The first line is the start of the first minute counted and the start of the
+last one. Each following line is a name, watt-hours, busy seconds and tokens
+since `since`, sorted by name; `-` is nobody.
+
+- A minute is added once, after its ring write, when its `TS` is greater than
+  `through`. It is added as soon as it is in the minute ring, before the hour
+  roll-up.
+- On open, minute records with a `TS` greater than `through` are added first,
+  so a crash between the ring write and the rename loses nothing the ring
+  still holds.
+- `since` never changes in a store. A store that is recreated has a new one,
+  and that is how a consumer knows the counters started again.
+- Counters are kept and written at three decimals of a watt-hour, so what a
+  node published before a restart is what it reads back; a counter never steps
+  down across one.
+- A row whose watt-hours are not finite (`NaN`, `Inf`) or are negative makes the
+  file unreadable, like any other parse failure. A record with such an energy is
+  not added to the counters.
+- A client ring that cannot be opened when the store opens (a wrong magic, say)
+  is logged, and the store runs without the client dimension: node and GPU
+  recording are unaffected and the file is left as it is.
+- A file that cannot be parsed is renamed `client-totals.bad` and a new one is
+  started, with a new `since`. If it cannot be renamed, or the new file cannot
+  be saved (a full disk, for example), the store still opens, the fault is
+  logged and counting carries on in memory. A file that could not be read is
+  never overwritten.
+- At shutdown the minute in progress is split like any other, with the busy
+  time so far, and it is counted once. A restart inside the same minute does
+  not add it again, so the rest of that minute is not counted: the figures are
+  low, never high.
+
+`energy.client_lanes` is geometry: changing it recreates the two client rings
+and says so in the log. The totals are kept.
+
 ## Roll-up
 
 Writing a finalised minute also recomputes the hour and the day it belongs to.
@@ -264,8 +381,8 @@ on the same value instead of double counting.
   day aggregates its 23 or 25 hours rather than a fixed 24.
 ## Durability and concurrency
 
-- Record writes are `pwrite` without `fsync`. An explicit sync flushes all six
-  rings, and the reference recorder syncs on shutdown. **A hard power loss can
+- Record writes are `pwrite` without `fsync`. An explicit sync flushes every
+  ring, and the reference recorder syncs on shutdown. **A hard power loss can
   lose the last few minutes**, which is the intended trade for not fsyncing a
   2.6 MB file every minute on a host whose job is inference.
 - Each record write is a single `pwrite` of one whole record at a
@@ -286,8 +403,10 @@ on the same value instead of double counting.
 
 ### What is frozen
 
-The magic, the header layout, both record layouts, the field meanings, the slot
-derivation, the `models.txt` grammar and the `source` vocabulary. Independently
+The magic, the header layout, the three record layouts (`NodeRecord`,
+`GPURecord`, `ClientRecord`), the field meanings, the slot derivation, the
+grammar of `models.txt` and `clients.txt`, the layout of `client-totals` and the
+`source` vocabulary. Independently
 upgraded machines and two implementations mean several versions of this format
 are live at once, so a producer cannot assume the consumer of a directory is
 itself.
@@ -310,7 +429,8 @@ change becomes visible:
 - Refusing is recoverable: the operator moves the directory aside. A silent
   reinit is not.
 
-Adding a sibling file — as `source` was in v1.6.0 — is not a format change. An
+Adding a sibling file — as `source` was in v1.6.0, and the four client files in
+v2.10.0 — is not a format change. An
 older reader ignores a file it does not know about, and a newer reader treats a
 missing one as unknown.
 

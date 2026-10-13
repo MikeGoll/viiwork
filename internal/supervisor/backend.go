@@ -60,6 +60,9 @@ type Backend struct {
 	loadAt     time.Time // zero when no load has succeeded since the launch
 	decoded    int64
 	remain     int64
+	// images is the engine's answer to "does this backend read images", asked
+	// once per launch on the transition to healthy and cleared at launch.
+	images imageAnswer
 
 	powerLimitLogged bool
 }
@@ -204,6 +207,7 @@ func (b *Backend) launch() error {
 	b.mu.Lock()
 	b.proc, b.port, b.launchedAt = proc, port, b.deps.Now()
 	b.load, b.loadAt, b.decoded, b.remain, b.rss = engine.Load{}, time.Time{}, 0, 0, 0
+	b.images = imagesUnknown
 	b.mu.Unlock()
 	return nil
 }

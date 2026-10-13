@@ -61,6 +61,78 @@ Those five are the ROCm hosts. The fleet also runs `vllm` on one host and
 v2.2.0 is. `strata` is the fourth engine, added later; it has run on one
 ten-card Radeon VII host (below).
 
+## Models that read images
+
+A chat request may carry a picture as an `image_url` content part. A backend
+reads it only when it was started with the model's vision part, and from
+v2.10.0 the mesh knows which backends were.
+
+**Turning it on, per engine.**
+
+| Engine | How | What the node says |
+|---|---|---|
+| `llamacpp` | `llamacpp.mmproj: /models/<projector>.gguf` (or `--mmproj` in `args`) | yes with a projector, no without; cannot say for a model fetched with `-hf` |
+| `strata` | a `"vision"` section in the model's Strata JSON: `exe` (`strata-vision`), `mmproj`, `model`, `gpu`, `max_tokens`, and `threads` for a CPU encoder | what the server's `/health` reports as `images` |
+| `vllm`, `freetoken` | the engine's own flags | cannot say |
+
+Strata's encoder runs on the model's card (`"gpu": true`, about 700 MiB of
+VRAM held back for it) or on the CPU (`"gpu": false`), which costs no VRAM.
+
+**What the mesh does.** Each node publishes `images` per model: `true`,
+`false`, or absent for "cannot say". A request with an image then goes:
+
+1. to a host that says yes, waiting in the queue for it when it is full;
+2. when no host says yes, to hosts that cannot say, as before v2.10.0;
+3. when every host that serves the model says no, nowhere: the client gets
+   `400` with `model "<name>" does not read images on any node`.
+
+So one name can be served with a projector on one node and without on
+another, and a picture still lands where it can be read. A text request is
+not affected by any of this.
+
+**What to expect.** A request body is at most 32 MB, images included. The
+prompt history keeps a request's text and not its images. How many tokens an
+image costs and how well a model reads a screenshot depend on the model and
+its projector.
+
+### Measured: Strata with a CPU encoder on one RTX 5090
+
+2026-10-13, one host: an RTX 5090 (32 GB), 128 CPU threads, 247 GB of RAM,
+`qwen3.8-flash-next` (IQ3_XXS) under Strata v0.1.41 at 262144 tokens of
+context and 4 slots. The card was full before the change (31992 of 32607
+MiB). The vision section used the CPU encoder: `"gpu": false`,
+`"threads": 64`, projector `mmproj-Qwen3.8-Flash-Next-BF16.gguf` (908 MB).
+
+| | Text only | With the vision section |
+|---|---|---|
+| VRAM in use | 31992 MiB | 32000 MiB |
+| RAM of the node's container | 58.8 GiB | 59.8 GiB |
+| Load, park to healthy | not measured | 60 s, of which 30 s is the warm-up |
+| One text request, 400 tokens out | 125 tok/s | 125 tok/s |
+| Four text requests at once | 182 tok/s together | 185 tok/s together |
+| Slots | 4 | 4 |
+
+So the encoder cost this host no VRAM, no slot and no text speed.
+
+A 1440x1000 PNG screenshot (26 KB) cost about 990 prompt tokens with
+`"max_tokens": 1024` in the vision section, and about 290 with 300, Strata's
+default for a CPU encoder. One request with the screenshot and a short
+question took 6.5 s to answer with about 240 tokens; four at once took 7.6 s
+and produced 142 tok/s together.
+
+The screenshot was a web dashboard with a red rectangle drawn at the right
+end of a titled band, and the question was which panel the rectangle is in.
+
+- At 1024 image tokens, 7 of 8 answers placed the rectangle correctly (top
+  right, above the row of cards, beside the intro text), and 5 of those 7
+  named the band's title. One answer put it in the navigation bar.
+- At 300 image tokens, 0 of 3 answers were right: all put it in or beside the
+  navigation bar.
+
+A screenshot with small text needs the larger budget. This is one image and
+eleven answers on one model, enough to choose a setting and not enough to
+call the model reliable at reading interfaces.
+
 ## Large models on one card: FreeToken and MoE offload
 
 FreeToken's unit of deployment is **one card per process** — it has a

@@ -167,6 +167,19 @@ func (r *ring) put(bucket int64, lane int, enc func([]byte)) error {
 	return err
 }
 
+// putSlot writes every lane of one slot in a single write. buf is exactly one
+// slot long. A lane left zeroed reads as never written, which is how a slot
+// that held eight records last lap and holds two now loses the other six.
+func (r *ring) putSlot(bucket int64, buf []byte) error {
+	if len(buf) != r.lanes*r.recSize {
+		return fmt.Errorf("slot is %d bytes, this ring's are %d", len(buf), r.lanes*r.recSize)
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	_, err := r.f.WriteAt(buf, r.offset(int(mod(bucket, int64(r.slots))), 0))
+	return err
+}
+
 // all reads every slot. Callers filter by timestamp; a slot never written, or
 // holding a record older than the window asked for, is simply skipped.
 func (r *ring) all() ([]byte, error) {

@@ -16,6 +16,9 @@ var (
 	ErrModelNotFound  = errors.New("route: model not found")
 	ErrHostNotServing = errors.New("route: host does not serve the model")
 	ErrNoFreeSlot     = errors.New("route: no free slot")
+	// ErrNoImageInput: the request carries an image and every host that
+	// serves the model, by fresh evidence, says it does not read images.
+	ErrNoImageInput = errors.New("route: no host reads images with the model")
 )
 
 type Config struct {
@@ -30,6 +33,9 @@ type Config struct {
 	Performance bool
 	// LocalScore is this node's own score for a model; nil = none.
 	LocalScore func(model string) (overheadMs, msPer1k int, ok bool)
+	// LocalImages is whether this node reads images with a model; known is
+	// false when it cannot say. nil = it never can.
+	LocalImages func(model string) (reads, known bool)
 	// Rand returns a float in [0,1); nil = math/rand/v2. Tests inject it.
 	Rand func() float64
 }
@@ -70,6 +76,14 @@ type Request struct {
 	// header), 0 = none. Within the scored band it sends every turn of a
 	// session to the same host, so the turns reuse that host's KV cache.
 	SessionKey uint64
+	// Images says the request carries an image. It then goes only to hosts
+	// that say they read images; when no host says so, to hosts that cannot
+	// say; and when every host says no, nowhere (ErrNoImageInput). A forward
+	// ignores it: the origin chose this node.
+	Images bool
+	// imgWant is the class of host this pick may use, set by the pick itself
+	// from Images and the evidence at hand. imgAny is no filter.
+	imgWant imageClass
 }
 
 type resKey struct{ node, model string }
@@ -200,13 +214,23 @@ func (r *Router) pickWithReportsLocked(req Request, reports []capacity.Report) (
 		}
 	}
 
+	localElig := localOK && admitting
+	if req.Images && !req.Forwarded {
+		want, err := r.imageClassLocked(req, localOK && anyHealthy(backends), reports)
+		if err != nil {
+			return nil, err
+		}
+		req.imgWant = want
+		localElig = localElig && r.localImageClass(req.Model) == want
+	}
+
 	if len(req.Prefer) > 0 && !req.Forwarded && req.Host == "" {
-		if l := r.pickPreferredLocked(req, backends, localOK && admitting, reports); l != nil {
+		if l := r.pickPreferredLocked(req, backends, localElig, reports); l != nil {
 			return l, nil
 		}
 	}
 	if r.c.Performance && !req.Forwarded && req.Host == "" {
-		if l, handled := r.pickScoredLocked(req, backends, localOK && admitting, reports); handled {
+		if l, handled := r.pickScoredLocked(req, backends, localElig, reports); handled {
 			if l != nil {
 				return l, nil
 			}
@@ -215,12 +239,12 @@ func (r *Router) pickWithReportsLocked(req Request, reports []capacity.Report) (
 		// No score anywhere: a session still follows its host, the same
 		// rendezvous as the scored pick, over every host with a free slot.
 		if req.SessionKey != 0 {
-			if l := r.pickSessionLocked(req, backends, localOK && admitting, reports); l != nil {
+			if l := r.pickSessionLocked(req, backends, localElig, reports); l != nil {
 				return l, nil
 			}
 		}
 	}
-	if localOK && admitting && (req.Host == "" || req.Host == r.c.Self) {
+	if localElig && (req.Host == "" || req.Host == r.c.Self) {
 		if l := r.pickLocalLocked(req, backends); l != nil {
 			return l, nil
 		}
@@ -379,6 +403,9 @@ func (r *Router) peerFreeLocked(req Request, rep capacity.Report, now time.Time)
 		return mc, 0, false
 	}
 	if (req.Host != "" && rep.Node != req.Host) || req.Exclude["peer:"+rep.Node] {
+		return mc, 0, true
+	}
+	if req.imgWant != imgAny && classOf(mc.Images) != req.imgWant {
 		return mc, 0, true
 	}
 	key := resKey{rep.Node, req.Model}

@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/base64"
 	"fmt"
+	"github.com/janit/viiwork/v2/internal/clientuse"
 	"github.com/janit/viiwork/v2/internal/engine"
 	"net"
 	"net/netip"
@@ -144,6 +145,12 @@ func (c *Config) Validate(lookupEnv func(string) (string, bool)) error {
 		if c.Energy.SampleInterval.Duration <= 0 {
 			return fmt.Errorf("energy.sample_interval must be positive")
 		}
+	}
+	if c.Energy.ClientLanes < 2 || c.Energy.ClientLanes > 64 {
+		return fmt.Errorf("energy.client_lanes must be 2-64, got %d", c.Energy.ClientLanes)
+	}
+	if _, err := clientuse.ParseTable(c.Clients); err != nil {
+		return err
 	}
 	if err := c.validateParrot(); err != nil {
 		return err

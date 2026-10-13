@@ -76,6 +76,7 @@ func Defaults() Config {
 			MinuteSlots:    energy.DefaultMinuteSlots,
 			HourSlots:      energy.DefaultHourSlots,
 			DaySlots:       energy.DefaultDaySlots,
+			ClientLanes:    8,
 		},
 		Cost:          CostConfig{Timezone: "Europe/Helsinki"},
 		ViiworkParrot: ViiworkParrotConfig{API: DefaultParrotAPI},

@@ -63,6 +63,10 @@ models:
     llamacpp:                # optional; these are the defaults
       binary: llama-server
       split_mode: layer      # layer | row
+      # mmproj: /models/mmproj-Qwen3.8-27B-F16.gguf
+      #                      # the model's vision projector: with it the backend
+      #                      # reads images, the node says so to the mesh, and a
+      #                      # request with an image is routed here. No default.
   - name: granite-4.2-8b
     engine: llamacpp
     path: /models/granite-4.2-8b-Q8_0.gguf
@@ -191,6 +195,20 @@ models:
 
 power:
   source: none               # auto | dcmi | sdr | sensor:<NAME> | none
+
+# Energy history (docs/power-and-energy.md). Off unless enabled.
+# energy:
+#   enabled: true
+#   dir: /var/lib/viiwork/energy
+#   clients: true          # false keeps this node out of energy per client
+#   client_lanes: 8        # client and model pairs per minute; changing it discards the client rings
+
+# Energy per client (docs/power-and-energy.md). Off until a client is named.
+# Write this on every node that clients call directly.
+# clients:
+#   factory-a: [100.64.0.10]
+#   batch-b:   [100.64.0.20, 198.51.100.0/24]
+# clients_reload: true     # apply a changed clients section on reload
 
 # Rolling updates (docs/releases.md). Off unless enabled.
 # update:

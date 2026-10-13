@@ -58,6 +58,12 @@ type FleetModel struct {
 	// when no host has a slot — nothing can promise a window it cannot serve.
 	Ctx   int64       `json:"ctx,omitempty"`
 	Hosts []FleetHost `json:"hosts"`
+	// Images (v2.10) is whether the fleet reads images with this model: true
+	// when a fresh host with slots says it does, which is where the router
+	// sends a request that carries one; false when every fresh host with
+	// slots says it does not, and such a request is refused. Absent when no
+	// host says yes and at least one cannot say.
+	Images *bool `json:"images,omitempty"`
 }
 
 // FleetHost is one node's contribution to a model.
@@ -83,4 +89,7 @@ type FleetHost struct {
 	// present: it is the one thing still assertable about a stale host.
 	AgeMS int64 `json:"age_ms"`
 	Stale bool  `json:"stale,omitempty"`
+	// Images (v2.10) is the host's own answer, as in ModelCapacity. Absent
+	// for a stale host and for one that cannot say.
+	Images *bool `json:"images,omitempty"`
 }

@@ -25,6 +25,7 @@ type Model struct {
 	GPUs                          []int
 	PerBackend, Context, Parallel int
 	Binary                        string // llamacpp.binary; empty keeps the engine's default
+	Mmproj                        string // llamacpp.mmproj as the node sees it; empty = a text model
 }
 
 // Answers are the wizard's decisions.
@@ -89,7 +90,8 @@ type modelY struct {
 }
 
 type llamaY struct {
-	Binary string `yaml:"binary"`
+	Binary string `yaml:"binary,omitempty"`
+	Mmproj string `yaml:"mmproj,omitempty"`
 }
 
 // Config renders viiwork.yaml. secret is the mesh secret Validate is given
@@ -109,8 +111,8 @@ func Config(a Answers, secret []byte) ([]byte, error) {
 		if m.PerBackend > 1 || m.Size > largeWeights {
 			y.StartupTimeout = longStartup
 		}
-		if m.Binary != "" {
-			y.Llamacpp = &llamaY{Binary: m.Binary}
+		if m.Binary != "" || m.Mmproj != "" {
+			y.Llamacpp = &llamaY{Binary: m.Binary, Mmproj: m.Mmproj}
 		}
 		f.Models = append(f.Models, y)
 	}

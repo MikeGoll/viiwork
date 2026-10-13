@@ -26,8 +26,13 @@ type NodeStatus struct {
 	Power          PowerInfo     `json:"power"`
 	EnergyKWh24h   float64       `json:"energy_kwh_24h,omitempty"`
 	EnergyKWh30d   float64       `json:"energy_kwh_30d,omitempty"`
-	Cost           CostInfo      `json:"cost"`
-	PromptHistory  int           `json:"prompt_history,omitempty"`
+	// ClientEnergy (v2.10) is the GPU energy this node spent per named
+	// client. Absent on a node with no energy store, on one that keeps no
+	// client energy, on an older version, and until the node has served a
+	// named client. Absent is "cannot say", never zero.
+	ClientEnergy  *ClientEnergy `json:"client_energy,omitempty"`
+	Cost          CostInfo      `json:"cost"`
+	PromptHistory int           `json:"prompt_history,omitempty"`
 }
 
 // GPUInfo is one card as the host's SMI tool reports it.
@@ -70,6 +75,9 @@ type ModelStatus struct {
 	// restart. It tells a parked model from a broken one; absent on older
 	// nodes.
 	Parked bool `json:"parked,omitempty"`
+	// Images (v2.10) is whether the model reads images on this node, as in
+	// ModelCapacity. Absent is "cannot say", never "no".
+	Images *bool `json:"images,omitempty"`
 }
 
 // BackendStatus is one backend process of a model.
@@ -101,6 +109,35 @@ type CostInfo struct {
 	EURPerHour float64        `json:"eur_per_hour,omitempty"`
 	TodayEUR   float64        `json:"today_eur,omitempty"`
 	Breakdown  *CostBreakdown `json:"breakdown,omitempty"`
+}
+
+// ClientEnergy is one node's energy per named client. The counters in it are
+// this node's alone. There is no mesh-wide total, on purpose: a sum over a
+// set of nodes that changes goes down when a node leaves, which a counter
+// must never do. A consumer keeps one counter per node, keyed by NodeID, and
+// adds differences. docs/client-energy.md gives the rule.
+type ClientEnergy struct {
+	// Since is when this node began counting, Unix seconds. It changes only
+	// when the node's store is recreated, and then the counters start at zero.
+	Since int64 `json:"since"`
+	// Through is the start of the last minute counted. The counters move once
+	// a minute and run 60 to 90 seconds behind the clock.
+	Through int64 `json:"through"`
+	// Clients is sorted by name and holds at most 32, the largest by WhTotal.
+	Clients []ClientEnergyEntry `json:"clients"`
+}
+
+// ClientEnergyEntry is one client on one node. WhTotal, BusySTotal and
+// TokensTotal only grow while Since stays the same. W1m, KWh24h and KWh30d
+// are this node's own readings, for someone looking at one node.
+type ClientEnergyEntry struct {
+	Name        string  `json:"name"`
+	WhTotal     float64 `json:"wh_total"`
+	W1m         float64 `json:"w_1m"` // mean draw over the minute at Through
+	KWh24h      float64 `json:"kwh_24h"`
+	KWh30d      float64 `json:"kwh_30d"`
+	BusySTotal  uint64  `json:"busy_s_total"`
+	TokensTotal uint64  `json:"tokens_total"`
 }
 
 // CostBreakdown splits the current per-kWh price into its components.

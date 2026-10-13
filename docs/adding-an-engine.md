@@ -184,6 +184,16 @@ type GPUBindingReader interface {
     BoundGPU(ctx context.Context, addr string) (uuid string, ok bool, err error)
 }
 
+// ImageReader is implemented by an engine that can say whether a backend
+// reads images. Called once per launch, on the transition to healthy, with
+// the Spec the backend was started with. ok=false means the engine cannot say
+// for this backend, which is not "no": a request with an image goes to a
+// backend that says yes while one exists, to one that cannot say when none
+// does, and never to one that says no.
+type ImageReader interface {
+    ReadsImages(ctx context.Context, s Spec, addr string) (reads, ok bool, err error)
+}
+
 // DisplayNamer says what the engine is called by people ("llama.cpp" where
 // Name is "llamacpp"). It is what status.models[].engine_name carries.
 // enginetest.Run requires it: 1 to 40 bytes, no control characters.

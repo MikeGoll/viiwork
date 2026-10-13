@@ -1,5 +1,77 @@
 # Changelog
 
+## v2.10.0
+
+**Image input: a request with a picture goes to a backend that reads pictures, and a client can see which models do.**
+
+- **`models[].llamacpp.mmproj`** names a llama.cpp model's vision projector
+  (an absolute path to its GGUF) and becomes `--mmproj`. A file that is not a
+  projector is refused at start with the field named. A `--mmproj` in `args`
+  still works; write one or the other.
+- **A node says whether a model reads images.** A new `images` field on
+  `/v1/capacity`, on each model of `/v1/status` and `/v1/cluster`, and on each
+  model and host of `/v1/fleet/capacity`. llama.cpp answers from what the
+  backend was started with, Strata from its own `/health`. vLLM and FreeToken
+  do not answer yet. The field is absent when a node cannot say, and absent
+  never means no.
+- **A chat request with an `image_url` part is routed by that answer.** It
+  goes to a host that says yes. When no host says yes it goes to hosts that
+  cannot say, which is every host on an older version, so a mesh that worked
+  before works the same. When every host that serves the model says no, the
+  client gets a 400 at once: `model "<name>" does not read images on any
+  node`. Until v2.10 that request reached an engine and came back as the
+  engine's own 400 or 500.
+- **The pin, the preference list and sessions follow the same rule.**
+  `?host=` naming a node that reads no images is the 400; a preferred node
+  that reads none is passed over; a session's image turns go to its host
+  among those that read images.
+- **Discovery.** `/api.json` lists `image` among a model's inputs, and
+  `/v1/model/info` sets `supports_vision`, when a host with slots says yes.
+- **The setup wizard** serves a model with its projector when the two are
+  alone in a directory, counts the projector in the card plan and says so.
+- **Mixed versions.** An older node ignores the field and routes an image
+  request as it always did, so during an upgrade an image request that enters
+  through an older node can still reach a backend that refuses it. Upgrade
+  the nodes clients call first.
+- **Not changed.** The request limit is 32 MB, images included. The prompt
+  history shows a request's text and leaves its images out.
+
+**Energy per client: a node can say how much of its models' energy went to each named client.**
+
+- **A client is named by its source address** in a new `clients` section
+  (`factory-a: [100.64.0.10]`), on the nodes clients call. The name travels
+  with a forward in `X-Viiwork-Client`, which a node accepts only on a forward
+  it has verified and removes from anything else, so a client cannot name
+  itself once every node that clients call is on v2.10 or later. A node still
+  on v2.9.x does not strip the header from a client's request and copies it
+  onto its signed forward, which a v2.10 node honours: add `clients` only
+  after that upgrade.
+- **A model's energy is split by busy slot-seconds.** Baseline is not shared
+  out, and a model that draws power with no request running is recorded
+  against nobody. For every model and minute the clients' shares add up to
+  the model's attributed energy.
+- **`client_energy` on `/v1/status` and `/v1/cluster`**: cumulative
+  watt-hours, busy seconds and tokens per client, with this node's own draw
+  over the last minute and its 24-hour and 30-day sums. The counters are per
+  node. There is no mesh total: a sum over machines that are switched off and
+  on would go down.
+- **Four new files beside the energy store's own**: `client-minute.ring`,
+  `client-hour.ring`, `clients.txt` and `client-totals`. The existing files
+  and the `VIIWENG1` magic are unchanged, and the new files are created only
+  when a client is first named.
+- **Off unless asked for.** With no `clients` section on any node, nothing is
+  labelled, recorded or published, and a node serves the status it served
+  before. `energy.clients: false` keeps one node out. `clients_reload: true`
+  applies a changed section on reload; without it the change waits for a
+  restart.
+- **During an upgrade the figures are low, never high.** A node on an older
+  version records nothing per client, and an older entry node sends no name of
+  its own, which the receiver counts as `other`, but passes one a client sent.
+- **Known limits.** A request to a pipeline is counted as `other`, because the
+  pipeline's steps call back into the node from its own address. In an open
+  mesh any process on a member machine can name itself, which affects
+  accounting only.
+
 ## v2.9.2
 
 **The status names each model's engine for people and says which version of it the machine runs.**
@@ -42,6 +114,13 @@ parameter is needed to get them:
   where there is not, then `engine_version` where there is one:
   `llama.cpp b11371`, `Strata`, or `llamacpp` from a node older than v2.9.2,
   which sends neither field. A mesh of mixed versions needs no other rule.
+- **Ask a v2.9.2 node.** `/v1/cluster` is one node's view: the node that
+  answers decodes every member's status and sends it on, and a node older
+  than v2.9.2 does not know the two fields, so it drops them for every
+  member, the v2.9.2 ones included. During a rollout, read the cluster from a
+  node that is already on v2.9.2 (`members[].status.ver` of the member named
+  in `view`), or expect the fields to be missing until the answering node is
+  updated. `/v1/status` of a v2.9.2 node always carries them.
 - **When the values change.** The node reads its engines' versions once,
   in the background, when it starts (before v2.9.2: on the first
   `GET /v1/update`). Building a status never runs or waits for a process.

@@ -28,6 +28,12 @@ type ModelCapacity struct {
 	// PerfSamples is the samples in the current ten-minute window; 0 with the
 	// two fields above means they are the saved baseline alone.
 	PerfSamples int `json:"perf_samples,omitempty"`
+	// Images (v2.10) is whether this node's backends of the model read
+	// images: true when every healthy backend says it does, false when every
+	// one says it does not. Absent when the engine cannot say, when the
+	// backends disagree, when none is healthy, and on an older version.
+	// Absent is "cannot say", never "no".
+	Images *bool `json:"images,omitempty"`
 }
 
 // Free is the number of free slots, never negative.

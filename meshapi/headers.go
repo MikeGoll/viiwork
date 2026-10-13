@@ -36,6 +36,15 @@ const (
 	// a query parameter (request, client to node). The parameter wins when
 	// both are present. It is never sent on to a member or an engine.
 	HeaderPrefer = "X-Viiwork-Prefer"
+
+	// HeaderClient carries the client's name on a mesh forward (request, node
+	// to node), as the entry node resolved it from the client's source
+	// address. A receiver honours it only on a forward it has verified; from
+	// anyone else it is deleted, so a client cannot name itself. The meshauth
+	// signature does not cover it: adding it would make nodes of two versions
+	// reject each other's forwards. A v2.10 or later node never sends it to an
+	// engine; an older executing node passes it on, which is harmless.
+	HeaderClient = "X-Viiwork-Client"
 )
 
 // BackendID names backend index of model, e.g. "Qwen3.8-27B/0".

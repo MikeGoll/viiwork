@@ -265,6 +265,7 @@ func (l *loop) starting() next {
 			l.gpuHealthyAt = b.deps.Now()
 			l.checkGPU()
 			l.checkGPUBinding()
+			l.checkImages()
 			return toRunning
 		}
 		if act != ActionNone {
