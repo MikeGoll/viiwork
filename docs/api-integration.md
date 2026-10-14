@@ -500,8 +500,10 @@ the model says it reads none, the answer is immediate:
 {"error": {"type": "invalid_request", "message": "model \"some-model\" does not read images on any node"}}
 ```
 
-with status `400`. Check a model's `images` on `/v1/fleet/capacity`, or its
-inputs in `/api.json`, before offering an upload.
+with status `400`. With `?host=` naming a node that reads no images the
+message names that host instead: `model "some-model" does not read images on
+host "node-b"` (v2.10.1). Check a model's `images` on `/v1/fleet/capacity`,
+or its inputs in `/api.json`, before offering an upload.
 
 `X-Viiwork-Client` is a mesh header. A node removes it from a client's request;
 a client is named by its source address only. That holds once every node

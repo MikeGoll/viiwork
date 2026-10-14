@@ -1,5 +1,13 @@
 # Changelog
 
+## v2.10.1
+
+- **An image request pinned to a node that reads no images is told about
+  that node.** With `?host=node-b`, the 400 now reads `model "<name>" does
+  not read images on host "node-b"`. v2.10.0 said "on any node" there,
+  which was wrong whenever another node did read images. The status, the
+  type and the unpinned message are unchanged.
+
 ## v2.10.0
 
 **Image input: a request with a picture goes to a backend that reads pictures, and a client can see which models do.**

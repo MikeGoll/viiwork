@@ -621,6 +621,9 @@ func (h *Handler) writeAcquireError(w http.ResponseWriter, err error, model, hos
 		httpjson.Error(w, http.StatusNotFound, errTypeNotFound, fmt.Sprintf("model %q not found", model))
 	case errors.Is(err, route.ErrHostNotServing):
 		httpjson.Error(w, http.StatusNotFound, errTypeNotFound, fmt.Sprintf("model %q is not served by host %q", model, host))
+	case errors.Is(err, route.ErrNoImageInput) && host != "":
+		// The pin is the whole question: other nodes may well read images.
+		httpjson.Error(w, http.StatusBadRequest, errTypeInvalidRequest, fmt.Sprintf("model %q does not read images on host %q", model, host))
 	case errors.Is(err, route.ErrNoImageInput):
 		httpjson.Error(w, http.StatusBadRequest, errTypeInvalidRequest, fmt.Sprintf("model %q does not read images on any node", model))
 	case errors.Is(err, route.ErrNoFreeSlot):

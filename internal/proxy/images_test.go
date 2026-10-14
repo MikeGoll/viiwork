@@ -94,6 +94,22 @@ func TestImageRequestToATextOnlyModelIs400(t *testing.T) {
 	}
 }
 
+// With a pin the 400 is about that host: another node may read images.
+func TestImageRequestPinnedToATextOnlyHostNamesTheHost(t *testing.T) {
+	yes, no := true, false
+	f := newHandlerFx(t)
+	blind, seeing := peerModel("m", 4, 0), peerModel("m", 4, 0)
+	blind.Images, seeing.Images = &no, &yes
+	f.reports.add("blind", "127.0.0.1:1", time.Now(), blind)
+	f.reports.add("eyes", "127.0.0.1:2", time.Now(), seeing)
+	f.build()
+
+	rec := f.do(http.MethodPost, "/v1/chat/completions?host=blind", imageReq)
+	if e := errorOf(t, rec); rec.Code != http.StatusBadRequest || e.Message != `model "m" does not read images on host "blind"` {
+		t.Fatalf("code=%d body=%q", rec.Code, rec.Body.String())
+	}
+}
+
 // An image request reaches the peer that reads images, body untouched, and
 // passes the one that does not, however free it is.
 func TestImageRequestIsForwardedToThePeerThatReadsImages(t *testing.T) {

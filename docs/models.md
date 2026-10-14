@@ -84,7 +84,9 @@ VRAM held back for it) or on the CPU (`"gpu": false`), which costs no VRAM.
 1. to a host that says yes, waiting in the queue for it when it is full;
 2. when no host says yes, to hosts that cannot say, as before v2.10.0;
 3. when every host that serves the model says no, nowhere: the client gets
-   `400` with `model "<name>" does not read images on any node`.
+   `400` with `model "<name>" does not read images on any node`, or, with
+   `?host=` naming a host that says no, `... does not read images on host
+   "<host>"`.
 
 So one name can be served with a projector on one node and without on
 another, and a picture still lands where it can be read. A text request is
