@@ -1,0 +1,40 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index e28abd9..84256c2 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1783,6 +1783,9 @@ if(STRATA_HIP_GFX906)
+     file(GLOB _strata_mmq_cu ${_strata_mmq}/*.cu ${_strata_mmq}/template-instances/*.cu)
+     list(APPEND _strata_cu ${_strata_mmq_cu})
+     target_compile_definitions(strata_mmq PRIVATE GGML_USE_HIP)
++    if(TARGET strata_mmq_w4a4)
++      target_compile_definitions(strata_mmq_w4a4 PRIVATE GGML_USE_HIP)
++    endif()
+   endif()
+   set_source_files_properties(${_strata_cu} PROPERTIES LANGUAGE HIP)
+ endif()
+diff --git a/include/strata/platform/hip_compat/cublas_v2.h b/include/strata/platform/hip_compat/cublas_v2.h
+index fe8ea15..51afb01 100644
+--- a/include/strata/platform/hip_compat/cublas_v2.h
++++ b/include/strata/platform/hip_compat/cublas_v2.h
+@@ -13,6 +13,8 @@
+ #define cublasDestroy hipblasDestroy
+ #define cublasSetStream hipblasSetStream
+ #define cublasGemmEx hipblasGemmEx
++#define cublasSgemm hipblasSgemm
++#define cublasGemmStridedBatchedEx hipblasGemmStridedBatchedEx
+ #define CUBLAS_OP_N HIPBLAS_OP_N
+ #define CUBLAS_OP_T HIPBLAS_OP_T
+ #define CUBLAS_GEMM_DEFAULT HIPBLAS_GEMM_DEFAULT
+diff --git a/include/strata/platform/hip_compat/strata_hip.h b/include/strata/platform/hip_compat/strata_hip.h
+index 6d997fe..40dd4c3 100644
+--- a/include/strata/platform/hip_compat/strata_hip.h
++++ b/include/strata/platform/hip_compat/strata_hip.h
+@@ -42,6 +42,8 @@
+ #define cudaMemcpyDeviceToDevice hipMemcpyDeviceToDevice
+ #define cudaMemcpyDefault hipMemcpyDefault
+ #define cudaStreamNonBlocking hipStreamNonBlocking
++#define cudaDeviceGetStreamPriorityRange hipDeviceGetStreamPriorityRange
++#define cudaStreamCreateWithPriority hipStreamCreateWithPriority
+ #define cudaStreamCaptureModeThreadLocal hipStreamCaptureModeThreadLocal
+ #define cudaStreamCaptureModeRelaxed hipStreamCaptureModeRelaxed
+ #define cudaStreamCaptureModeGlobal hipStreamCaptureModeGlobal

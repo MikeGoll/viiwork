@@ -38,8 +38,9 @@ type Engine struct {
 }
 
 // New returns the engine for this host. Its HTTP client keeps up to 100 idle
-// connections (v1's healthClient) and has no client-wide timeout: every probe
-// and load poll is bounded by its caller's context.
+// connections in all but two per backend (the default MaxIdleConnsPerHost,
+// enough while one backend's probes run one at a time), and has no client-wide
+// timeout: every probe and load poll is bounded by its caller's context.
 func New() *Engine {
 	return &Engine{
 		client: &http.Client{Transport: &http.Transport{

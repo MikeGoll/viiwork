@@ -52,7 +52,7 @@ ARG FREETOKEN_COMMIT=
 # Set to 0 to skip the prebuilt kernel cache and JIT everything on first use.
 ARG KERNEL_CACHE=1
 
-FROM golang:1.27.1 AS go-build
+FROM golang:1.27.2 AS go-build
 WORKDIR /src
 
 # Dependencies first, so a source-only change does not re-download them.

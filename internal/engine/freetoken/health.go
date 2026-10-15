@@ -109,7 +109,7 @@ func (e *Engine) Probe(ctx context.Context, addr string) (engine.Probe, error) {
 	if err != nil {
 		return engine.Probe{}, err // transport failure only
 	}
-	defer drain(resp)
+	defer resp.Body.Close()
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 256<<10))
 	if err != nil {
@@ -266,7 +266,7 @@ func (e *Engine) stats(ctx context.Context, addr string) (stats, error) {
 	if err != nil {
 		return stats{}, err
 	}
-	defer drain(resp)
+	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		return stats{}, fmt.Errorf("freetoken: /v1/stats answered %s", resp.Status)
 	}
@@ -287,9 +287,4 @@ func (e *Engine) get(ctx context.Context, addr, path string) (*http.Response, er
 		return nil, err
 	}
 	return e.client.Do(req)
-}
-
-func drain(resp *http.Response) {
-	_, _ = io.Copy(io.Discard, resp.Body)
-	_ = resp.Body.Close()
 }

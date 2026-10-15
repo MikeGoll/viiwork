@@ -247,7 +247,6 @@ func serveLocal(w http.ResponseWriter, r *http.Request, body []byte, b route.Loc
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable {
-		_, _ = io.Copy(io.Discard, resp.Body)
 		return refused("backend %s answered %d", b.ID(), resp.StatusCode)
 	}
 
@@ -357,7 +356,6 @@ func forwardToPeer(w http.ResponseWriter, r *http.Request, body []byte, t route.
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable {
-		_, _ = io.Copy(io.Discard, resp.Body)
 		return refused("peer %s answered %d", t.Node, resp.StatusCode)
 	}
 

@@ -31,7 +31,7 @@ func (e *Engine) ReadsImages(ctx context.Context, _ engine.Spec, addr string) (r
 	if err != nil {
 		return false, false, err
 	}
-	defer drain(resp)
+	defer resp.Body.Close()
 	var h healthDoc
 	if resp.StatusCode != http.StatusOK || json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&h) != nil || h.Service != name || h.Images == nil {
 		return false, false, nil
@@ -52,7 +52,7 @@ func (e *Engine) Probe(ctx context.Context, addr string) (engine.Probe, error) {
 	if err != nil {
 		return engine.Probe{}, err // transport failure only
 	}
-	defer drain(resp)
+	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 	if err != nil {
 		return engine.Probe{}, err
@@ -155,7 +155,7 @@ func (e *Engine) slots(ctx context.Context, addr string) ([]slotDoc, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer drain(resp)
+	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("strata: /slots answered %s", resp.Status)
 	}
@@ -184,7 +184,7 @@ func (e *Engine) status(ctx context.Context, addr string) (statusDoc, bool) {
 	if err != nil {
 		return statusDoc{}, false
 	}
-	defer drain(resp)
+	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		return statusDoc{}, false
 	}
@@ -201,9 +201,4 @@ func (e *Engine) get(ctx context.Context, addr, path string) (*http.Response, er
 		return nil, err
 	}
 	return e.client.Do(req)
-}
-
-func drain(resp *http.Response) {
-	_, _ = io.Copy(io.Discard, resp.Body)
-	_ = resp.Body.Close()
 }

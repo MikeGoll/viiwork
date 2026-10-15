@@ -181,7 +181,7 @@ reported. This is the one endpoint a fleet overview needs.
         "gpus":   [ { "gpu_id": 0, "util": 74, "vram_used_mb": 12568, "vram_total_mb": 16368, "power_w": 148 } ],
         "models": [ {
           "name": "some-model-27B", "engine": "llamacpp",
-          "engine_name": "llama.cpp", "engine_version": "b11371",
+          "engine_name": "llama.cpp", "engine_version": "b11609",
           "slots": 2, "busy": 1, "queued": 0, "ctx": 49152,
           "backends": [ {
             "id": "some-model-27B/0", "status": "healthy",

@@ -27,7 +27,7 @@ that silently meant "llama.cpp for gfx906" as though no other kind existed.
 ## `docker/Dockerfile.rocm`
 
 Standard upstream llama.cpp from `ggml-org/llama.cpp`, pinned to a release tag
-(currently `b11371`, which carries Qwen3.5/3.6/3.8 hybrid DeltaNet support and
+(currently `b11609`, which carries Qwen3.5/3.6/3.8 hybrid DeltaNet support and
 MTP speculative decoding) and patched for the gfx906 FP8 header
 incompatibility. Built on `rocm/dev-ubuntu-24.04:6.2.4-complete` — the last
 ROCm with reliable gfx906 support.
@@ -137,7 +137,7 @@ installed release resolves to the published
 ## `docker/Dockerfile.strata` and `docker/Dockerfile.strata-cuda`
 
 [Strata](https://github.com/Niko1221/Strata) at the tag `STRATA_VERSION` pins in
-`docker/pins.env` (currently `v0.1.42`), with `viiwork` added. Two files rather
+`docker/pins.env` (currently `v0.1.44.1`), with `viiwork` added. Two files rather
 than one with a build argument, because the engine is compiled differently for
 each accelerator. In both images the checkout is `/opt/strata`, which is what
 `models[].strata.dir` names.
@@ -149,12 +149,16 @@ each accelerator. In both images the checkout is `/opt/strata`, which is what
   upstream's own `docs/AMD_HIP.md` documents. AMD's ROCm no longer ships
   gfx906 libraries, so this image does not sit on the ROCm 6.2.4 base the
   llama.cpp image uses.
-- **`docker/strata/gfx906-v0.1.42.patch` carries one fix**, inside the gfx906
-  build: two stream-priority names have no HIP alias. Their one use
-  (`src/core/mtp.cpp`) is compiled out of a HIP build, and on 2026-10-10 the
-  engine compiled for gfx906 without the patch as well as with it, so it can
-  go at the next pin. The image at v0.1.42 has been built and has not served
-  a model on a Radeon VII. The checkpoint copy the patch carried up to v0.1.41 is
+- **`docker/strata/gfx906-v0.1.44.1.patch` carries three fixes**, inside the
+  gfx906 build. Two are for code new in v0.1.44, and the gfx906 build fails
+  without them: `strata_mmq_w4a4` (the NVFP4 W4A4 prompt kernel, a library
+  of its own) is compiled as HIP without the `GGML_USE_HIP` that
+  `strata_mmq` gets, so ggml's vendor header includes `cuda.h`; and
+  `q36_engine.cu` (Qwen3.6-35B) calls `cublasSgemm` and
+  `cublasGemmStridedBatchedEx`, which `hip_compat/cublas_v2.h` did not
+  alias. The third, two stream-priority aliases in `strata_hip.h`, is for
+  code compiled out of a gfx906 build and can go. The image at v0.1.44.1 was
+  built on 2026-10-15 and has not served a model on a Radeon VII. The checkpoint copy the patch carried up to v0.1.41 is
   upstream since v0.1.42: a checkpoint's state is copied on a stream of the
   saving thread's own. That was the cause of `saving a checkpoint part
   failed`: on the default stream HIP refuses the copy while another thread

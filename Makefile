@@ -43,7 +43,7 @@ test:
 		go test ./... -v && $(MAKE) --no-print-directory vet-cross; \
 	else \
 		echo "go not found on host, running tests in container (--cpus=$(TEST_CPUS))..."; \
-		docker run --rm --cpus=$(TEST_CPUS) -v $(CURDIR):/src -w /src -e GOFLAGS=-buildvcs=false golang:1.27.1 \
+		docker run --rm --cpus=$(TEST_CPUS) -v $(CURDIR):/src -w /src -e GOFLAGS=-buildvcs=false golang:1.27.2 \
 			sh -c 'go test ./... -v && GOOS=linux GOARCH=amd64 go vet ./... && GOOS=darwin GOARCH=arm64 go vet ./...'; \
 	fi
 

@@ -20,9 +20,9 @@
 # BuildKit (BUILDS.md).
 # nvidia-smi is injected by the container runtime, as in Dockerfile.vllm.
 
-ARG STRATA_VERSION=v0.1.42
+ARG STRATA_VERSION=v0.1.44.1
 
-FROM golang:1.27.1 AS go-build
+FROM golang:1.27.2 AS go-build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download

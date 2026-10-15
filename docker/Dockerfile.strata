@@ -5,12 +5,21 @@
 #
 # AMD's ROCm no longer ships gfx906 libraries, so the base is the community
 # image upstream itself documents (docs/AMD_HIP.md, "gfx906").
-# docker/strata/gfx906-<version>.patch carries one fix for Strata v0.1.42,
-# inside the gfx906 build only:
-#   - strata_hip.h: two stream-priority names have no HIP alias. Their one
-#     use (mtp.cpp) is compiled out of a HIP build, and on 2026-10-10 the
-#     engine compiled without the patch as well as with it: it can go at the
-#     next pin. Built at v0.1.42, not yet served on a Radeon VII.
+# docker/strata/gfx906-<version>.patch carries three fixes for Strata
+# v0.1.44.1, inside the gfx906 build only. The first two are for code new in
+# v0.1.44, without which the gfx906 build fails:
+#   - CMakeLists.txt: strata_mmq_w4a4 (the NVFP4 W4A4 prompt kernel, its own
+#     library) is compiled as HIP like every other unit but does not get
+#     GGML_USE_HIP, so ggml's vendor header reaches for cuda.h. It gets the
+#     define strata_mmq has.
+#   - hip_compat/cublas_v2.h: q36_engine.cu (Qwen3.6-35B) calls cublasSgemm
+#     and cublasGemmStridedBatchedEx, which the shim does not alias; both map
+#     to hipBLAS, whose v2 API takes the HIP_R_* and compute types it already
+#     maps.
+#   - strata_hip.h: two stream-priority names have no HIP alias. Their uses
+#     in mtp.cpp are compiled out of a gfx906 build, and on 2026-10-10 the
+#     engine compiled without this part: it can go.
+# Built at v0.1.44.1 on 2026-10-15; not yet served on a Radeon VII.
 # The checkpoint copy the patch carried up to v0.1.41 is upstream since
 # v0.1.42 (conversation_copy.hpp: the copy goes on a stream of the saving
 # thread's own; on the default stream HIP refused it while another thread
@@ -36,7 +45,7 @@
 ARG STRATA_ROCM_BASE=mixa3607/rocm-gfx906:7.14-complete@sha256:622c025824d465faa0f5e59eea4f723845032011df273c3b11e25031965fc428
 
 # Stage 1: Build viiwork.
-FROM golang:1.27.1 AS go-build
+FROM golang:1.27.2 AS go-build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
@@ -46,8 +55,8 @@ RUN CGO_ENABLED=0 go build -ldflags "-X main.version=${VERSION}" -o /viiwork ./c
 
 # Stage 2: Strata, built for gfx906, and the runtime.
 FROM ${STRATA_ROCM_BASE}
-ARG STRATA_VERSION=v0.1.42
-ARG STRATA_COMMIT=61b3fb5dd3f1e8ec09cf7e4e05208bc6d3c46406
+ARG STRATA_VERSION=v0.1.44.1
+ARG STRATA_COMMIT=296b59d2f73c8f04a805df29c2fa97655adace78
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \

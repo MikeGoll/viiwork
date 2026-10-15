@@ -240,4 +240,4 @@ go test -tags=integration ./mesh/... ./internal/proxy/ ./internal/alias/ ./inter
 go test -bench=. -benchmem ./internal/proxy ./internal/route                                 # compare allocs, not time
 ```
 
-Go 1.27.1. Dependencies: `yaml.v3`, `memberlist`, `mdns`, `x/term`.
+Go 1.27.2. Dependencies: `yaml.v3`, `memberlist`, `mdns`, `x/term`.

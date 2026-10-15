@@ -1,5 +1,32 @@
 # Changelog
 
+## v2.10.2
+
+- **Go 1.27.2.** It fixes vulnerabilities in `net/http` (HTTP/1 connection
+  desync after a 2xx CONNECT, and several HTTP/2 server bugs), `net/textproto`
+  (a MIME header memory-limit bypass) and `crypto/tls`, which govulncheck
+  found reachable from the node. golang.org/x/net, sys, sync and term move
+  with it.
+- **llama.cpp b11609** (was b11371). The ROCm image and a Mac's download use
+  b11609; the published CUDA and Vulkan images sit on b11610, the next build
+  with upstream images. The server reports a model's modalities on
+  `GET /models`, a request that pins a busy slot leaves it alone, and a
+  CUDA/HIP flash-attention race is fixed. The prompt-cache fix for #27148
+  (PR #27624) is still not merged: keep `--no-cache-idle-slots` and
+  `--cache-ram 0`.
+- **Strata v0.1.44.1** (was v0.1.42). Faster decode on several NVIDIA cards,
+  an answer no longer comes back empty when the prompt quotes `</tool_call>`,
+  a tool call written as fenced JSON is recovered, and a client that leaves
+  while its images are prepared is cancelled at once. The gfx906 build of
+  v0.1.44.1 fails as released; the patch gains two fixes (a HIP define for
+  the new NVFP4 W4A4 kernel, two cuBLAS aliases for the Qwen3.6 engine). It
+  builds; it has not served on a Radeon VII.
+- **An HTTP/1 response body is no longer drained by hand.** Since Go 1.27
+  `Close` drains what is left in the background, at most 50 ms or 256 KiB,
+  so a connection is reused. The proxy's drain of a 429 or 503 before a retry
+  had no bound and held the retry up while it ran; it is gone, as are the
+  engines' probe drains. A test pins that capacity polls keep one connection.
+
 ## v2.10.1
 
 - **An image request pinned to a node that reads no images is told about
