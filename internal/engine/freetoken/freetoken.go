@@ -103,5 +103,10 @@ func (e *Engine) Command(s engine.Spec) (engine.Command, error) {
 	}
 
 	// Operator args last: argparse takes the last occurrence.
-	return engine.Command{Path: opts.Binary, Args: append(args, s.Args...)}, nil
+	//
+	// Since main after 0.1.3 the server reads FREETOKEN_API_KEY when --api-key
+	// is absent, and a key keys every route but /health: one inherited from
+	// the node's environment would turn the node's probes and forwards into
+	// 401s. Empty is "off" to the engine (resolve_api_key).
+	return engine.Command{Path: opts.Binary, Args: append(args, s.Args...), Env: []string{"FREETOKEN_API_KEY="}}, nil
 }

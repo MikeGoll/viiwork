@@ -1,5 +1,31 @@
 # Changelog
 
+## v2.10.3
+
+- **llama.cpp b11718** (was b11609; images b11610). The ROCm image, the
+  published CUDA and Vulkan images and a Mac's download are on one build
+  again. Kolibri-1 is upstream (#30673) and needs no patched build. Served
+  under viiwork on Radeon VIIs (Qwen3.8-27B at 98k with MTP and the fleet's
+  cache flags, granite-4.2-8b, translategemma) and on RTX A4000s: same
+  answers, tool calls and a 64k needle; on the A4000s prompt reading and
+  decode are even with b11610. #27148's fix is still not merged: keep `--no-cache-idle-slots`
+  and `--cache-ram 0`.
+- **Strata v0.1.45** (was v0.1.44.1). The gfx906 build fails to link as
+  released: `moe_fused_iq.cu`'s HIP path calls the gfx11 F16 prompt kernels,
+  whose unit only the generic HIP build lists. The patch gives the gfx906
+  build that unit too; its kernels are never reached without
+  `STRATA_PF_F16=1`. Served under viiwork on five Radeon VII-class cards
+  (one an MI60): chat, tool calls, JSON mode and a 104k needle read at
+  959 tok/s. On an RTX 5090 also images, the 104k needle at 3,507 tok/s
+  (was 3,411) and eight requests at once with no respawn.
+- **vLLM v0.32.0** (was v0.31.0). The command line viiwork generates, the
+  health probe, slots from `/metrics` and the usage strip are unchanged.
+- **FreeToken: an inherited `FREETOKEN_API_KEY` is cleared for the backend,
+  and `--api-key` in `args` is refused.** FreeToken's main branch reads the
+  variable when the flag is absent and then keys every route but `/health`,
+  which would turn the node's own probes and forwards into 401s. A key set
+  in the model's `env:` still reaches the backend. The pin stays 0.1.3.
+
 ## v2.10.2
 
 - **Go 1.27.2.** It fixes vulnerabilities in `net/http` (HTTP/1 connection
