@@ -34,6 +34,16 @@ type ModelCapacity struct {
 	// backends disagree, when none is healthy, and on an older version.
 	// Absent is "cannot say", never "no".
 	Images *bool `json:"images,omitempty"`
+	// KVShareGroup (v2.11) is the model's kv_share group on this node: the
+	// members that replicate a session's engine state to each other for a
+	// spill (PathKVSharePut). Absent when the node shares nothing for the
+	// model, and on an older version.
+	KVShareGroup string `json:"kv_share_group,omitempty"`
+	// KVShareImportMsPer1k (v2.11) is this node's measured time to bring a
+	// session replica into a backend, per 1000 tokens of conversation: what
+	// a spilled turn pays here instead of its prefill. Absent until the node
+	// has imported one, and on an older version.
+	KVShareImportMsPer1k int `json:"kv_share_import_ms_per_1k,omitempty"`
 }
 
 // Free is the number of free slots, never negative.

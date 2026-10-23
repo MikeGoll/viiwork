@@ -65,7 +65,7 @@ func TestV2WireFields(t *testing.T) {
 	assertFields(t, ClientEnergy{}, []string{"since", "through", "clients"})
 	assertFields(t, ClientEnergyEntry{}, []string{"name", "wh_total", "w_1m", "kwh_24h", "kwh_30d", "busy_s_total", "tokens_total"})
 	assertFields(t, GPUInfo{}, []string{"index", "uuid", "name", "vendor", "util", "vram_used_mb", "vram_total_mb", "power_w"})
-	assertFields(t, ModelStatus{}, []string{"name", "engine", "slots", "busy", "queued", "ctx", "requests_total", "tokens_total", "perf", "backends", "parked", "engine_name", "engine_version", "images"})
+	assertFields(t, ModelStatus{}, []string{"name", "engine", "slots", "busy", "queued", "ctx", "requests_total", "tokens_total", "perf", "backends", "parked", "engine_name", "engine_version", "images", "kv_share"})
 	assertFields(t, BackendStatus{}, []string{
 		"id", "gpus", "status", "phase", "pid", "rss_mb", "slots", "busy",
 		"tok_decoded", "tok_remain", "respawns", "uptime_s",
@@ -74,7 +74,7 @@ func TestV2WireFields(t *testing.T) {
 	assertFields(t, CostInfo{}, []string{"available", "eur_per_hour", "today_eur", "breakdown"})
 	assertFields(t, CostBreakdown{}, []string{"spot_cents_kwh", "transfer_cents_kwh", "tax_cents_kwh", "vat_percent", "total_cents_kwh"})
 	assertFields(t, CapacityResponse{}, []string{"node", "ver", "models"})
-	assertFields(t, ModelCapacity{}, []string{"name", "engine", "slots", "busy", "queued", "ctx", "backends", "healthy_backends", "ttft_overhead_ms", "prefill_ms_per_1k", "perf_samples", "images"})
+	assertFields(t, ModelCapacity{}, []string{"name", "engine", "slots", "busy", "queued", "ctx", "backends", "healthy_backends", "ttft_overhead_ms", "prefill_ms_per_1k", "perf_samples", "images", "kv_share_group", "kv_share_import_ms_per_1k"})
 	assertFields(t, ClusterResponse{}, []string{"view", "mesh", "members", "models", "power_control", "cluster_cost_eur_per_hour", "cluster_cost_today_eur"})
 	assertFields(t, Member{}, []string{"node", "addr", "role", "state", "status"})
 	assertFields(t, PowerControlInfo{}, []string{"hosts", "out_of_band"})
@@ -106,8 +106,8 @@ func TestV2UnmeasurableFieldsAreOmitempty(t *testing.T) {
 	}{
 		{NodeStatus{}, []string{"host_mem_total_mb", "host_mem_used_mb", "gpus", "energy_kwh_24h", "energy_kwh_30d", "client_energy", "prompt_history"}},
 		{GPUInfo{}, []string{"uuid", "name", "vendor", "power_w"}},
-		{ModelStatus{}, []string{"requests_total", "tokens_total", "parked", "perf", "engine_name", "engine_version", "images"}},
-		{ModelCapacity{}, []string{"ttft_overhead_ms", "prefill_ms_per_1k", "perf_samples", "images"}},
+		{ModelStatus{}, []string{"requests_total", "tokens_total", "parked", "perf", "engine_name", "engine_version", "images", "kv_share"}},
+		{ModelCapacity{}, []string{"ttft_overhead_ms", "prefill_ms_per_1k", "perf_samples", "images", "kv_share_group", "kv_share_import_ms_per_1k"}},
 		{PerfScore{}, []string{"samples", "baseline_age_s"}},
 		{PromptEntry{}, []string{"elapsed_ms", "output_tokens", "gen_ms"}},
 		{BackendStatus{}, []string{"gpus", "phase", "pid", "rss_mb", "tok_decoded", "tok_remain"}},
@@ -238,6 +238,8 @@ func TestPathsAreFrozen(t *testing.T) {
 		{PathUpdateRollback, "/v1/update/rollback"},
 		{PathModelsDown, "/v1/models/down"},
 		{PathModelsUp, "/v1/models/up"},
+		{PathKVShareManifest, "/v1/kvshare/manifest"},
+		{PathKVSharePut, "/v1/kvshare/put"},
 	} {
 		if c.got != c.want {
 			t.Errorf("path changed: %q, want %q", c.got, c.want)

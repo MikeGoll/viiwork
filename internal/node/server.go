@@ -57,6 +57,7 @@ type ServerDeps struct {
 	Health         func() (healthy, total int, models int)
 	Update         http.Handler // /v1/update; nil = 404
 	Park           http.Handler // /v1/models/down and /up; nil = 404
+	KVShare        http.Handler // /v1/kvshare/*: members only; nil = 404
 }
 
 type server struct {
@@ -211,6 +212,14 @@ func (s *server) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 		s.handlePower(w, r)
 	case path == meshapi.PathMeshPower && r.Method == http.MethodPost:
 		s.handleMeshPower(w, r)
+	case path == meshapi.PathKVShareManifest || path == meshapi.PathKVSharePut:
+		// Not inference and not a dialect path: members move session
+		// replicas here, authorised like a forward (internal/sessionshare).
+		if s.d.KVShare == nil {
+			http.NotFound(w, r)
+			return
+		}
+		s.d.KVShare.ServeHTTP(w, r)
 	case path == meshapi.PathUpdate || strings.HasPrefix(path, meshapi.PathUpdate+"/"):
 		if s.d.Update == nil {
 			http.NotFound(w, r)

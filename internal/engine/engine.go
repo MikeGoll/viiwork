@@ -65,6 +65,10 @@ type Spec struct {
 	// theirs wins — every engine in the fleet takes the last occurrence of a
 	// repeated flag.
 	Args []string
+	// Env is models[].env, which the node appends after the engine's own
+	// Command.Env, so the operator's value wins. An engine whose cleared
+	// variable must stay cleared refuses it here.
+	Env map[string]string
 	// Options is this model's engine block exactly as written, or a zero Node
 	// when the operator wrote none. Decode it with DecodeOptions.
 	Options yaml.Node

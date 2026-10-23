@@ -248,6 +248,15 @@ type PerfKeyer interface {
 type WarmUpper interface {
     WarmUp(s Spec) time.Duration
 }
+
+// SessionSharer is implemented by an engine that can write a client
+// session's conversation to a file and park such a file in its own cache
+// (kv_share). The node moves the files between members.
+type SessionSharer interface {
+    SessionShare(s Spec) (cfg SessionShareConfig, ok bool)
+    SaveSession(ctx context.Context, addr, session, name, base string) (SavedSession, error)
+    ImportSession(ctx context.Context, addr, name string) error
+}
 ```
 
 `ReasoningSeparator` decides what a client sees when it streams without
@@ -260,6 +269,19 @@ back instead leaves an interactive client with nothing on screen for as long
 as the model thinks. The plain, non-streamed reply still drops the reasoning.
 Declare the capability only for a server that always writes its answer to
 `content`.
+
+`SessionSharer` lets a session that spills to another member resume warm
+(kv_share; Strata only today). After a local turn of a session the node asks
+the backend to save that session's conversation (`SaveSession`, keyed by the
+client's raw `X-Session-Affinity` or `X-Session-Id`), sends the file as a delta
+to the member the session would spill to, and deletes it. Before a session's
+turn runs on a backend the node imports the replica it holds, if any
+(`ImportSession`), which must only **park** it: a later prompt that matches
+resumes from it, and one that does not is served as if nothing had been
+imported. A miss must never be a wrong answer. Return `engine.ErrSessionGone`
+when the backend no longer holds the session; the node drops that save
+quietly. `SessionShare` names the directory both calls use (`SaveDir`), which
+the node must be able to read and write at the same path.
 
 `UsageReporter` is what lets a host earn a performance score. A sample needs
 the prompt's uncached token count, so viiwork asks the engine for usage

@@ -27,6 +27,10 @@ type Options struct {
 	// Warmup is how long a backend's /health must have said loaded before the
 	// node sends it work ("30s"; "0s" turns it off). See WarmUp.
 	Warmup time.Duration `yaml:"warmup"`
+	// KVShare replicates this model's client sessions to the other members
+	// of a group, so that a turn that spills to one of them resumes warm.
+	// nil = off. See kvshare.go.
+	KVShare *KVShareOptions `yaml:"kv_share"`
 }
 
 // defaultWarmup and maxWarmup bound the `warmup` key. The ceiling is there so
@@ -69,6 +73,9 @@ func options(path string, s engine.Spec) (Options, error) {
 	}
 	if s.Parallel < 1 || s.Parallel > parallelMax {
 		return opts, fmt.Errorf("%s.parallel must be between 1 and %d for engine %s: the engine's batch window holds %d requests (got %d)", path, parallelMax, name, parallelMax, s.Parallel)
+	}
+	if err := opts.KVShare.validate(path+"."+name+".kv_share", s); err != nil {
+		return opts, err
 	}
 	for _, flag := range []string{"--config", "--api-key"} {
 		if slices.ContainsFunc(s.Args, func(a string) bool { return a == flag || strings.HasPrefix(a, flag+"=") }) {

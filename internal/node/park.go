@@ -177,6 +177,9 @@ func (n *Node) pruneParkedLocked(models []config.Model) {
 // model in its place as parked with no backends, in configuration order.
 func (n *Node) modelStatuses() []meshapi.ModelStatus {
 	running := n.sup.Status()
+	for i := range running {
+		running[i].KVShare = n.sessions.Stats(running[i].Name)
+	}
 	parked := n.parkedView.Load()
 	if parked == nil || len(*parked) == 0 {
 		return running

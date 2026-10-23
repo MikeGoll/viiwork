@@ -30,6 +30,11 @@
 #     serve` refuses it. The backend dies at load and the node walks it down the
 #     health ladder. Add --text-model-only to models[].args, or repair the
 #     checkpoint — BUILDS.md has the list.
+#   * Rebuilding onto 0.2.0 can break an FTW checkpoint that 0.1.3 served, and
+#     one family does so silently: a Qwen3.5 / Qwen3.6 / Qwen3.8-27B FTW from an
+#     older build loads without an error and answers wrongly. Reconvert with
+#     `ft checkpoint` before the rebuild reaches the host — BUILDS.md has the
+#     list.
 #
 # Most FreeToken deployments are not containers at all: the engine is an
 # edge-native runtime that expects host RAM, a fast PCIe link and a persistent
@@ -43,10 +48,10 @@ ARG CUDA_TAG=13.3.1-devel-ubuntu24.04
 # latest build of main. See the install step below.
 ARG FREETOKEN_CHANNEL=pypi
 # pypi only: the release to install. Empty takes the latest, which makes a
-# rebuild non-reproducible; the default is the release viiwork 2.3.0 generates a
-# command line for. Below 0.1.3 the node's `--moe-strategy` is unrecognised and
-# every backend dies at load.
-ARG FREETOKEN_VERSION=0.1.3
+# rebuild non-reproducible; the default is the release this tree was checked
+# against. 0.1.3 is the floor: below it the node's `--moe-strategy` is
+# unrecognised and every backend dies at load.
+ARG FREETOKEN_VERSION=0.2.0
 # nightly only: fail the build unless nightly is built from this commit.
 ARG FREETOKEN_COMMIT=
 # Set to 0 to skip the prebuilt kernel cache and JIT everything on first use.
@@ -146,7 +151,7 @@ RUN python3 -m venv "$VIRTUAL_ENV" \
 # How "match" is decided is where the channels differ. A PyPI release carries no
 # build stamp, so its cache is found by a URL built from the installed release
 # number, and the engine's guard compares release numbers. A nightly pair is
-# stamped with its commit — 0.1.3+g<sha> and 0.1.3+cu130.g<sha> — and comes from
+# stamped with its commit — 0.2.0+g<sha> and 0.2.0+cu130.g<sha> — and comes from
 # the manifest that names the two together, so the guard compares the stamps.
 # Neither protects a plain source build of main, which reports a bare release
 # number with no stamp and would accept the release's cache without a word. This

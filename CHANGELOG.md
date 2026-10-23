@@ -1,5 +1,101 @@
 # Changelog
 
+## v2.11.0-beta1
+
+**Headline: a session's conversation follows it between hosts
+(`strata.kv_share`).** A client that sends `X-Session-Affinity` (or
+`X-Session-Id`) keeps its turns on one host, where Strata's conversation cache
+holds the conversation. Until now, when that host was full the turn spilled
+to another one and paid a cold prefill: 41 s for 50k tokens on an RTX A4000.
+With `kv_share` the members of a group keep a
+replica of each other's long sessions, and a spilled turn resumes warm.
+Measured on teddy, two nodes, 50k tokens: **a spilled turn took 3.5–4.5 s
+instead of 42 s**, and back home 5.2 s.
+
+```yaml
+    strata:
+      dir: /opt/strata
+      kv_share:
+        group: flash        # members that share; same model files and JSON
+        min_tokens: 8192    # default
+        max_gib: 32         # default: replicas this node holds
+```
+
+- **Replication.** After a turn of `min_tokens` or more the node asks its
+  backend to save the session and sends it to the member the router would
+  spill that session to (the next member in its rendezvous order, or its home
+  when the turn ran on the spill host). Only what changed travels: the
+  engine's own incremental save, about 240 MB of a 1 GB file per 50k-token
+  turn (save 0.2–0.3 s, push 0.6 s at 10 Gbit/s, 2.3 s at 1 Gbit/s). The
+  receiver checks the header, base, fingerprints and every chunk before it
+  assembles a replica.
+- **Import.** Before a session's turn on a backend, the node imports the
+  replica it holds into that backend's conversation cache (about 1.5 s at
+  50k), once per replica and backend launch. A stale, foreign or failed
+  replica costs the import and serves the turn cold, never a wrong answer:
+  Strata checks the model and config fingerprints and resumes only on a
+  matching prompt.
+- **Routing knows where the state is.** The entry node remembers which host
+  ran each session's last turn and prices that host, and the one holding its
+  replica, by what resuming costs there (its published
+  `kv_share_import_ms_per_1k`) rather than by a cold prefill. So when the
+  session's host is full, the turn goes to the replica host even when another
+  host prefills faster.
+- **Mesh.** Replicas move on the API port (`/v1/kvshare/manifest`, `/put`),
+  accepted only from members under the forward rule (a signature in a
+  secured mesh, the member's own address in an open one). `/v1/capacity`
+  gains `kv_share_group` and `kv_share_import_ms_per_1k`, and `/v1/status`
+  a `kv_share` block of push, put and import counts. All additive and
+  `omitempty`: an older member simply shares nothing.
+- **Requirements**, refused at start when unmet: the janit/Strata
+  `kv-export-0.2` build (upstream 0.2.3.1 plus the session save and import
+  endpoints; upstream has neither), `slot_save_path` in the model's JSON on a
+  disk the node can read and write (not tmpfs), the conversation cache on,
+  and **one card per backend**: Strata saves no layer-split session, so the
+  multi-card gfx906 backends cannot share yet. `kv_share.dir` must be new or
+  empty; the node claims it with a marker and refuses one holding anything
+  else. [docs/models.md](docs/models.md#sharing-sessions-between-hosts-kv_share).
+- **What it looks like on RTX A4000s** (teddy: two viiwork nodes, one A4000
+  16 GB backend each, Qwen3.8-Flash-Next IQ3_XXS, a 50k-token conversation):
+
+  | | time |
+  |---|---|
+  | Spilled turn, cold prefill (no kv_share) | 41–42 s |
+  | Spilled turn, replica imported | 4.5 s (3.5 s from a delta-built replica) |
+  | Same session back on its home host | 5.2 s |
+  | Save after a turn, incremental / full | 0.24–0.33 s / 0.60 s |
+  | Data per turn, incremental / first full push | ~230 MiB / 954 MiB |
+  | Push of one delta, 10 Gbit/s / 1 Gbit/s | 0.6 s / 2.3 s |
+  | Import into the conversation cache | 1.1–1.5 s |
+
+  The two nodes shared one machine, and the link speeds are a shaped
+  loopback (`tc`), not a real network.
+- **Beta because:** it has not yet run between two machines, and warm
+  routing with three hosts of different speed is unit-tested only. **Coming
+  next: the cross-host test on two RTX 5090 hosts over 10 GbE**, which
+  replaces the shaped numbers above with a real link. It is off unless
+  written.
+
+Also in this release:
+
+- **llama.cpp b11804** (was b11718), images and the Mac download on the same
+  build. It fixes a wave64 reduction in `mul_mat_id` (#30836, MoE models on
+  gfx906), stops the server restoring an SWA checkpoint from an unrelated
+  earlier prompt (#30666), and fixes a race in CUDA's vector flash attention
+  (#30573); Qwen3.8-Flash-Next decodes about 3% faster on CUDA (#30602).
+  #27148's fix is still not merged: keep `--no-cache-idle-slots` and
+  `--cache-ram 0`. Not yet served under viiwork on gfx906.
+- **FreeToken 0.2.0** (was 0.1.3, still the floor). viiwork's command line is
+  unchanged. Before rebuilding a host: a Qwen3.5 / 3.6 / 3.8-27B FTW from an
+  older build loads and **answers wrongly** until reconverted with
+  `ft checkpoint`, and `moe_backend: auto` no longer picks `hybrid`.
+  [BUILDS.md](BUILDS.md).
+- **FreeToken: `FREETOKEN_API_KEY` in `models[].env` is refused.** The
+  model's env is applied after the engine's own, so v2.10.3's clearing of
+  an inherited key could still be undone there, keying the backend against
+  the node's probes and forwards. `engine.Spec` carries `models[].env` so
+  an engine can refuse a variable it clears.
+
 ## v2.10.3
 
 - **llama.cpp b11718** (was b11609; images b11610). The ROCm image, the

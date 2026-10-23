@@ -22,6 +22,7 @@ import (
 	"github.com/janit/viiwork/v2/internal/perf"
 	"github.com/janit/viiwork/v2/internal/pipeline"
 	"github.com/janit/viiwork/v2/internal/route"
+	"github.com/janit/viiwork/v2/internal/sessionshare"
 	"github.com/janit/viiwork/v2/meshapi"
 )
 
@@ -86,6 +87,17 @@ type Deps struct {
 	// ClientUse measures busy slot time per client for the energy store. nil
 	// = this node keeps no client energy; it still labels its forwards.
 	ClientUse *clientuse.Ledger
+	// Sessions is kv_share (*sessionshare.Manager). nil = off.
+	Sessions SessionSharing
+}
+
+// SessionSharing is kv_share as the proxy uses it: around every local turn
+// of a client session, and the group published on /v1/capacity.
+type SessionSharing interface {
+	BeforeLocal(ctx context.Context, model, raw string, key uint64, b sessionshare.Backend)
+	AfterLocal(model, raw string, key uint64, b sessionshare.Backend, promptTokens int64)
+	Group(model string) string
+	ImportCost(model string) (msPer1k int, ok bool)
 }
 
 // PerfRecorder is *perf.Tracker as the proxy uses it.
@@ -308,16 +320,23 @@ type dispatch struct {
 	localBuilt                 bool
 }
 
+// sessionHeader is the request's session as the client sent it: the first
+// non-empty of X-Session-Affinity and X-Session-Id, the order Strata's
+// kv-export reads them in too. Client headers, never stripped as mesh
+// headers, and forwarded to members and engines as they are.
+func sessionHeader(r *http.Request) string {
+	if v := r.Header.Get("X-Session-Affinity"); v != "" {
+		return v
+	}
+	return r.Header.Get("X-Session-Id")
+}
+
 // sessionKey is the request's session for the scored pick's stickiness: FNV-1a
-// 64 over the first non-empty of X-Session-Affinity and X-Session-Id, 0 when
-// the client sends neither. Client headers, never stripped as mesh headers.
+// 64 over sessionHeader, 0 when the client sends neither.
 func sessionKey(r *http.Request) uint64 {
-	v := r.Header.Get("X-Session-Affinity")
+	v := sessionHeader(r)
 	if v == "" {
-		v = r.Header.Get("X-Session-Id")
-		if v == "" {
-			return 0
-		}
+		return 0
 	}
 	h := uint64(14695981039346656037)
 	for i := 0; i < len(v); i++ {
@@ -409,6 +428,7 @@ func (h *Handler) dispatch(w http.ResponseWriter, r *http.Request, d *dispatch) 
 			if t.Local {
 				h.d.Counters.Add(d.model, tokens)
 				h.recordPerf(d.model, res, d.capture)
+				h.afterSessionTurn(r, d, res, lease.Backend(), session)
 			}
 			if res.Truncated {
 				// The headers are out, so the status cannot say it failed; a
@@ -496,6 +516,24 @@ func (h *Handler) localBodyFor(d *dispatch) ([]byte, bool) {
 	return d.localBody, d.localStrip
 }
 
+// afterSessionTurn hands a session's completed local turn to kv_share with
+// the prompt's length, which decides whether the conversation is worth
+// replicating. Only a whole 200: a cut or failed turn leaves the engine's
+// state where the next turn will not resume from it.
+func (h *Handler) afterSessionTurn(r *http.Request, d *dispatch, res execResult, b route.LocalBackend, key uint64) {
+	if h.d.Sessions == nil || key == 0 || res.Status != http.StatusOK || res.Aborted || res.Truncated || b == nil {
+		return
+	}
+	u, ok := promptUsageFromEvent(res.StrippedUsage)
+	if !ok {
+		u, ok = d.capture.PromptUsage()
+	}
+	if !ok {
+		return
+	}
+	h.d.Sessions.AfterLocal(d.model, sessionHeader(r), key, b, u.Prompt)
+}
+
 // recordPerf records one local serve's service TTFT (spec §1): only a 200
 // with a first token and prompt usage that says how many tokens were
 // prefilled. Everything else records nothing. Called only after the response
@@ -556,6 +594,17 @@ func (h *Handler) attempt(w http.ResponseWriter, r *http.Request, lease *route.L
 	if t.Local {
 		body, strip := h.localBodyFor(d)
 		use = h.d.ClientUse.Begin(d.client, d.model)
+		if h.d.Sessions != nil {
+			// Inside the lease and on the client's clock: a spilled turn
+			// waits for its replica's import, which its prefill then saves.
+			if raw := sessionHeader(r); raw != "" {
+				h.d.Sessions.BeforeLocal(r.Context(), d.model, raw, sessionKey(r), lease.Backend())
+			}
+		}
+		// After the import: a spilled turn has few uncached tokens, and
+		// counting its import as time to first token would raise this
+		// node's published overhead, sending traffic away from the host
+		// that holds the replicas. Import cost is published on its own.
 		granted := time.Now()
 		separate := h.d.SeparateReasoning != nil && h.d.SeparateReasoning(d.model)
 		res = serveLocal(w, r, body, lease.Backend(), d.model, h.d.Self, d.thinkDisabled, strip, separate)
@@ -720,6 +769,14 @@ func (h *Handler) handleCapacity(w http.ResponseWriter) {
 	models := make([]meshapi.ModelCapacity, len(local))
 	for i, m := range local {
 		m.Queued = h.d.Router.QueueLen(m.Name)
+		if h.d.Sessions != nil {
+			m.KVShareGroup = h.d.Sessions.Group(m.Name)
+			if m.KVShareGroup != "" {
+				if c, ok := h.d.Sessions.ImportCost(m.Name); ok {
+					m.KVShareImportMsPer1k = c
+				}
+			}
+		}
 		if h.d.PublishPerf && h.d.Perf != nil {
 			if s, ok := h.d.Perf.Score(m.Name); ok {
 				m.TTFTOverheadMs, m.PrefillMsPer1k, m.PerfSamples = s.OverheadMs, s.MsPer1k, s.Samples

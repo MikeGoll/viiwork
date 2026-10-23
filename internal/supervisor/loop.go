@@ -307,6 +307,11 @@ func (l *loop) warmedUp(ready bool) bool {
 	return now.Sub(l.readySince) >= warm
 }
 
+// LaunchedAt is when the backend's current process was started; it changes
+// with every launch, respawns included. kv_share keys what it imported into
+// a backend by it, since a new process has lost the old one's cache.
+func (b *Backend) LaunchedAt() time.Time { return b.launchTime() }
+
 func (b *Backend) launchTime() time.Time {
 	b.mu.Lock()
 	defer b.mu.Unlock()

@@ -167,6 +167,10 @@ func TestValidateOptions(t *testing.T) {
 		// every one of those with a 401.
 		{name: "api key in args", base: withArgs(oneGPU, "--api-key", "k"), wantIn: "models[0].args"},
 		{name: "api key in args, joined", base: withArgs(oneGPU, "--api-key=k"), wantIn: "models[0].args"},
+		// models[].env is appended after the engine's clearing and would win.
+		{name: "api key in env", base: withEnv(oneGPU, "FREETOKEN_API_KEY", "k"), wantIn: "models[0].env"},
+		{name: "empty api key in env", base: withEnv(oneGPU, "FREETOKEN_API_KEY", ""), wantIn: "models[0].env"},
+		{name: "other env", base: withEnv(oneGPU, "HF_HOME", "/hf"), ok: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := spec(t, tc.base, tc.block)
@@ -189,6 +193,11 @@ func TestValidateOptions(t *testing.T) {
 
 func withArgs(s engine.Spec, args ...string) engine.Spec {
 	s.Args = args
+	return s
+}
+
+func withEnv(s engine.Spec, k, v string) engine.Spec {
+	s.Env = map[string]string{k: v}
 	return s
 }
 

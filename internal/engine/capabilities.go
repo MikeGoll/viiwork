@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"time"
 )
@@ -197,3 +198,62 @@ func DisplayName(id string) string {
 	}
 	return id
 }
+
+// SessionSharer is implemented by an engine that can write a client
+// session's conversation to a file and park such a file in its own cache,
+// so that another node can take a session over warm (kv_share). The node
+// moves the files between members; the engine only saves and imports them,
+// and decides whether a later prompt matches what it parked.
+type SessionSharer interface {
+	// SessionShare is the model's kv_share settings; ok is false when the
+	// model shares nothing. Called at start and on reload with the Spec
+	// ValidateOptions gets, after Command has accepted the same file.
+	SessionShare(s Spec) (cfg SessionShareConfig, ok bool)
+	// SaveSession asks the backend at addr to save the conversation that
+	// `session` (the client's raw X-Session-Affinity or X-Session-Id) last
+	// continued, as the file `name` in SaveDir. With a base (a save id the
+	// receiver holds) the engine may write a delta against it instead of a
+	// whole file, and says which it wrote. ErrSessionGone when the backend
+	// no longer holds the conversation, which is not a failure.
+	SaveSession(ctx context.Context, addr, session, name, base string) (SavedSession, error)
+	// ImportSession parks the file `name` in SaveDir in the backend's cache
+	// without touching what it is serving.
+	ImportSession(ctx context.Context, addr, name string) error
+}
+
+// SavedSession is what a save wrote.
+type SavedSession struct {
+	// ID names the save; the next save may name it as its base. "" when
+	// the engine gives saves no ids.
+	ID string
+	// Delta: the file is a delta against the base asked for (STRSDLT), not
+	// a whole session file.
+	Delta bool
+}
+
+// SessionShareConfig is one model's kv_share settings, as its engine reads
+// them.
+type SessionShareConfig struct {
+	// Group names the members that replicate to each other. Members agree
+	// on it, and on the model and engine configuration behind it.
+	Group string
+	// Transport is the kvshare transport spec ("http").
+	Transport string
+	// StoreDir holds the replicas this node receives; "" is
+	// <state_dir>/kvshare/<model>.
+	StoreDir string
+	// MaxBytes bounds StoreDir; the least recently received go first.
+	MaxBytes int64
+	// MinTokens: a shorter conversation is neither sent nor imported.
+	MinTokens int64
+	// SaveDir is the directory the backend saves and imports session files
+	// in, as an absolute path the node can read and write.
+	SaveDir string
+	// MaxFileBytes is the largest session file the model can write; a
+	// member's put declaring more is refused.
+	MaxFileBytes int64
+}
+
+// ErrSessionGone: the backend does not hold the session's conversation
+// (never saw it, or another conversation has taken its place).
+var ErrSessionGone = errors.New("engine: the session's conversation is no longer held")

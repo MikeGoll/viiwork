@@ -68,6 +68,7 @@ func (n *Node) Reload() error {
 		// (an engine's PerfKey reads it): the keys are read again, so a
 		// baseline measured under the old file is dropped.
 		n.perf.SetKeys(perfKeys(next.Models))
+		n.sessions.SetModels(sessionModels(next.Models))
 		return nil
 	}
 	if n.modelsApplied {
@@ -78,6 +79,7 @@ func (n *Node) Reload() error {
 	}
 	n.pruneParkedLocked(next.Models)
 	n.perf.SetKeys(perfKeys(next.Models))
+	n.sessions.SetModels(sessionModels(next.Models))
 	n.mu.Lock()
 	updated := *n.cfg
 	updated.Models = next.Models

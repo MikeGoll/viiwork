@@ -175,6 +175,16 @@ models:
   #     dir: /opt/strata       # the Strata checkout; required, absolute
   #     python: python3        # default; /opt/strata/.venv/bin/python in the CUDA image
   #     warmup: 30s            # default; the wait between loaded and the first request (0s: none)
+  #     # Session sharing (docs/models.md#sharing-sessions-between-hosts-kv_share):
+  #     # after a session's turn the conversation is saved and sent, as a delta,
+  #     # to the member the session would spill to, which imports it before a
+  #     # spilled turn. Needs the janit/Strata kv-export build, one card per
+  #     # backend, and "slot_save_path" plus --conversation-cache-mib in the JSON.
+  #     kv_share:
+  #       group: flash           # required; members with the same model files and JSON
+  #       min_tokens: 8192       # default; shorter conversations are not sent
+  #       max_gib: 32            # default; replicas received, oldest dropped first
+  #       # dir: /var/lib/viiwork/kvshare/flash   # default <state_dir>/kvshare/<model>
 
   # A model fetched and seeded by the host's viiwork-parrot instead of a local
   # file (docs/models.md). Set path or source, not both.

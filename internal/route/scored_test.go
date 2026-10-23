@@ -389,3 +389,32 @@ func TestPerformanceOffIgnoresTheSession(t *testing.T) {
 		t.Fatal("routing.performance false keeps local-first")
 	}
 }
+
+// kv_share places a replica by SessionRank, so its first name must be the
+// host the scored pick sends the session to, from any key and any entry.
+func TestSessionRankAgreesWithThePick(t *testing.T) {
+	names := []string{"self", "gb2", "gb3"}
+	same := func(string) (int, int, bool) { return 100, 1000, true }
+	for k := uint64(1); k <= 64; k++ {
+		key := k * 0x9e3779b97f4a7c15
+		local := newFakeLocal()
+		local.add("m", newFakeBackend("m/0", 2))
+		r := newScored(local, equalPeers("gb2", "gb3"), same, seq(0.5))
+		l, err := r.Pick(Request{Model: "m", EstK: 4, SessionKey: key})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := l.Target().Node
+		if l.Target().Local {
+			got = "self"
+		}
+		l.Release()
+		rank := SessionRank(key, names)
+		if rank[0] != got {
+			t.Fatalf("key %x: pick %s, rank %v", key, got, rank)
+		}
+		if len(rank) != 3 || names[0] != "self" {
+			t.Fatalf("rank %v changed its input %v", rank, names)
+		}
+	}
+}

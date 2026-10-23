@@ -321,6 +321,66 @@ Known gaps, as of 2026-10-05:
   cannot tell the early close from the end: the client's stream ends cleanly
   without a `[DONE]` line. A client that needs to know checks for `[DONE]`.
 
+### Sharing sessions between hosts (kv_share)
+
+A client that sends `X-Session-Affinity` (or `X-Session-Id`) keeps its turns
+on one host, where Strata's conversation cache holds the conversation. When
+that host is full, the turn spills to the next one and pays a cold prefill:
+41 s for 50k tokens on an RTX A4000, minutes at 200k on gfx906. With
+`strata.kv_share`, the conversation follows the session:
+
+```yaml
+    strata:
+      dir: /opt/strata
+      kv_share:
+        group: flash        # the members that share; same model files and JSON
+        min_tokens: 8192    # default: a shorter conversation is cheap to prefill
+        max_gib: 32         # default: replicas this node holds
+        # dir: ...          # default <state_dir>/kvshare/<model>; new or empty, never shared
+```
+
+- After a turn of 8192 tokens or more, the node that ran it asks its backend
+  to save the session (`POST /slots/session?action=save`, about 0.7 s at 50k
+  tokens, during which that backend's slots pause) and sends the file to one
+  member: the first after itself in the session's rendezvous order, which is
+  where the router spills the session, or the session's home when the turn
+  ran on the spill host. Only what changed travels: about 240 MB of a 1 GB
+  file per 50k-token turn (0.6 s at 10 Gbit/s, 2.3 s at 1 Gbit/s). A save
+  waits 2 s after its turn and is dropped when the session's next turn
+  starts first.
+- Before a session's turn runs on a backend, the node imports the replica it
+  holds into that backend's conversation cache (`POST
+  /slots/0?action=import`, about 1.5 s at 50k tokens, on the turn's clock),
+  once per replica and backend launch. Strata resumes from it only if the
+  prompt matches, so a stale or foreign replica costs the import and nothing
+  else, and a failed import serves the turn cold.
+- Replicas travel on the API port (`/v1/kvshare/manifest` and `/put`) and are
+  accepted only from members, under the same rule as a forward: a signature
+  in a secured mesh, the member's own address in an open one. A replica is a
+  conversation's prompt.
+- Routing knows where a session's state is. The entry node remembers which
+  host ran each session's last turn and prices that host, and the member
+  holding its replica, by what resuming costs there rather than by a full
+  prefill: the replica host at its measured import time per 1000 tokens. So
+  when the session's host is full, the turn goes to the replica host even if
+  another host is faster at a cold prefill. This holds for turns that enter
+  through the same node; a session that enters elsewhere routes as without
+  kv_share.
+- `/v1/capacity` publishes the model's group as `kv_share_group` and the
+  measured import cost as `kv_share_import_ms_per_1k`, and `/v1/status`
+  counts pushes, puts and imports under `kv_share`.
+
+Requirements, refused at start when unmet: the janit/Strata `kv-export-0.2` build (upstream 0.2.3.1 with the session endpoints)
+(upstream has neither endpoint), `"slot_save_path"` in the JSON at a path the
+node reads and writes (in the Docker image the node and the engine share the
+container, so it is the same path), a conversation cache (on by default
+since Strata 0.2; an explicit `--conversation-cache-mib` of 0 in `args` is
+refused), and one card per backend (Strata saves no layer-split session). Keep
+`slot_save_path` on disk, not tmpfs: Strata writes it with O_DIRECT, and
+tmpfs was slower (1.12 s against 0.68 s). Members of a group must load the
+same model files with the same JSON: Strata checks both fingerprints and
+refuses anything else on import.
+
 ## Models from viiwork-parrot
 
 A model can name a viiwork-parrot catalog id instead of a file:

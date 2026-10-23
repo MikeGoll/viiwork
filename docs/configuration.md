@@ -94,6 +94,17 @@ has loaded before the node sends it work. It shows as phase `warming up`.
 Engine tuning stays in the JSON's `args`, where upstream puts it. See
 [models.md](models.md#strata-one-moe-family-across-several-cards).
 
+`strata.kv_share` (off unless written) shares a model's client sessions
+between the members of a group, so that a turn that spills to another host
+resumes from the conversation instead of prefilling it again:
+`group` (required), `min_tokens` (default 8192), `max_gib` (default 32),
+`dir` (default `<state_dir>/kvshare/<model>`; a directory the node claims, so it must be
+new or empty: one that already holds anything else is refused and the model shares nothing) and `transport` (`http`, the
+only one, over the API port). The JSON must name a `slot_save_path` the node
+can read and write and must not turn the engine's conversation cache off
+(`--conversation-cache-mib` 0), and a backend must have one card. See
+[models.md](models.md#sharing-sessions-between-hosts-kv_share).
+
 ## Tensor-split mode
 
 For models that don't fit in a single GPU's VRAM, one backend spans several

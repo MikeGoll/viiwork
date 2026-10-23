@@ -39,6 +39,10 @@ type fileConfig struct {
 	LazyLoad    json.RawMessage
 	IdleUnloadS json.RawMessage
 	APIKey      json.RawMessage
+	// kv_share's: where session files go, and what a relative one is
+	// relative to.
+	SlotSavePath json.RawMessage
+	Cwd          json.RawMessage
 }
 
 // readConfigFile reads models[].path, refusing anything that cannot be a
@@ -73,6 +77,7 @@ func readConfig(path string) (fileConfig, error) {
 	c := fileConfig{
 		ModelName: keys["model_name"], Aliases: keys["aliases"], Parallel: keys["parallel"],
 		LazyLoad: keys["lazy_load"], IdleUnloadS: keys["idle_unload_s"], APIKey: keys["api_key"],
+		SlotSavePath: keys["slot_save_path"], Cwd: keys["cwd"],
 	}
 	if a, ok := keys["args"]; ok {
 		if err := json.Unmarshal(a, &c.Args); err != nil {

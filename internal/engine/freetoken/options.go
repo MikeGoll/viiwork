@@ -91,5 +91,10 @@ func (e *Engine) ValidateOptions(path string, s engine.Spec) error {
 	if slices.ContainsFunc(s.Args, func(a string) bool { return a == "--api-key" || strings.HasPrefix(a, "--api-key=") }) {
 		return fmt.Errorf("%s.args must not carry --api-key for engine %s: the node probes and forwards without a key, and the backend listens on loopback only", path, name)
 	}
+	// models[].env is applied after Command's FREETOKEN_API_KEY= and would
+	// undo it.
+	if _, ok := s.Env["FREETOKEN_API_KEY"]; ok {
+		return fmt.Errorf("%s.env must not set FREETOKEN_API_KEY for engine %s: the node probes and forwards without a key, and the backend listens on loopback only", path, name)
+	}
 	return nil
 }

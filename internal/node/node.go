@@ -37,6 +37,7 @@ import (
 	"github.com/janit/viiwork/v2/internal/power"
 	"github.com/janit/viiwork/v2/internal/proxy"
 	"github.com/janit/viiwork/v2/internal/route"
+	"github.com/janit/viiwork/v2/internal/sessionshare"
 	"github.com/janit/viiwork/v2/internal/supervisor"
 	"github.com/janit/viiwork/v2/internal/update"
 	"github.com/janit/viiwork/v2/mesh"
@@ -126,7 +127,8 @@ type Node struct {
 
 	sup          *supervisor.Supervisor
 	counters     *proxy.Counters
-	perf         *perf.Tracker // this node's measured speed per model; saved under state_dir
+	perf         *perf.Tracker         // this node's measured speed per model; saved under state_dir
+	sessions     *sessionshare.Manager // kv_share: session replicas sent and received
 	capPoller    *capacity.Poller
 	router       *route.Router
 	statusPoller *StatusPoller
@@ -325,12 +327,30 @@ func New(cfg *config.Config, o Options) (*Node, error) {
 		n.logf("%v; starting without saved performance baselines", err)
 	}
 	n.perf.SetKeys(perfKeys(cfg.Models))
+	n.sessions = sessionshare.New(sessionshare.Deps{
+		Self: n.name, Reports: n.capPoller, StaleAfter: cfg.Routing.StaleAfter.Duration,
+		// A replica is a conversation's prompt: it travels and is accepted
+		// under the forward rule, signed with an empty body (the file is
+		// named by size and digest in the signed query).
+		Sign: func(r *http.Request) error { return auth.Sign(r, nil) },
+		Verify: func(r *http.Request) bool {
+			_, ok := auth.Verify(r, nil)
+			return ok
+		},
+		StateDir: cfg.Node.StateDir, Logf: n.logf,
+	})
+	n.sessions.SetModels(sessionModels(cfg.Models))
 	n.router = route.New(route.Config{
 		Self: n.name, Local: parkedLocal{inner: route.SupervisorModels(n.sup), n: n}, Remote: n.capPoller,
 		StaleAfter: cfg.Routing.StaleAfter.Duration, QueueMax: cfg.Routing.QueueMax,
 		QueueTimeout: cfg.Routing.QueueTimeout.Duration,
 		Performance:  cfg.Routing.PerformanceOn(),
 		LocalImages:  n.sup.Images,
+		LocalKVShare: func(model string) (string, int, bool) {
+			g := n.sessions.Group(model)
+			c, _ := n.sessions.ImportCost(model)
+			return g, c, g != ""
+		},
 		LocalScore: func(model string) (int, int, bool) {
 			s, ok := n.perf.Score(model)
 			return s.OverheadMs, s.MsPer1k, ok
@@ -378,6 +398,7 @@ func New(cfg *config.Config, o Options) (*Node, error) {
 		Perf: n.perf, PublishPerf: cfg.Routing.PerformanceOn(), Usage: n.usageReporting,
 		SeparateReasoning: n.separatesReasoning,
 		Clients:           n.clients.Load, ClientUse: n.ledger,
+		Sessions: n.sessions,
 	})
 
 	// 8. Member statuses and chassis power control.
@@ -401,8 +422,9 @@ func New(cfg *config.Config, o Options) (*Node, error) {
 		GPUHistory: n.history, GPUBroadcaster: n.broadcaster,
 		GPUAvailable: func() bool { return n.collector != nil && n.collector.Available() },
 		PowerControl: n.powerCtl, CORS: cors, Health: n.health,
-		Update: updateSvc,
-		Park:   &parkHandler{auth: aliasAuth, park: n.Park},
+		Update:  updateSvc,
+		Park:    &parkHandler{auth: aliasAuth, park: n.Park},
+		KVShare: n.sessions,
 	})
 	n.meshOpts = n.buildMeshOptions(cfg, keys)
 	return n, nil
@@ -690,6 +712,9 @@ func (n *Node) shutdown(srv *http.Server, m *mesh.Mesh, cfg *config.Config) {
 		srv.Close()
 	}
 	cancel()
+	// No request is left to queue a save; one in progress is cancelled
+	// rather than left to fail against a stopping backend.
+	n.sessions.Close()
 	supCtx, cancel := context.WithTimeout(context.Background(), supervisorStop)
 	n.sup.Shutdown(supCtx)
 	cancel()

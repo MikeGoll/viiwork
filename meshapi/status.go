@@ -78,6 +78,24 @@ type ModelStatus struct {
 	// Images (v2.10) is whether the model reads images on this node, as in
 	// ModelCapacity. Absent is "cannot say", never "no".
 	Images *bool `json:"images,omitempty"`
+	// KVShare (v2.11) counts this node's session replication for the model
+	// since it started. Absent when the model shares nothing.
+	KVShare *KVShareStats `json:"kv_share,omitempty"`
+}
+
+// KVShareStats is one model's session replication on one node: pushes it
+// sent to the members of its kv_share group, puts it received, and imports
+// into its own backends ahead of a spilled turn.
+type KVShareStats struct {
+	Group        string `json:"group"`
+	Pushes       int64  `json:"pushes"`
+	PushFailures int64  `json:"push_failures"`
+	BytesSent    int64  `json:"bytes_sent"`
+	Puts         int64  `json:"puts"`
+	Imports      int64  `json:"imports"`
+	ImportFails  int64  `json:"import_failures"`
+	Replicas     int    `json:"replicas"`
+	StoreBytes   int64  `json:"store_bytes"`
 }
 
 // BackendStatus is one backend process of a model.

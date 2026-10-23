@@ -368,6 +368,7 @@ func ModelSpec(m Model) engine.Spec {
 		Parallel: m.Parallel,
 		Backends: m.Backends(),
 		Args:     m.Args,
+		Env:      m.Env,
 		Options:  m.EngineBlock(),
 	}
 }

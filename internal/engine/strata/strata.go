@@ -127,6 +127,11 @@ func (e *Engine) Command(s engine.Spec) (engine.Command, error) {
 	if err := conf.check(s); err != nil {
 		return engine.Command{}, fmt.Errorf("strata: %s: %w", s.Path, err)
 	}
+	if opts.KVShare != nil {
+		if err := conf.checkKVShare(); err != nil {
+			return engine.Command{}, fmt.Errorf("strata: %s: %w (models[].strata.kv_share is set)", s.Path, err)
+		}
+	}
 
 	args := []string{
 		"-m", "serve.server", "--engine", "strata",

@@ -27,7 +27,7 @@ that silently meant "llama.cpp for gfx906" as though no other kind existed.
 ## `docker/Dockerfile.rocm`
 
 Standard upstream llama.cpp from `ggml-org/llama.cpp`, pinned to a release tag
-(currently `b11718`, which carries Kolibri-1, Qwen3.5/3.6/3.8 hybrid DeltaNet support and
+(currently `b11804`, which carries Kolibri-1, Qwen3.5/3.6/3.8 hybrid DeltaNet support and
 MTP speculative decoding) and patched for the gfx906 FP8 header
 incompatibility. Built on `rocm/dev-ubuntu-24.04:6.2.4-complete` — the last
 ROCm with reliable gfx906 support.
@@ -99,6 +99,35 @@ build is slow (torch and its CUDA wheels) and the image is several GB.
 
 Build: `make docker-freetoken`, off-peak.
 
+### FreeToken 0.2.0 is the pin
+
+`FREETOKEN_VERSION` defaults to `0.2.0`; 0.1.3 is still the floor. The command
+line viiwork generates is unchanged: every flag it passes (`--model`,
+`--served-model-name`, `--host`, `--port`, `--moe-strategy`, `--memory-ratio`,
+`--max-running-requests`, `--max-seq-len-override`, `--kv-reserve-tokens`) is
+in 0.2.0's `ft serve`, and `/health` and `/v1/stats` are still where the probes
+look. What an upgrading host has to check:
+
+- **Old FTW checkpoints.** A Qwen3.5 / Qwen3.6 / Qwen3.8-27B FTW from an older
+  build **loads without an error and answers wrongly** (its norm weights
+  already hold the +1 that 0.2.0 now adds at run time). Experts converted with
+  `--moe-backend fused` or `triton`, NVFP4 FTWs with fp16 global scales and
+  Muse-Glimmer FTWs with a fused `qkvg_proj` are refused at load. Reconvert
+  with `ft checkpoint`. HF checkpoints and GGUF files are not affected.
+- **`FREETOKEN_API_KEY` in `ft serve`'s environment now turns authentication
+  on.** The node already clears it for the backend (`FREETOKEN_API_KEY=`, which
+  0.2.0 reads as unset) and refuses `--api-key` in `args:` and the variable in
+  `env:` (v2.10.3, v2.10.4), so a node keeps probing and forwarding without a
+  key. Behind a node older than v2.10.3, an inherited key would put every route
+  but `/health` behind auth.
+- **`--moe-strategy auto` no longer picks `hybrid`** from an `ft bench bw`
+  profile, and profiles from older builds are ignored. A host that relied on it
+  sets `moe_backend: hybrid` and reruns `ft bench bw --model <checkpoint>`.
+- **0.2.0 serves GGUF files** (`ft serve --model <file>.gguf`; no image input
+  from GGUF yet). The node passes `models[].path` through as `--model`, but
+  no GGUF has been served under viiwork yet. The kernel cache resolves to the published
+  `freetoken_kernel_cache-0.2.0+cu130` wheel. torch moves to 2.14.
+
 ### FreeToken 0.1.3 is the floor (viiwork 2.3.0)
 
 `FREETOKEN_VERSION` defaults to `0.1.3` rather than to empty, so a rebuild
@@ -161,7 +190,7 @@ each accelerator. In both images the checkout is `/opt/strata`, which is what
   `strata_mmq` gets, so ggml's vendor header includes `cuda.h`; and
   `q36_engine.cu` (Qwen3.6-35B) calls `cublasSgemm` and
   `cublasGemmStridedBatchedEx`, which `hip_compat/cublas_v2.h` did not
-  alias. The third, two stream-priority aliases in `strata_hip.h`, is for
+  alias. The fourth, two stream-priority aliases in `strata_hip.h`, is for
   code compiled out of a gfx906 build and can go. The image at v0.1.45
   served Qwen3.8-Flash-Next under viiwork on 2026-10-18, one backend on four
   Radeon VIIs and an MI60 (a 104k-token prompt read at 959 tok/s). The

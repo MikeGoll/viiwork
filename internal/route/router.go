@@ -36,6 +36,10 @@ type Config struct {
 	// LocalImages is whether this node reads images with a model; known is
 	// false when it cannot say. nil = it never can.
 	LocalImages func(model string) (reads, known bool)
+	// LocalKVShare is this node's kv_share group for a model and its measured
+	// import cost per 1000 tokens (0 = not measured); ok is false when the
+	// model shares nothing here. nil = never.
+	LocalKVShare func(model string) (group string, importMsPer1k int, ok bool)
 	// Rand returns a float in [0,1); nil = math/rand/v2. Tests inject it.
 	Rand func() float64
 }
@@ -147,6 +151,7 @@ type Router struct {
 	reservations map[resKey][]*reservation
 	refused      map[resKey]time.Time // a peer's last refusal of a model, until a newer report
 	queues       map[string][]*waiter
+	lastHosts    lastHosts // where each session's last turn went (warm.go)
 }
 
 func New(c Config) *Router {
@@ -183,7 +188,8 @@ func (r *Router) pickLocked(req Request) (*Lease, error) {
 // pickWithReportsLocked is pickLocked against reports already fetched (nil
 // for a forwarded request), so the queue's dispatch fetches them once per
 // call rather than once per waiter.
-func (r *Router) pickWithReportsLocked(req Request, reports []capacity.Report) (*Lease, error) {
+func (r *Router) pickWithReportsLocked(req Request, reports []capacity.Report) (l *Lease, err error) {
+	defer func() { r.noteSessionLocked(req, l, reports) }()
 	backends, admitting, localOK := r.c.Local.Backends(req.Model)
 
 	// Existence: a model nobody configures or reports is a 404, kept distinct
@@ -340,6 +346,29 @@ func (r *Router) pickLocalLocked(req Request, backends []LocalBackend) *Lease {
 // gb2 + gb3. Nil when no host has room.
 func (r *Router) pickSessionLocked(req Request, backends []LocalBackend, localEligible bool, reports []capacity.Report) *Lease {
 	now := r.c.Now()
+	// A session whose state is known to be on a host goes there first: the
+	// host of its last turn, else that host's replica target (warm.go).
+	if w := r.warmLocked(req, anyHealthy(backends), reports, now); w.ok {
+		for _, name := range []string{w.last, w.replica} {
+			if name == "" {
+				continue
+			}
+			if name == r.c.Self {
+				if localEligible && localHasFree(req, backends) {
+					return r.pickLocalLocked(req, backends)
+				}
+				continue
+			}
+			for _, rep := range reports {
+				if rep.Node == name {
+					if _, free, serves := r.peerFreeLocked(req, rep, now); serves && free > 0 {
+						return r.peerLeaseLocked(rep, req.Model, now)
+					}
+					break
+				}
+			}
+		}
+	}
 	var top uint64
 	var pick *capacity.Report
 	local := false
