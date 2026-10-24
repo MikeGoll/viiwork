@@ -102,8 +102,10 @@ resumes from the conversation instead of prefilling it again:
 new or empty: one that already holds anything else is refused and the model shares nothing) and `transport` (`http`, the
 only one, over the API port). The JSON must name a `slot_save_path` the node
 can read and write and must not turn the engine's conversation cache off
-(`--conversation-cache-mib` 0), and a backend must have one card. See
-[models.md](models.md#sharing-sessions-between-hosts-kv_share).
+(`--conversation-cache-mib` 0), and a backend must have one card. Both
+directories are a write-heavy cache, about 240 MB per long-session turn:
+give them a drive of their own, mounted at the same path on every host of
+the group. See [models.md](models.md#sharing-sessions-between-hosts-kv_share).
 
 ## Tensor-split mode
 

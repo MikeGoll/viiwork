@@ -68,6 +68,12 @@ type launcher interface{ LaunchedAt() time.Time }
 // over, which costs at most one needless import per session.
 const maxImported = 4096
 
+// maxSessionID is the longest session id Strata keeps a conversation under;
+// a longer one is no session to it, so there is nothing to save or resume.
+const maxSessionID = 256
+
+func sharable(raw string) bool { return raw != "" && len(raw) <= maxSessionID }
+
 // Model is one configured model that shares sessions.
 type Model struct {
 	Name   string
@@ -350,7 +356,7 @@ func generation(b Backend) string {
 // that replica yet. It returns when the import is done or has failed, and
 // never fails the turn.
 func (m *Manager) BeforeLocal(ctx context.Context, modelName, raw string, key uint64, b Backend) {
-	if raw == "" {
+	if !sharable(raw) {
 		return
 	}
 	m.mu.Lock()
@@ -418,7 +424,7 @@ func (m *Manager) BeforeLocal(ctx context.Context, modelName, raw string, key ui
 // conversation of MinTokens or more is saved and pushed to the session's
 // replica host, later and in the background (see worker).
 func (m *Manager) AfterLocal(modelName, raw string, key uint64, b Backend, promptTokens int64) {
-	if raw == "" {
+	if !sharable(raw) {
 		return
 	}
 	md := m.model(modelName)

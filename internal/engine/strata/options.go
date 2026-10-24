@@ -17,10 +17,12 @@ const name = "strata"
 // and the engine's tuning already lives there. What is left for viiwork to
 // know is how to start the server: which Python, and where the checkout is.
 type Options struct {
-	// Python runs serve/server.py. An image built from upstream's Dockerfile
-	// keeps its packages in a venv, so there it is /opt/strata/.venv/bin/python.
+	// Python runs serve/server.py. Upstream's 0.2 images bring their own, so
+	// there it is /opt/strata/terminal/python/bin/python3 (0.1.x images:
+	// /opt/strata/.venv/bin/python).
 	Python string `yaml:"python"`
-	// Dir is the Strata checkout. It becomes PYTHONPATH, which is all
+	// Dir is the directory that holds serve/ (the checkout, or a 0.2 image's
+	// /opt/strata/terminal). It becomes PYTHONPATH, which is all
 	// `python -m serve.server` needs: the server finds its own files relative
 	// to itself and starts the engine in the JSON's "cwd".
 	Dir string `yaml:"dir"`

@@ -253,6 +253,18 @@ func TestShortConversationsStayHome(t *testing.T) {
 	}
 }
 
+func TestLongSessionIDsAreNotShared(t *testing.T) {
+	a, b := newNode(t, "a"), newNode(t, "b")
+	a.sees(b, "g", 1, time.Now())
+	long := strings.Repeat("x", maxSessionID+1)
+	a.eng.set(long, kvsharetest.Session{Model: 1, Config: 2, Cells: 20000, StateSeed: 1})
+	a.m.AfterLocal(testModel, long, 1, &fakeBackend{id: "m/0"}, 20000)
+	time.Sleep(100 * time.Millisecond)
+	if saves, _ := a.eng.counts(); saves != 0 {
+		t.Fatalf("%d saves of a session id Strata does not keep", saves)
+	}
+}
+
 func TestANewTurnReplacesTheWaitingSave(t *testing.T) {
 	a, b := newNode(t, "a"), newNode(t, "b")
 	a.m.d.SaveDelay = 200 * time.Millisecond

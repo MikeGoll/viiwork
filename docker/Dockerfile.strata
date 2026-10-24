@@ -5,34 +5,21 @@
 #
 # AMD's ROCm no longer ships gfx906 libraries, so the base is the community
 # image upstream itself documents (docs/AMD_HIP.md, "gfx906").
-# docker/strata/gfx906-<version>.patch carries four fixes for Strata
-# v0.1.45, inside the gfx906 build only. The first three are for code new in
-# v0.1.44 and v0.1.45, without which the gfx906 build fails:
-#   - CMakeLists.txt (v0.1.45): moe_fused_iq.cu's HIP path calls the gfx11
-#     F16 prompt kernels (moe_f16_kq.cu, opt-in STRATA_PF_F16=1), and a
-#     gfx906 build compiles that path, but only the generic HIP branch lists
-#     the unit: the link fails on f16kq::covers_down and f16kq::down. The
-#     gfx906 strata_mmq gets the unit; its kernels trap off gfx11 and the
-#     call is never reached without the switch.
-#   - CMakeLists.txt (v0.1.44): strata_mmq_w4a4 (the NVFP4 W4A4 prompt kernel, its own
-#     library) is compiled as HIP like every other unit but does not get
-#     GGML_USE_HIP, so ggml's vendor header reaches for cuda.h. It gets the
-#     define strata_mmq has.
-#   - hip_compat/cublas_v2.h: q36_engine.cu (Qwen3.6-35B) calls cublasSgemm
-#     and cublasGemmStridedBatchedEx, which the shim does not alias; both map
-#     to hipBLAS, whose v2 API takes the HIP_R_* and compute types it already
-#     maps.
-#   - strata_hip.h: two stream-priority names have no HIP alias. Their uses
-#     in mtp.cpp are compiled out of a gfx906 build, and on 2026-10-10 the
-#     engine compiled without this part: it can go.
-# Built at v0.1.45 on 2026-10-18 and served under viiwork the same day, one
-# backend on four Radeon VIIs and an MI60.
-# The checkpoint copy the patch carried up to v0.1.41 is upstream since
-# v0.1.42 (conversation_copy.hpp: the copy goes on a stream of the saving
-# thread's own; on the default stream HIP refused it while another thread
-# captured a graph, "saving a checkpoint part failed", seen since v0.1.39).
-# The fused_gr.cu and vmm.cpp compile fixes v0.1.40.1 needed are upstream
-# since v0.1.41 (#1396).
+# docker/strata/gfx906-<version>.patch carries one fix for Strata v0.2.3,
+# inside the gfx906 build only: strata_hip.h gets HIP aliases for two
+# stream-priority calls, cudaDeviceGetStreamPriorityRange and
+# cudaStreamCreateWithPriority, which src/core/dflash2.cpp (new in 0.2) makes
+# unconditionally; without them the engine does not compile. The other three
+# fixes the v0.1.45 patch carried are upstream or unneeded at v0.2.3: the two
+# CMake ones (moe_f16_kq.cu in the gfx906 strata_mmq, GGML_USE_HIP for
+# strata_mmq_w4a4) since 0.2.1, and the cuBLAS aliases because the Qwen3.6
+# engine that called them is no longer part of a gfx906 build.
+# Built at v0.2.3 on 2026-10-24. v0.1.45 served under viiwork on 2026-10-18,
+# one backend on four Radeon VIIs and an MI60.
+#
+# The source checkout is the image's layout, as it was at 0.1.x: upstream's
+# 0.2 Terminal and component packages (the CUDA image's /opt/strata/terminal)
+# are its release archives, which this build does not make.
 #
 # WHAT AN OPERATOR WILL NOT GUESS:
 #   - The model is not in the image. Mount the pack, the GGUF shards and the
@@ -62,8 +49,8 @@ RUN CGO_ENABLED=0 go build -ldflags "-X main.version=${VERSION}" -o /viiwork ./c
 
 # Stage 2: Strata, built for gfx906, and the runtime.
 FROM ${STRATA_ROCM_BASE}
-ARG STRATA_VERSION=v0.1.45
-ARG STRATA_COMMIT=477ac13cbe8e582c20484871ce459d20d82df09d
+ARG STRATA_VERSION=v0.2.3
+ARG STRATA_COMMIT=5c8dd322528cc84f68f461ad54a506b9da8fa8d4
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \

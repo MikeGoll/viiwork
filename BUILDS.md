@@ -166,10 +166,12 @@ installed release resolves to the published
 ## `docker/Dockerfile.strata` and `docker/Dockerfile.strata-cuda`
 
 [Strata](https://github.com/Niko1221/Strata) at the tag `STRATA_VERSION` pins in
-`docker/pins.env` (currently `v0.1.45`), with `viiwork` added. Two files rather
-than one with a build argument, because the engine is compiled differently for
-each accelerator. In both images the checkout is `/opt/strata`, which is what
-`models[].strata.dir` names.
+`docker/pins.env` (currently `v0.2.3`), with `viiwork` added. Two files rather
+than one with a build argument, because the gfx906 image compiles the engine
+and the CUDA image does not, and the two lay Strata out differently: the
+model's block and the JSON name different paths on each
+([docs/models.md](docs/models.md#strata-one-moe-family-across-several-cards)
+has the table).
 
 **`Dockerfile.strata` is the gfx906 build** (Radeon VII, Instinct MI50 / MI60).
 
@@ -178,49 +180,51 @@ each accelerator. In both images the checkout is `/opt/strata`, which is what
   upstream's own `docs/AMD_HIP.md` documents. AMD's ROCm no longer ships
   gfx906 libraries, so this image does not sit on the ROCm 6.2.4 base the
   llama.cpp image uses.
-- **`docker/strata/gfx906-v0.1.45.patch` carries four fixes**, inside the
-  gfx906 build. Three are for code new in v0.1.44 and v0.1.45, and the gfx906
-  build fails without them: `moe_fused_iq.cu`'s HIP path calls the gfx11 F16
-  prompt kernels (`moe_f16_kq.cu`, opt-in `STRATA_PF_F16=1`), which only the
-  generic HIP branch compiles, so the gfx906 link fails on
-  `f16kq::covers_down` and `f16kq::down` until its `strata_mmq` gets the unit
-  (the kernels trap off gfx11, and nothing reaches them without the switch);
-  `strata_mmq_w4a4` (the NVFP4 W4A4 prompt kernel, a library
-  of its own) is compiled as HIP without the `GGML_USE_HIP` that
-  `strata_mmq` gets, so ggml's vendor header includes `cuda.h`; and
-  `q36_engine.cu` (Qwen3.6-35B) calls `cublasSgemm` and
-  `cublasGemmStridedBatchedEx`, which `hip_compat/cublas_v2.h` did not
-  alias. The fourth, two stream-priority aliases in `strata_hip.h`, is for
-  code compiled out of a gfx906 build and can go. The image at v0.1.45
-  served Qwen3.8-Flash-Next under viiwork on 2026-10-18, one backend on four
-  Radeon VIIs and an MI60 (a 104k-token prompt read at 959 tok/s). The
-  checkpoint copy the patch carried up to v0.1.41 is
-  upstream since v0.1.42: a checkpoint's state is copied on a stream of the
-  saving thread's own. That was the cause of `saving a checkpoint part
-  failed`: on the default stream HIP refuses the copy while another thread
-  captures its prompt graphs (CUDA's thread-local capture mode lets it
-  through), and the refusal invalidates that capture too. The two compile
-  fixes v0.1.40.1 also needed (`fused_gr.cu`, `vmm.cpp`) are upstream since
-  v0.1.41. The patch is named for the version and must be re-cut when
-  `STRATA_VERSION` changes.
-- The engine binary is `/opt/strata/build-906/strata`: the Strata JSON's `exe`.
+- **The checkout is `/opt/strata`**, built in place as `docs/AMD_HIP.md`
+  does: `strata: {dir: /opt/strata}` and the JSON's `exe`
+  `/opt/strata/build-906/strata`, as at 0.1.x. Upstream's 0.2 Terminal and
+  engine packages are release archives this build does not make.
+- **`docker/strata/gfx906-v0.2.3.patch` carries one fix**: HIP aliases in
+  `strata_hip.h` for `cudaDeviceGetStreamPriorityRange` and
+  `cudaStreamCreateWithPriority`, which `src/core/dflash2.cpp` (new in 0.2)
+  calls on every build; without them the engine does not compile (built
+  without the patch on 2026-10-24 to check). The v0.1.45 patch's other three
+  fixes are gone: the two CMake ones are upstream since 0.2.1, and the cuBLAS
+  aliases were for the Qwen3.6 engine, which a gfx906 build no longer
+  compiles (`strata --families` lists `qwen4exp`, Qwen3.8-Flash-Next). The
+  patch is named for the version and must be re-cut when `STRATA_VERSION`
+  changes; `scripts/pins_test.sh` checks that the file the Dockerfile names
+  exists.
+- **v0.2.3 is compiled, not yet served on a card.** v0.1.45 served
+  Qwen3.8-Flash-Next under viiwork on 2026-10-18, one backend on four Radeon
+  VIIs and an MI60 (a 104k-token prompt read at 959 tok/s).
 - The image has no group named `render`. Give the container the host's render
   group by number, as `docker/compose.strata.yaml` does (`RENDER_GID`); with
   the name the container does not start.
 
-**`Dockerfile.strata-cuda` is two builds.** Upstream publishes a Dockerfile, not
-an image, so `make docker-strata-cuda` first builds upstream's image from the
-pinned tag (`strata-cuda:<version>`) and then drops `viiwork` into it — the same
-shape as `Dockerfile.vllm`. Python packages are in a venv there, so the model's
-block is `strata: {dir: /opt/strata, python: /opt/strata/.venv/bin/python}` and
-the JSON's `exe` is `/opt/strata/engine/strata`. **Build it with BuildKit, on
-the machine that will run it.** Upstream's Dockerfile compiles the engine in a
-heredoc `RUN`, which Docker's legacy builder (a host without the `buildx`
-plugin) skips without an error: the build succeeds and the image has no
-`/opt/strata/engine`. And since v0.1.41 the engine is compiled for the CPU
-that builds the image. It needs GPUs granted like the
-other two NVIDIA images (below). It has served under viiwork on three RTX A4000 at the model's full
-262,144-token context ([models.md](docs/models.md)).
+**`Dockerfile.strata-cuda` sits on upstream's image.** Since 0.2.1 upstream
+publishes ready-made images, so this is the same shape as `Dockerfile.vllm`:
+`STRATA_CUDA_IMAGE` (`ghcr.io/niko1221/strata:0.2.3-cuda13`, held by digest;
+its `/opt/strata/terminal/COMMIT` is `STRATA_COMMIT`) with `viiwork` added.
+Nothing is compiled, and the legacy builder works.
+
+- **cuda13 needs NVIDIA driver 580 or newer.** Its engine is built for sm_75,
+  86, 89 and 120 plus PTX: RTX 20 to 50 and the A4000.
+- **The layout is upstream's 0.2 one**: the server and its Python in the
+  Terminal (`strata: {dir: /opt/strata/terminal, python:
+  /opt/strata/terminal/python/bin/python3}`) and the engine in a component
+  package, `/opt/strata/components/engine/0.1.48-linux-x86_64-cuda-cuda13/`,
+  which is the JSON's `exe` directory and its `lib_dirs`. With the 0.1.x
+  paths (`/opt/strata`, `/opt/strata/.venv/bin/python`,
+  `/opt/strata/engine/strata`) the backend dies at launch: **moving a CUDA
+  node from v2.11.0-beta1's image means editing its `strata:` block and
+  JSON in the same step.**
+- **No curl and no `python3` on PATH.** A compose healthcheck has to use
+  `/opt/strata/terminal/python/bin/python3` (urllib) instead.
+- Served under viiwork on an RTX A4000 on 2026-10-24 (load about 50 s;
+  chat, tool call and JSON output correct; decode 46 to 53 tok/s once the
+  expert cache was warm, the same as the kv_share fork on the card beside
+  it). It needs GPUs granted like the other two NVIDIA images (below).
 
 What an operator will not guess, for either image:
 

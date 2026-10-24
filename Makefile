@@ -97,9 +97,8 @@ docker-freetoken:
 docker-strata:
 	docker build --build-arg VERSION=$(VERSION) -f docker/Dockerfile.strata -t viiwork-strata .
 
-# Upstream publishes a Dockerfile, not an image: build theirs at the pin first.
+# On upstream's ready-made image at the pin (STRATA_CUDA_IMAGE).
 docker-strata-cuda:
-	. docker/pins.env && docker build -t strata-cuda:$$STRATA_VERSION https://github.com/Niko1221/Strata.git#$$STRATA_COMMIT
 	docker build --build-arg VERSION=$(VERSION) -f docker/Dockerfile.strata-cuda -t viiwork-strata-cuda .
 
 up:

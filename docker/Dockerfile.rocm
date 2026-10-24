@@ -26,7 +26,11 @@ WORKDIR /llama.cpp
 # __hip_fp8_e4m3 only for newer archs, causing a compile error.
 RUN sed -i 's/#if HIP_VERSION >= 60200000/#if HIP_VERSION >= 99999999/' \
     ggml/src/ggml-cuda/vendors/hip.h
+# The clone is shallow, so llama.cpp's own build number (a commit count) would
+# be 1 and `llama-server --version` would say "build 1": the node then
+# publishes engine_version "b1". The pin is the build number.
 RUN cmake -B build -DGGML_HIP=ON -DAMDGPU_TARGETS=gfx906 \
+    -DLLAMA_BUILD_NUMBER="${LLAMA_CPP_VERSION#b}" \
     && cmake --build build --target llama-server llama-perplexity -j$(nproc)
 # Smoke test: verify binary runs and can find HIP runtime
 RUN ldd /llama.cpp/build/bin/llama-server    && /llama.cpp/build/bin/llama-server    --help > /dev/null

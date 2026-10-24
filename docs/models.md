@@ -233,6 +233,25 @@ models:
       warmup: 30s                    # default
 ```
 
+- **The paths depend on the image.** The gfx906 image (`viiwork-strata`,
+  built from source) and the CUDA image (`viiwork-strata-cuda`, upstream's
+  ready-made 0.2 image) lay Strata out differently, and the model's block and
+  the JSON must name what is in the image they run on:
+
+  | | `viiwork-strata` (gfx906) | `viiwork-strata-cuda` (Strata 0.2.3) |
+  |---|---|---|
+  | `strata.dir` | `/opt/strata` | `/opt/strata/terminal` |
+  | `strata.python` | `python3` (default) | `/opt/strata/terminal/python/bin/python3` |
+  | JSON `"exe"` | `/opt/strata/build-906/strata` | `/opt/strata/components/engine/0.1.48-linux-x86_64-cuda-cuda13/strata` |
+  | JSON `"cwd"` | `/opt/strata` | `/opt/strata/terminal` |
+  | JSON `"lib_dirs"` | — | `["/opt/strata/components/engine/0.1.48-linux-x86_64-cuda-cuda13"]` |
+  | expert profile | `/opt/strata/data/expert-profile.bin` | `/opt/strata/terminal/data/expert-profile.bin` |
+
+  The engine directory is named for the engine package's version (0.1.48 in
+  Strata 0.2.3; the fork's kv_share build is 0.1.48.1). With another image's
+  paths the backend dies at launch. The CUDA image's paths were the
+  `/opt/strata` checkout and `/opt/strata/.venv/bin/python` up to Strata
+  0.1.45 (viiwork v2.11.0-beta1 and earlier).
 - **One JSON serves every backend of the model.** The node passes host, port
   and cards as flags; the file's `host`, `port` and `gpu` are ignored. Leave
   `layer_split` out and Strata splits the layers itself; the measurements below
@@ -331,7 +350,8 @@ that host is full, the turn spills to the next one and pays a cold prefill:
 
 ```yaml
     strata:
-      dir: /opt/strata
+      dir: /opt/strata/terminal                        # the kv-export-0.2 image's layout
+      python: /opt/strata/terminal/python/bin/python3
       kv_share:
         group: flash        # the members that share; same model files and JSON
         min_tokens: 8192    # default: a shorter conversation is cheap to prefill
@@ -370,8 +390,9 @@ that host is full, the turn spills to the next one and pays a cold prefill:
   measured import cost as `kv_share_import_ms_per_1k`, and `/v1/status`
   counts pushes, puts and imports under `kv_share`.
 
-Requirements, refused at start when unmet: the janit/Strata `kv-export-0.2` build (upstream 0.2.3.1 with the session endpoints)
-(upstream has neither endpoint), `"slot_save_path"` in the JSON at a path the
+Requirements, refused at start when unmet: the janit/Strata `kv-export-0.2`
+build (upstream 0.2.3.1 plus the session save, import and delta endpoints,
+which upstream lacks), `"slot_save_path"` in the JSON at a path the
 node reads and writes (in the Docker image the node and the engine share the
 container, so it is the same path), a conversation cache (on by default
 since Strata 0.2; an explicit `--conversation-cache-mib` of 0 in `args` is
@@ -380,6 +401,27 @@ refused), and one card per backend (Strata saves no layer-split session). Keep
 tmpfs was slower (1.12 s against 0.68 s). Members of a group must load the
 same model files with the same JSON: Strata checks both fingerprints and
 refuses anything else on import.
+
+**The fork's image has the 0.2 layout** of the CUDA image (the table under
+[Strata](#strata-one-moe-family-across-several-cards)), with its own engine package: the JSON's `"exe"` is
+`/opt/strata/components/engine/0.1.48.1-linux-x86_64-cuda-cuda13/strata` and
+`"lib_dirs"` names that same directory (its `libcublas`, `libcudart` and
+`libstrata_kq`). tehas-white (one RTX 5090) has served this way since
+v2.11.0-beta1.
+
+**Where the files go.** `kv_share.dir` (the replicas a host holds for its
+peers) and the JSON's `slot_save_path` (the engine's own saves, and the file
+an import reads) are a cache: a lost or damaged file costs one cold prefill,
+never a wrong answer, so what matters is write endurance and speed, not
+durability. Every turn of a long session writes about 240 MB on the host
+that ran it and about as much on the host that receives it, and an import
+writes the whole file (about 1 GB at 50k tokens) before the engine reads it;
+a save pauses the backend's slots while it runs. Put both on a drive of their
+own, Optane where there is one, rather than on the root disk or the one the
+weights are read from. Size them at about 1 GB per 50k-token conversation
+each (`max_gib` bounds `kv_share.dir`, default 32). Mount the drive at the
+same path on every host of a group, so one JSON, and with it one
+`slot_save_path`, serves them all.
 
 ## Models from viiwork-parrot
 

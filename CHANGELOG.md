@@ -1,5 +1,37 @@
 # Changelog
 
+## v2.11.0-beta2
+
+- **Strata is pinned at v0.2.3** (from v0.1.45), and the CUDA image now sits
+  on upstream's ready-made `ghcr.io/niko1221/strata:0.2.3-cuda13` (held by
+  digest) instead of compiling upstream's Dockerfile. **That image has
+  upstream's 0.2 layout, so a CUDA node's `strata:` block and JSON change
+  with it**: `dir: /opt/strata/terminal`, `python:
+  /opt/strata/terminal/python/bin/python3`, and the JSON's `exe` and
+  `lib_dirs` name
+  `/opt/strata/components/engine/0.1.48-linux-x86_64-cuda-cuda13/` with
+  `cwd` `/opt/strata/terminal`. With the old paths the backend dies at
+  launch. Table: [docs/models.md](docs/models.md#strata-one-moe-family-across-several-cards).
+  The cuda13 image needs NVIDIA driver 580 or newer. Served under viiwork on
+  an RTX A4000: 46 to 53 tok/s decode once warm, the same as the kv_share
+  fork.
+- The gfx906 image keeps its `/opt/strata` paths. Its patch shrinks to one
+  fix (two stream-priority aliases that `dflash2.cpp`, new in 0.2, needs);
+  the other three are upstream or no longer compiled. It is built and its
+  engine lists Qwen3.8-Flash-Next, but v0.2.3 has not yet served on a
+  Radeon VII.
+- **The ROCm image's llama.cpp reported "build 1"**, so a gfx906 node
+  published `engine_version: b1`: the clone is shallow and llama.cpp counts
+  commits. The pin is now passed as the build number. gb1 runs b11804 built
+  this way and publishes `b11804`.
+- **No more AppArmor denials every five seconds.** Finding a backend's
+  process tree read every host process's `/proc/<pid>/stat`, which with
+  `pid: host` is a ptrace read of an unconfined process: docker's default
+  AppArmor profile refused it and logged a denial on every health tick (on
+  every Docker node). The node now walks the tree's own
+  `/proc/<pid>/task/<tid>/children` lists, falling back to the scan where
+  the kernel has none.
+
 ## v2.11.0-beta1
 
 **Headline: a session's conversation follows it between hosts

@@ -169,6 +169,53 @@ func TestDescendants(t *testing.T) {
 	}
 }
 
+// With children lists the walk reads only the tree: 200's stat says it is
+// 100's child, but no list names it, so it is not read and not included.
+func TestDescendantsChildrenLists(t *testing.T) {
+	root := t.TempDir()
+	lists := map[string]string{ // pid/tid -> children
+		"100/100": "101 ",
+		"100/105": "103 101 ",
+		"101/101": "102",
+		"102/102": "",
+		"103/103": "",
+	}
+	for task, kids := range lists {
+		pid, tid, _ := strings.Cut(task, "/")
+		dir := filepath.Join(root, pid, "task", tid)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "children"), []byte(kids), 0o444); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.MkdirAll(filepath.Join(root, "200"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "200", "stat"), []byte("200 (x) S 100 1 1 0 -1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := descendants(root, 100); !slices.Equal(got, []int{100, 101, 103, 102}) {
+		t.Errorf("descendants = %v, want [100 101 103 102]", got)
+	}
+}
+
+// The real kernel: this test process's child shows up through the lists.
+func TestDescendantsLiveProc(t *testing.T) {
+	if _, err := os.Stat(filepath.Join("/proc/self/task", strconv.Itoa(os.Getpid()), "children")); err != nil {
+		t.Skip("no /proc children lists here")
+	}
+	cmd := exec.Command("sleep", "5")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
+	if got := descendants("/proc", os.Getpid()); !slices.Contains(got, cmd.Process.Pid) {
+		t.Errorf("descendants(self) = %v, missing child %d", got, cmd.Process.Pid)
+	}
+}
+
 func TestStartProcessBadPath(t *testing.T) {
 	_, err := StartProcess("/nonexistent/binary", nil, nil, &syncBuffer{})
 	if err == nil || !strings.Contains(err.Error(), "/nonexistent/binary") {
