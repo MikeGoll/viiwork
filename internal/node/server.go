@@ -298,6 +298,10 @@ func (s *server) handleMetricsStream(w http.ResponseWriter, r *http.Request) {
 
 	ch := s.d.GPUBroadcaster.Subscribe()
 	defer s.d.GPUBroadcaster.Unsubscribe(ch)
+	// Send the headers now: a node without telemetry may never publish a
+	// sample, and an EventSource waits on the headers to open.
+	w.WriteHeader(http.StatusOK)
+	f.Flush()
 
 	for {
 		select {

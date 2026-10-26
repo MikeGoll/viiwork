@@ -15,7 +15,7 @@
 # with that directory in "lib_dirs" (its CUDA libraries are beside it) and
 # "cwd": "/opt/strata/terminal". With the 0.1.x paths the backend dies at launch.
 #
-# Served under viiwork on an RTX 5090 (tehas-white, 2026-10-23, kv_share's
+# Served under viiwork on an RTX 5090 (forge-white, then tehas-white, 2026-10-23, kv_share's
 # kv-export-0.2 build of the same layout) and on an RTX A4000 at 0.2.3
 # (2026-10-24). Earlier pins, built from source: v0.1.39 to v0.1.45 on three
 # RTX A4000 at 262,144 context, two RTX 4090 and an RTX 5090.

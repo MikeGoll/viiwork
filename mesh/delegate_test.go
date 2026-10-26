@@ -249,6 +249,61 @@ func TestDelegateEvents(t *testing.T) {
 	}
 }
 
+// memberlist hands its dead message and the leave frame over last in, first
+// out, so a busy receiver can see the failure first: the notice still makes
+// it a leave.
+func TestDelegateLeaveNoticeAfterFailure(t *testing.T) {
+	f := newDelegateFixture(t, Options{}, time.Hour)
+	next := func() MemberEvent {
+		select {
+		case ev := <-f.d.events():
+			return ev
+		case <-time.After(time.Second):
+			t.Fatal("no event")
+			return MemberEvent{}
+		}
+	}
+	state := func(name string) string {
+		for _, m := range f.table.snapshot() {
+			if m.Name == name {
+				return m.State
+			}
+		}
+		return ""
+	}
+
+	f.d.NotifyJoin(node(t, "b", "100.64.0.2"))
+	next()
+	f.d.NotifyLeave(node(t, "b", "100.64.0.2"))
+	if ev := next(); ev.Kind != EventFail {
+		t.Fatalf("first event = %+v, want a failure", ev)
+	}
+	f.clock.Advance(time.Second)
+	f.d.NotifyMsg(frame(frameLeave, []byte("b")))
+	if ev := next(); ev.Kind != EventLeave || ev.Member.State != meshapi.MemberLeft {
+		t.Errorf("late notice event = %+v, want a leave", ev)
+	}
+	if got := state("b"); got != meshapi.MemberLeft {
+		t.Errorf("b = %q, want left", got)
+	}
+
+	// Past the grace a notice is only remembered for a later departure.
+	f.d.NotifyJoin(node(t, "c", "100.64.0.3"))
+	next()
+	f.d.NotifyLeave(node(t, "c", "100.64.0.3"))
+	next()
+	f.clock.Advance(lateNoticeGrace + time.Second)
+	f.d.NotifyMsg(frame(frameLeave, []byte("c")))
+	select {
+	case ev := <-f.d.events():
+		t.Errorf("a notice past the grace sent %+v", ev)
+	default:
+	}
+	if got := state("c"); got != meshapi.MemberDead {
+		t.Errorf("c = %q, want dead", got)
+	}
+}
+
 func TestDelegateEventsNeverBlock(t *testing.T) {
 	f := newDelegateFixture(t, Options{}, time.Hour)
 	done := make(chan struct{})

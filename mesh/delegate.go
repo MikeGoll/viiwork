@@ -78,7 +78,10 @@ func (d *delegate) NotifyMsg(msg []byte) {
 	}
 	switch kind {
 	case frameLeave:
-		d.table.leaveNotice(string(body))
+		if m, late := d.table.leaveNotice(string(body)); late {
+			d.logf("member %s left (its notice came after the failure)", m.Name)
+			d.send(MemberEvent{Kind: EventLeave, Member: m})
+		}
 	case framePayload:
 		if d.o.Payload != nil {
 			d.o.Payload.NotifyMsg(body)

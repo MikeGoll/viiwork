@@ -406,7 +406,7 @@ refuses anything else on import.
 [Strata](#strata-one-moe-family-across-several-cards)), with its own engine package: the JSON's `"exe"` is
 `/opt/strata/components/engine/0.1.48.1-linux-x86_64-cuda-cuda13/strata` and
 `"lib_dirs"` names that same directory (its `libcublas`, `libcudart` and
-`libstrata_kq`). tehas-white (one RTX 5090) has served this way since
+`libstrata_kq`). forge-white (one RTX 5090) has served this way since
 v2.11.0-beta1.
 
 **Where the files go.** `kv_share.dir` (the replicas a host holds for its

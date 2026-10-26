@@ -14,6 +14,11 @@ const (
 	// leaveNoticeTTL is how recent a leave notice must be for a departure to
 	// read as left rather than dead.
 	leaveNoticeTTL = 30 * time.Second
+	// lateNoticeGrace is how long after a dead verdict a leave notice still
+	// turns it into left. memberlist queues the notice frame and its own dead
+	// message together and hands them over last in, first out, so on a busy
+	// receiver the dead message can come first.
+	lateNoticeGrace = 5 * time.Second
 	// departedTTL keeps a machine that went away visible (Decision 8).
 	departedTTL = 24 * time.Hour
 )
@@ -103,11 +108,19 @@ func (t *memberTable) setAlive(n *memberlist.Node) Member {
 	return *m
 }
 
-// leaveNotice remembers that name announced it is leaving.
-func (t *memberTable) leaveNotice(name string) {
+// leaveNotice remembers that name announced it is leaving. A notice that
+// arrives just after name was recorded dead turns it into left, and the
+// member is returned with true.
+func (t *memberTable) leaveNotice(name string) (Member, bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.notices[name] = t.now()
+	now := t.now()
+	if m, ok := t.members[name]; ok && m.State == meshapi.MemberDead && now.Sub(m.Since) <= lateNoticeGrace {
+		m.State = meshapi.MemberLeft
+		return *m, true
+	}
+	t.notices[name] = now
+	return Member{}, false
 }
 
 // depart marks name left (a leave notice at most 30 s old) or dead.

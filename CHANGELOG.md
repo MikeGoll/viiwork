@@ -1,5 +1,17 @@
 # Changelog
 
+## v2.11.0-beta3
+
+- **A node that stopped cleanly could be recorded `dead` instead of `left`.**
+  memberlist hands a leaving node's notice and its own dead message over last
+  in, first out, so a busy receiver could see the failure first. A leave
+  notice that arrives within 5 s of the dead verdict now turns it into `left`
+  (and sends a leave event).
+- **`/v1/metrics/stream` sent no headers until the first GPU sample**, so on
+  a node without GPU telemetry an `EventSource` stayed pending forever and
+  never saw its CORS header. The headers are now flushed as soon as the
+  stream opens.
+
 ## v2.11.0-beta2
 
 - **Strata is pinned at v0.2.3** (from v0.1.45), and the CUDA image now sits
@@ -31,7 +43,6 @@
   every Docker node). The node now walks the tree's own
   `/proc/<pid>/task/<tid>/children` lists, falling back to the scan where
   the kernel has none.
-
 ## v2.11.0-beta1
 
 **Headline: a session's conversation follows it between hosts
