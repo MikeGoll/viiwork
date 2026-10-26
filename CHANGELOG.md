@@ -1,5 +1,32 @@
 # Changelog
 
+## v2.11.0
+
+**A session's conversation follows it between hosts, now measured between
+two machines.** Everything from v2.11.0-beta1 to beta3 below, plus the
+cross-host test beta1 was waiting for: two RTX 5090 hosts (forge-white and
+forge-black, one card each, Qwen3.8-Flash-Next on the janit/Strata
+kv_share build of Strata 0.2.6, 4 slots each, a 64 GiB / 32 conversation
+cache), 12 or 16 coding-agent sessions at once for 90 minutes per run, so
+the hosts were full and sessions spilled all the time.
+
+- **93-97% of host switches resume warm**, 1-2% cold. A warm switch costs
+  what staying put costs (0.7-0.9 s of prefill at 50-60k tokens); a cold
+  one 10-14 s. Answers after an import matched the original word for word.
+- **1 GbE is enough for two hosts.** A copy takes 3.2 s over 1 GbE and
+  0.55-0.81 s over 10 GbE; 10 GbE moves only 2-3 points of switches from
+  partly warm to warm. kv_share used 320-450 Mb/s each way on average.
+- **Give Strata a large conversation cache.** At 16 GiB / 8 conversations
+  the engine evicted imported copies before their session came back and
+  17% of switches were cold; at 64 GiB / 32, under 2%.
+- **On a Broadcom BCM57416 (`bnxt_en`) with the AMD IOMMU on, boot with
+  `iommu=pt`.** The first 1.5 GB push hung the NIC through an
+  `IO_PAGE_FAULT`; with `iommu=pt` there was none in about 6,600 pushes
+  (1.9 TB).
+- Known: a replica is imported once per version, so a session whose
+  imported copy the engine evicted since comes back cold; this is most of
+  the remaining cold switches and the next fix.
+
 ## v2.11.0-beta3
 
 - **A node that stopped cleanly could be recorded `dead` instead of `left`.**

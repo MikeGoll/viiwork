@@ -407,7 +407,15 @@ refuses anything else on import.
 `/opt/strata/components/engine/0.1.48.1-linux-x86_64-cuda-cuda13/strata` and
 `"lib_dirs"` names that same directory (its `libcublas`, `libcudart` and
 `libstrata_kq`). forge-white (one RTX 5090) has served this way since
-v2.11.0-beta1.
+v2.11.0-beta1, and forge-black beside it since 2026-10-25.
+
+**Measured between those two hosts** (12-16 coding-agent sessions
+on 8 slots, 90 minutes per run): 93-97% of host switches resumed warm and
+1-2% cold, over 1 GbE as over 10 GbE. A copy took 3.2 s at 1 GbE and under
+a second at 10 GbE, which moved only 2-3 points of switches from partly warm
+to warm. What mattered was the conversation cache: at 16 GiB / 8
+conversations Strata evicted imported copies before their session came
+back (17% cold); at 64 GiB / 32, under 2%.
 
 **Where the files go.** `kv_share.dir` (the replicas a host holds for its
 peers) and the JSON's `slot_save_path` (the engine's own saves, and the file
