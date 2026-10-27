@@ -385,7 +385,7 @@ func (m *Manager) BeforeLocal(ctx context.Context, modelName, raw string, key ui
 	md.mu.Lock()
 	had, seen := md.imported[gen]
 	md.mu.Unlock()
-	if seen && had == rep.Version() && !m.evicted(ctx, md, b, raw, rep.Tokens) {
+	if seen && had == rep.Version() && !m.evicted(ctx, md, b, raw, k, rep.Tokens) {
 		return
 	}
 	start := time.Now()
@@ -427,18 +427,28 @@ func (m *Manager) BeforeLocal(ctx context.Context, modelName, raw string, key ui
 // longer holds as much of the conversation: the engine's cache evicts on its
 // own and says nothing, so the record of what was imported is only a hint.
 // An engine that cannot say keeps the record's answer.
-func (m *Manager) evicted(ctx context.Context, md *model, b Backend, raw string, tokens int64) bool {
+func (m *Manager) evicted(ctx context.Context, md *model, b Backend, raw, k string, tokens int64) bool {
 	h, ok := md.eng.(engine.SessionHolder)
 	if !ok {
 		return false
 	}
 	ctx, cancel := context.WithTimeout(ctx, heldTimeout)
 	defer cancel()
-	held, err := h.SessionHeld(ctx, b.Addr(), raw)
+	// the replica's own resume point names the conversation: the session's
+	// latest branch there may be another one (a compaction on another host)
+	n, sum, err := md.store.ResumeIDs(k)
+	if err != nil {
+		n, sum = 0, 0
+	}
+	held, err := h.SessionHeld(ctx, b.Addr(), raw, n, sum)
 	if err != nil {
 		return false
 	}
-	if held >= tokens {
+	need := tokens
+	if n > 0 {
+		need = n // the engine holds what the replica would resume from
+	}
+	if held >= need {
 		return false
 	}
 	if logging.DebugEnabled() {

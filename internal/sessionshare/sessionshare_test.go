@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -33,7 +34,7 @@ type fakeEngine struct {
 	imports   []int // size of each file imported
 	importErr error
 	// held answers SessionHeld; nil is an engine that cannot say
-	held func(raw string) (int64, error)
+	held func(raw string, n int64, hash uint64) (int64, error)
 }
 
 func newFakeEngine(t *testing.T) *fakeEngine {
@@ -90,14 +91,14 @@ func (e *fakeEngine) ImportSession(_ context.Context, _, name string) error {
 	return nil
 }
 
-func (e *fakeEngine) SessionHeld(_ context.Context, _, raw string) (int64, error) {
+func (e *fakeEngine) SessionHeld(_ context.Context, _, raw string, n int64, hash uint64) (int64, error) {
 	e.mu.Lock()
 	held := e.held
 	e.mu.Unlock()
 	if held == nil {
 		return 0, errors.New("cannot say")
 	}
-	return held(raw)
+	return held(raw, n, hash)
 }
 
 func (e *fakeEngine) counts() (saves, imports int) {
@@ -459,11 +460,17 @@ func TestAnEvictedReplicaIsImportedAgain(t *testing.T) {
 
 	var held int64
 	asked := 0
+	ids := kvsharetest.Session{Model: 1, Config: 2, Cells: 2000, StateSeed: 1}.IDs()
+	h := fnv.New64a()
+	h.Write(ids[:1995*4])
+	wantHash := h.Sum64()
 	b.eng.mu.Lock()
-	b.eng.held = func(raw string) (int64, error) {
+	b.eng.held = func(raw string, n int64, hash uint64) (int64, error) {
 		asked++
-		if raw != "s" {
-			t.Errorf("asked about %q", raw)
+		// the replica's resume point names the conversation: its checkpoint's
+		// 1995 tokens and their hash, not the live 2000 that end in the reply
+		if raw != "s" || n != 1995 || hash != wantHash {
+			t.Errorf("asked about %q, %d tokens, %016x (want %016x)", raw, n, hash, wantHash)
 		}
 		return held, nil
 	}
@@ -484,14 +491,14 @@ func TestAnEvictedReplicaIsImportedAgain(t *testing.T) {
 	if _, n := b.eng.counts(); n != 2 {
 		t.Fatalf("evicted: %d imports, want the replica imported again", n)
 	}
-	held = 1500 // holds less than the replica: an older turn
+	held = 1500 // holds less than the replica resumes from: an older turn
 	b.m.BeforeLocal(ctx, testModel, "s", 7, bb)
 	if _, n := b.eng.counts(); n != 3 {
 		t.Fatalf("shorter: %d imports, want 3", n)
 	}
 	// an engine that cannot say keeps the record's answer, as before
 	b.eng.mu.Lock()
-	b.eng.held = func(string) (int64, error) { return 0, errors.New("400") }
+	b.eng.held = func(string, int64, uint64) (int64, error) { return 0, errors.New("400") }
 	b.eng.mu.Unlock()
 	b.m.BeforeLocal(ctx, testModel, "s", 7, bb)
 	if _, n := b.eng.counts(); n != 3 {

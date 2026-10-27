@@ -350,7 +350,7 @@ that host is full, the turn spills to the next one and pays a cold prefill:
 
 ```yaml
     strata:
-      dir: /opt/strata/terminal                        # the kv-export-0.2 image's layout
+      dir: /opt/strata/terminal                        # the kv-export image's (Strata 0.2) layout
       python: /opt/strata/terminal/python/bin/python3
       kv_share:
         group: flash        # the members that share; same model files and JSON
@@ -390,9 +390,10 @@ that host is full, the turn spills to the next one and pays a cold prefill:
   measured import cost as `kv_share_import_ms_per_1k`, and `/v1/status`
   counts pushes, puts and imports under `kv_share`.
 
-Requirements, refused at start when unmet: the janit/Strata `kv-export-0.2`
-build (upstream 0.2.3.1 plus the session save, import and delta endpoints,
-which upstream lacks), `"slot_save_path"` in the JSON at a path the
+Requirements, refused at start when unmet: a janit/Strata kv-export build
+(upstream Strata plus the session save, import and delta endpoints, which
+upstream lacks; `v0.2.6-kvx2` on Strata 0.2.6 is current, and the oldest that
+lets the node re-import an evicted copy reliably), `"slot_save_path"` in the JSON at a path the
 node reads and writes (in the Docker image the node and the engine share the
 container, so it is the same path), a conversation cache (on by default
 since Strata 0.2; an explicit `--conversation-cache-mib` of 0 in `args` is
@@ -404,8 +405,9 @@ refuses anything else on import.
 
 **The fork's image has the 0.2 layout** of the CUDA image (the table under
 [Strata](#strata-one-moe-family-across-several-cards)), with its own engine package: the JSON's `"exe"` is
-`/opt/strata/components/engine/0.1.48.1-linux-x86_64-cuda-cuda13/strata` and
-`"lib_dirs"` names that same directory (its `libcublas`, `libcudart` and
+`/opt/strata/components/engine/0.1.51-linux-x86_64-cuda-cuda13/strata` on
+`v0.2.6-kvx1` and later (`0.1.48.1` on the older `v0.2.3.1-kvx1`), and `"lib_dirs"`
+names that same directory (its `libcublas`, `libcudart` and
 `libstrata_kq`). forge-white (one RTX 5090) has served this way since
 v2.11.0-beta1, and forge-black beside it since 2026-10-25.
 
@@ -421,8 +423,10 @@ back (17% cold); at 64 GiB / 32, under 2%.
 evicts oldest first and does not say which conversation went, so a node
 cannot assume that a copy it imported earlier is still there. When a session
 comes back to a backend with the copy that backend was already given, the
-node asks Strata how much of the conversation it still holds
-(`POST /slots/session?action=held`, in janit/Strata `v0.2.6-kvx1` and later)
+node asks Strata how much it still holds of the conversation that starts with
+the copy's resume point (its deepest checkpoint's tokens) (`POST /slots/session?action=held`, in janit/Strata
+`v0.2.6-kvx2` and later; `v0.2.6-kvx1` asks about the session's latest
+branch on that host, which after a compaction elsewhere is the wrong one)
 and imports again when that is less than the copy. With an older fork build
 the question gets a 400, and the node imports each copy once as before; in
 the measured runs that was most of the remaining avoidable cold switches.

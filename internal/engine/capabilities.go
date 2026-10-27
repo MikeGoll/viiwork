@@ -226,10 +226,14 @@ type SessionSharer interface {
 // on its own, so an import made earlier proves nothing about the next turn;
 // without this the node assumes an imported replica stays held.
 type SessionHolder interface {
-	// SessionHeld is how many tokens of the conversation `session` last
-	// continued the backend at addr still holds, 0 for none. An error means
-	// the backend cannot say (an engine without the query, or a timeout).
-	SessionHeld(ctx context.Context, addr, session string) (int64, error)
+	// SessionHeld is how many tokens the backend at addr still holds of the
+	// longest conversation whose first n token ids (little-endian int32)
+	// hash to `hash` (FNV-1a 64), 0 for none: the replica's own ids, since
+	// the branch `session` last continued there can be another one (a
+	// compaction elsewhere). With n = 0 the engine names the conversation by
+	// `session` alone. An error means the backend cannot say (an engine
+	// without the query, or a timeout).
+	SessionHeld(ctx context.Context, addr, session string, n int64, hash uint64) (int64, error)
 }
 
 // SavedSession is what a save wrote.

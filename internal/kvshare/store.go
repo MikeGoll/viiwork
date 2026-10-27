@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"io/fs"
 	"os"
@@ -558,6 +559,51 @@ func (s *Store) Info(key string) (r Replica, ok bool, err error) {
 		return Replica{}, false, err
 	}
 	return Replica{Size: st.Size, Digest: st.Digest, SaveID: st.SaveID, Tokens: st.Tokens, Updated: st.Updated}, true, nil
+}
+
+// ResumeIDs names the conversation a replica resumes as Strata names one
+// (SAVEC, HELD): the count of its deepest checkpoint's token ids and FNV-1a
+// 64 over their bytes (one little-endian int32 per token). The checkpoint is
+// where the next turn resumes; the live ids past it end in the reply as it
+// was generated, which the chat template renders again on the next turn, so
+// no later conversation starts with all of them. A replica without a
+// checkpoint is named by its live ids.
+func (s *Store) ResumeIDs(key string) (n int64, sum uint64, err error) {
+	if !ValidKey(key) {
+		return 0, 0, fmt.Errorf("kvshare: invalid key %q", key)
+	}
+	defer s.lock(key)()
+	st, err := s.readState(key)
+	if err != nil {
+		return 0, 0, err
+	}
+	if st == nil || !st.Complete {
+		return 0, 0, fmt.Errorf("kvshare: %s: no complete replica", key)
+	}
+	best, size := "live.ids", int64(-1)
+	for _, it := range st.Items {
+		if strings.HasPrefix(it.Section, "ckpt") && strings.HasSuffix(it.Section, ".ids") && it.Len > size {
+			best, size = it.Section, it.Len
+		}
+	}
+	p, err := s.sectionFile(key, best)
+	if err != nil {
+		return 0, 0, err
+	}
+	f, err := os.Open(p)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer f.Close()
+	h := fnv.New64a()
+	m, err := io.Copy(h, f)
+	if err != nil {
+		return 0, 0, err
+	}
+	if m%4 != 0 || m == 0 {
+		return 0, 0, fmt.Errorf("kvshare: %s: %s holds %d bytes", key, best, m)
+	}
+	return m / 4, h.Sum64(), nil
 }
 
 // Version names these bytes: the sender's digest, else the engine's save id.

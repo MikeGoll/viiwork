@@ -151,7 +151,7 @@ func (e *Engine) SessionShare(s engine.Spec) (engine.SessionShareConfig, bool) {
 // With a base, kv-export's incremental save may answer with a delta (STRSDLT)
 // against it, and says so; an unknown base gives a whole file as before.
 func (e *Engine) SaveSession(ctx context.Context, addr, session, name, base string) (engine.SavedSession, error) {
-	body := map[string]string{"session": session, "filename": name}
+	body := map[string]any{"session": session, "filename": name}
 	if base != "" {
 		body["base"] = base
 	}
@@ -175,18 +175,24 @@ func (e *Engine) SaveSession(ctx context.Context, addr, session, name, base stri
 // ImportSession is engine.SessionSharer: POST /slots/0?action=import, which
 // validates the file like a restore and parks it in the conversation cache.
 func (e *Engine) ImportSession(ctx context.Context, addr, name string) error {
-	return e.slotAction(ctx, addr, "/slots/0?action=import", map[string]string{"filename": name}, nil)
+	return e.slotAction(ctx, addr, "/slots/0?action=import", map[string]any{"filename": name}, nil)
 }
 
 // SessionHeld is engine.SessionHolder: POST /slots/session?action=held
-// (janit/Strata kv-export since 9d44ecd2), how much of the session's
-// conversation the engine still holds live, in a batch slot or parked. An
+// (janit/Strata kv-export since 9d44ecd2), how much of a conversation the
+// engine still holds live, in a batch slot or parked. With n it names the
+// conversation by its ids ("n", "hash"; since v0.2.6-kvx2), which a
+// v0.2.6-kvx1 build ignores and answers for the session's last branch. An
 // older build answers 400, which is "cannot say".
-func (e *Engine) SessionHeld(ctx context.Context, addr, session string) (int64, error) {
+func (e *Engine) SessionHeld(ctx context.Context, addr, session string, n int64, hash uint64) (int64, error) {
 	var out struct {
 		NHeld *int64 `json:"n_held"`
 	}
-	if err := e.slotAction(ctx, addr, "/slots/session?action=held", map[string]string{"session": session}, &out); err != nil {
+	body := map[string]any{"session": session}
+	if n > 0 {
+		body["n"], body["hash"] = n, fmt.Sprintf("%016x", hash)
+	}
+	if err := e.slotAction(ctx, addr, "/slots/session?action=held", body, &out); err != nil {
 		return 0, err
 	}
 	if out.NHeld == nil || *out.NHeld < 0 {
@@ -196,7 +202,7 @@ func (e *Engine) SessionHeld(ctx context.Context, addr, session string) (int64, 
 }
 
 // slotAction posts body and decodes a 200's answer into out (nil = discard).
-func (e *Engine) slotAction(ctx context.Context, addr, path string, body map[string]string, out any) error {
+func (e *Engine) slotAction(ctx context.Context, addr, path string, body map[string]any, out any) error {
 	b, err := json.Marshal(body)
 	if err != nil {
 		return err

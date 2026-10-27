@@ -1,5 +1,35 @@
 # Changelog
 
+## v2.11.2
+
+**kv_share asks about the right conversation.** v2.11.1's check asked Strata
+about the conversation the session had last continued on that host. After the
+client compacted its context on another host, that is an older, longer
+branch: Strata answered "held", the node skipped the import, and the turn
+read the whole prompt cold. Under load on two RTX 5090 hosts this was most of
+the cold switches the check should have saved.
+
+- The node now names the conversation by the replica's resume point: the
+  token ids of its deepest checkpoint, as a count and an FNV-1a 64 hash, the
+  way Strata names a conversation. It imports when Strata holds no
+  conversation that starts there. The checkpoint, not the whole replica,
+  because the replica ends in the reply as it was generated, which the chat
+  template renders again on the next turn: no later conversation starts with
+  all of it, and a check on the full ids would import again on every turn
+  that stayed on the host.
+- This needs janit/Strata `v0.2.6-kvx2`. A `v0.2.6-kvx1` build ignores the
+  ids and answers as before; an older build answers 400 and the node imports
+  each copy once, as v2.11.0 did.
+- `engine.SessionHolder.SessionHeld` takes the ids' count and hash
+  (`docs/adding-an-engine.md`). No wire contract changes.
+
+Measured on the same two hosts (16 coding-agent sessions on 8 slots, 90
+minutes, direct 10 GbE): 95.5% of 1,367 host switches warm, 3.3% partly warm,
+1.2% cold. Of the 16 cold switches, 8 followed a context compaction (nothing
+to resume) and 4 came before the session's first copy had reached the other
+host; one was a turn the check let through, against five in an hour under
+v2.11.1.
+
 ## v2.11.1
 
 **kv_share imports a copy again after Strata has evicted it** (#1). A node
@@ -47,7 +77,7 @@ the hosts were full and sessions spilled all the time.
   (1.9 TB).
 - Known: a replica is imported once per version, so a session whose
   imported copy the engine evicted since comes back cold; this is most of
-  the remaining cold switches and the next fix.
+  the remaining cold switches and the next fix. Fixed in v2.11.1.
 
 ## v2.11.0-beta3
 

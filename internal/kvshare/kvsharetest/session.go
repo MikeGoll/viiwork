@@ -92,6 +92,17 @@ func (f Session) EngineDelta(base Session, baseID, newID uint64) []byte {
 
 // build writes the file, handing each K/V part to kv (which writes it in
 // either encoding); seal writes real hashes.
+// IDs is the live token ids the session file carries (its live.ids section):
+// Cells little-endian int32s.
+func (f Session) IDs() []byte {
+	r := rand.New(rand.NewPCG(100, 1))
+	b := make([]byte, f.Cells*4)
+	for i := range b {
+		b[i] = byte(r.Uint32())
+	}
+	return b
+}
+
 func (f Session) build(kv func(p *bytes.Buffer, name string, part []byte), seal bool) []byte {
 	var p bytes.Buffer
 	u := func(v uint64) { _ = binary.Write(&p, binary.LittleEndian, v) }

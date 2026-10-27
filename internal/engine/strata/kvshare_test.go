@@ -175,23 +175,29 @@ func TestSessionHeld(t *testing.T) {
 	addr := strings.TrimPrefix(srv.URL, "http://")
 	ctx := context.Background()
 	e := New()
-	if n, err := e.SessionHeld(ctx, addr, "s"); err != nil || n != 51234 {
+	if n, err := e.SessionHeld(ctx, addr, "s", 0, 0); err != nil || n != 51234 {
 		t.Fatal(n, err)
 	}
 	if got != `POST /slots/session?action=held {"session":"s"}` {
 		t.Fatalf("request %q", got)
 	}
+	if n, err := e.SessionHeld(ctx, addr, "s", 50000, 0xab); err != nil || n != 51234 {
+		t.Fatal(n, err)
+	}
+	if got != `POST /slots/session?action=held {"hash":"00000000000000ab","n":50000,"session":"s"}` {
+		t.Fatalf("request by ids %q", got)
+	}
 	answer = `{"session": "s", "n_held": 0}`
-	if n, err := e.SessionHeld(ctx, addr, "s"); err != nil || n != 0 {
+	if n, err := e.SessionHeld(ctx, addr, "s", 0, 0); err != nil || n != 0 {
 		t.Fatal(n, err)
 	}
 	// a build without the query, and an answer without the count: cannot say
 	answer, status = `{"error": {"message": "/slots/session supports action=save"}}`, http.StatusBadRequest
-	if _, err := e.SessionHeld(ctx, addr, "s"); err == nil {
+	if _, err := e.SessionHeld(ctx, addr, "s", 0, 0); err == nil {
 		t.Fatal("an older build's 400 must be an error")
 	}
 	answer, status = `{}`, http.StatusOK
-	if _, err := e.SessionHeld(ctx, addr, "s"); err == nil {
+	if _, err := e.SessionHeld(ctx, addr, "s", 0, 0); err == nil {
 		t.Fatal("no n_held must be an error")
 	}
 }

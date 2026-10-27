@@ -261,7 +261,7 @@ type SessionSharer interface {
 // SessionHolder is implemented by a SessionSharer that can say what a
 // backend still holds of a session's conversation.
 type SessionHolder interface {
-    SessionHeld(ctx context.Context, addr, session string) (int64, error)
+    SessionHeld(ctx context.Context, addr, session string, n int64, hash uint64) (int64, error)
 }
 ```
 
@@ -292,8 +292,10 @@ the node must be able to read and write at the same path.
 `SessionHolder` is optional. A node imports each replica version into a
 backend once, but an engine's cache evicts on its own, so when a session comes
 back with the replica it was already given, the node asks `SessionHeld` how
-many tokens of that conversation the backend still holds and imports again if
-that is fewer than the replica's. An error means "cannot say", and the node
+many tokens the backend still holds of the conversation that starts with the
+replica's own token ids (their count and FNV-1a 64 hash; a session's latest
+branch on that backend may be another one after a compaction elsewhere), and
+imports again if that is fewer than the replica's. An error means "cannot say", and the node
 then trusts its record of the import, which is all an engine without the
 method gets.
 
