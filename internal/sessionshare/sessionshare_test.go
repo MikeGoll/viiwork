@@ -2,6 +2,7 @@ package sessionshare
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -31,6 +32,8 @@ type fakeEngine struct {
 	nextID    uint64
 	imports   []int // size of each file imported
 	importErr error
+	// held answers SessionHeld; nil is an engine that cannot say
+	held func(raw string) (int64, error)
 }
 
 func newFakeEngine(t *testing.T) *fakeEngine {
@@ -85,6 +88,16 @@ func (e *fakeEngine) ImportSession(_ context.Context, _, name string) error {
 	}
 	e.imports = append(e.imports, len(b))
 	return nil
+}
+
+func (e *fakeEngine) SessionHeld(_ context.Context, _, raw string) (int64, error) {
+	e.mu.Lock()
+	held := e.held
+	e.mu.Unlock()
+	if held == nil {
+		return 0, errors.New("cannot say")
+	}
+	return held(raw)
 }
 
 func (e *fakeEngine) counts() (saves, imports int) {
@@ -432,5 +445,56 @@ func TestModelNamesDoNotNestStores(t *testing.T) {
 	}
 	if a.m.model("q").store.Dir == filepath.Dir(a.m.model("q/r").store.Dir) {
 		t.Fatal("q/r's store nests in q's")
+	}
+}
+
+// An imported replica the engine has since evicted is imported again: the
+// record of what was sent is only a hint, and the engine is asked.
+func TestAnEvictedReplicaIsImportedAgain(t *testing.T) {
+	a, b := newNode(t, "a"), newNode(t, "b")
+	a.sees(b, "g", 1, time.Now())
+	a.eng.set("s", kvsharetest.Session{Model: 1, Config: 2, Cells: 2000, StateSeed: 1})
+	a.m.AfterLocal(testModel, "s", 7, &fakeBackend{id: "m/0"}, 2000)
+	waitFor(t, "the push", func() bool { return b.m.Stats(testModel).Puts == 1 })
+
+	var held int64
+	asked := 0
+	b.eng.mu.Lock()
+	b.eng.held = func(raw string) (int64, error) {
+		asked++
+		if raw != "s" {
+			t.Errorf("asked about %q", raw)
+		}
+		return held, nil
+	}
+	b.eng.mu.Unlock()
+	bb := &fakeBackend{id: "m/0"}
+	ctx := context.Background()
+	b.m.BeforeLocal(ctx, testModel, "s", 7, bb)
+	if _, n := b.eng.counts(); n != 1 || asked != 0 {
+		t.Fatalf("first import: %d imports, %d questions; a replica never given needs no question", n, asked)
+	}
+	held = 2600 // the turn ran here and the engine holds it, longer
+	b.m.BeforeLocal(ctx, testModel, "s", 7, bb)
+	if _, n := b.eng.counts(); n != 1 || asked != 1 {
+		t.Fatalf("held: %d imports, %d questions", n, asked)
+	}
+	held = 0 // the conversation cache evicted it
+	b.m.BeforeLocal(ctx, testModel, "s", 7, bb)
+	if _, n := b.eng.counts(); n != 2 {
+		t.Fatalf("evicted: %d imports, want the replica imported again", n)
+	}
+	held = 1500 // holds less than the replica: an older turn
+	b.m.BeforeLocal(ctx, testModel, "s", 7, bb)
+	if _, n := b.eng.counts(); n != 3 {
+		t.Fatalf("shorter: %d imports, want 3", n)
+	}
+	// an engine that cannot say keeps the record's answer, as before
+	b.eng.mu.Lock()
+	b.eng.held = func(string) (int64, error) { return 0, errors.New("400") }
+	b.eng.mu.Unlock()
+	b.m.BeforeLocal(ctx, testModel, "s", 7, bb)
+	if _, n := b.eng.counts(); n != 3 {
+		t.Fatalf("cannot say: %d imports, want no new one", n)
 	}
 }

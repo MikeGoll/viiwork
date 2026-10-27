@@ -48,6 +48,10 @@ const (
 	pushTimeout = 5 * time.Minute
 	// importTimeout bounds what a spilled turn waits for its import.
 	importTimeout = 30 * time.Second
+	// heldTimeout bounds asking a backend whether it still holds a session;
+	// past it the node trusts its own record, as with an engine that cannot
+	// say.
+	heldTimeout = 2 * time.Second
 	// failLogEvery rate-limits repeated failures per (what, peer).
 	failLogEvery = 10 * time.Minute
 )
@@ -381,8 +385,7 @@ func (m *Manager) BeforeLocal(ctx context.Context, modelName, raw string, key ui
 	md.mu.Lock()
 	had, seen := md.imported[gen]
 	md.mu.Unlock()
-	done := seen && had == rep.Version()
-	if done {
+	if seen && had == rep.Version() && !m.evicted(ctx, md, b, raw, rep.Tokens) {
 		return
 	}
 	start := time.Now()
@@ -418,6 +421,30 @@ func (m *Manager) BeforeLocal(ctx context.Context, modelName, raw string, key ui
 	if logging.DebugEnabled() {
 		m.d.Logf("[debug] kv_share: %s: imported session %s (%d tokens, %d MiB) into %s in %d ms", modelName, k, rep.Tokens, rep.Size>>20, b.ID(), took.Milliseconds())
 	}
+}
+
+// evicted reports that backend b, which was given this replica before, no
+// longer holds as much of the conversation: the engine's cache evicts on its
+// own and says nothing, so the record of what was imported is only a hint.
+// An engine that cannot say keeps the record's answer.
+func (m *Manager) evicted(ctx context.Context, md *model, b Backend, raw string, tokens int64) bool {
+	h, ok := md.eng.(engine.SessionHolder)
+	if !ok {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(ctx, heldTimeout)
+	defer cancel()
+	held, err := h.SessionHeld(ctx, b.Addr(), raw)
+	if err != nil {
+		return false
+	}
+	if held >= tokens {
+		return false
+	}
+	if logging.DebugEnabled() {
+		m.d.Logf("[debug] kv_share: %s: backend %s holds %d of the %d tokens it was given; importing again", md.name, b.ID(), held, tokens)
+	}
+	return true
 }
 
 // AfterLocal runs after a session's turn on local backend b completed: a

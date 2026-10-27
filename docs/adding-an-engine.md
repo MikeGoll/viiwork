@@ -257,6 +257,12 @@ type SessionSharer interface {
     SaveSession(ctx context.Context, addr, session, name, base string) (SavedSession, error)
     ImportSession(ctx context.Context, addr, name string) error
 }
+
+// SessionHolder is implemented by a SessionSharer that can say what a
+// backend still holds of a session's conversation.
+type SessionHolder interface {
+    SessionHeld(ctx context.Context, addr, session string) (int64, error)
+}
 ```
 
 `ReasoningSeparator` decides what a client sees when it streams without
@@ -282,6 +288,14 @@ imported. A miss must never be a wrong answer. Return `engine.ErrSessionGone`
 when the backend no longer holds the session; the node drops that save
 quietly. `SessionShare` names the directory both calls use (`SaveDir`), which
 the node must be able to read and write at the same path.
+
+`SessionHolder` is optional. A node imports each replica version into a
+backend once, but an engine's cache evicts on its own, so when a session comes
+back with the replica it was already given, the node asks `SessionHeld` how
+many tokens of that conversation the backend still holds and imports again if
+that is fewer than the replica's. An error means "cannot say", and the node
+then trusts its record of the import, which is all an engine without the
+method gets.
 
 `UsageReporter` is what lets a host earn a performance score. A sample needs
 the prompt's uncached token count, so viiwork asks the engine for usage

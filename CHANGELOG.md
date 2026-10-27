@@ -1,5 +1,27 @@
 # Changelog
 
+## v2.11.1
+
+**kv_share imports a copy again after Strata has evicted it** (#1). A node
+imported each replica version into a backend once and then assumed the
+engine still held it, but Strata's conversation cache evicts oldest first and
+says nothing about which conversation went. A session that came back after
+its imported copy was evicted ran a whole cold prefill even though the copy
+was on the host's disk. In the two-host runs behind v2.11.0 this was the most
+common avoidable cold switch: 26-33 per run of 750-1,600 switches, at every
+link speed.
+
+- Before a session turn whose copy the backend was already given, the node
+  now asks the engine how many tokens of that conversation it still holds,
+  and imports again when it holds fewer than the copy. The check is read only
+  and costs a lookup, not a save; it waits at most 2 s, and on a timeout or
+  an error the node imports nothing, as before.
+- For Strata this needs the janit/Strata `v0.2.6-kvx1` build or later, which
+  adds `POST /slots/session?action=held` (and the engine's `HELD` command).
+  An older fork build answers 400, and the node then behaves as v2.11.0.
+- An engine says so through a new optional capability, `SessionHolder`
+  (`docs/adding-an-engine.md`). No wire contract changes.
+
 ## v2.11.0
 
 **A session's conversation follows it between hosts, now measured between

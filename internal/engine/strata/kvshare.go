@@ -15,7 +15,10 @@ import (
 	"github.com/janit/viiwork/v2/internal/engine"
 )
 
-var _ engine.SessionSharer = (*Engine)(nil)
+var (
+	_ engine.SessionSharer = (*Engine)(nil)
+	_ engine.SessionHolder = (*Engine)(nil)
+)
 
 // KVShareOptions is the `kv_share:` block. Strata writes a conversation to a
 // session file (STRSESS) and parks one in its conversation cache; the node
@@ -173,6 +176,23 @@ func (e *Engine) SaveSession(ctx context.Context, addr, session, name, base stri
 // validates the file like a restore and parks it in the conversation cache.
 func (e *Engine) ImportSession(ctx context.Context, addr, name string) error {
 	return e.slotAction(ctx, addr, "/slots/0?action=import", map[string]string{"filename": name}, nil)
+}
+
+// SessionHeld is engine.SessionHolder: POST /slots/session?action=held
+// (janit/Strata kv-export since 9d44ecd2), how much of the session's
+// conversation the engine still holds live, in a batch slot or parked. An
+// older build answers 400, which is "cannot say".
+func (e *Engine) SessionHeld(ctx context.Context, addr, session string) (int64, error) {
+	var out struct {
+		NHeld *int64 `json:"n_held"`
+	}
+	if err := e.slotAction(ctx, addr, "/slots/session?action=held", map[string]string{"session": session}, &out); err != nil {
+		return 0, err
+	}
+	if out.NHeld == nil || *out.NHeld < 0 {
+		return 0, errors.New("strata: /slots/session?action=held: no n_held in the answer")
+	}
+	return *out.NHeld, nil
 }
 
 // slotAction posts body and decodes a 200's answer into out (nil = discard).

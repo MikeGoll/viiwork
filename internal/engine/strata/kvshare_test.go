@@ -161,3 +161,37 @@ func TestSaveAndImportSession(t *testing.T) {
 		t.Fatalf("save 501: %v", err)
 	}
 }
+
+func TestSessionHeld(t *testing.T) {
+	answer, status := `{"session": "s", "n_held": 51234}`, http.StatusOK
+	var got string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		got = r.Method + " " + r.URL.RequestURI() + " " + string(b)
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(answer))
+	}))
+	defer srv.Close()
+	addr := strings.TrimPrefix(srv.URL, "http://")
+	ctx := context.Background()
+	e := New()
+	if n, err := e.SessionHeld(ctx, addr, "s"); err != nil || n != 51234 {
+		t.Fatal(n, err)
+	}
+	if got != `POST /slots/session?action=held {"session":"s"}` {
+		t.Fatalf("request %q", got)
+	}
+	answer = `{"session": "s", "n_held": 0}`
+	if n, err := e.SessionHeld(ctx, addr, "s"); err != nil || n != 0 {
+		t.Fatal(n, err)
+	}
+	// a build without the query, and an answer without the count: cannot say
+	answer, status = `{"error": {"message": "/slots/session supports action=save"}}`, http.StatusBadRequest
+	if _, err := e.SessionHeld(ctx, addr, "s"); err == nil {
+		t.Fatal("an older build's 400 must be an error")
+	}
+	answer, status = `{}`, http.StatusOK
+	if _, err := e.SessionHeld(ctx, addr, "s"); err == nil {
+		t.Fatal("no n_held must be an error")
+	}
+}

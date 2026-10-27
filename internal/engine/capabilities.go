@@ -221,6 +221,17 @@ type SessionSharer interface {
 	ImportSession(ctx context.Context, addr, name string) error
 }
 
+// SessionHolder is implemented by a SessionSharer that can say what a
+// backend still holds of a session's conversation. An engine's cache evicts
+// on its own, so an import made earlier proves nothing about the next turn;
+// without this the node assumes an imported replica stays held.
+type SessionHolder interface {
+	// SessionHeld is how many tokens of the conversation `session` last
+	// continued the backend at addr still holds, 0 for none. An error means
+	// the backend cannot say (an engine without the query, or a timeout).
+	SessionHeld(ctx context.Context, addr, session string) (int64, error)
+}
+
 // SavedSession is what a save wrote.
 type SavedSession struct {
 	// ID names the save; the next save may name it as its base. "" when

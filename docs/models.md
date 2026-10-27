@@ -417,6 +417,16 @@ to warm. What mattered was the conversation cache: at 16 GiB / 8
 conversations Strata evicted imported copies before their session came
 back (17% cold); at 64 GiB / 32, under 2%.
 
+**An evicted copy is imported again** (v2.11.1). The conversation cache
+evicts oldest first and does not say which conversation went, so a node
+cannot assume that a copy it imported earlier is still there. When a session
+comes back to a backend with the copy that backend was already given, the
+node asks Strata how much of the conversation it still holds
+(`POST /slots/session?action=held`, in janit/Strata `v0.2.6-kvx1` and later)
+and imports again when that is less than the copy. With an older fork build
+the question gets a 400, and the node imports each copy once as before; in
+the measured runs that was most of the remaining avoidable cold switches.
+
 **Where the files go.** `kv_share.dir` (the replicas a host holds for its
 peers) and the JSON's `slot_save_path` (the engine's own saves, and the file
 an import reads) are a cache: a lost or damaged file costs one cold prefill,
