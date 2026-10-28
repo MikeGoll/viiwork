@@ -3,7 +3,7 @@ server:
   port: 8080
 
 model:
-  path: models/Ornith-1.5-35B-Q6_K.gguf
+  path: models/Muse-Glimmer-30B-UD-Q8_K_XL.gguf
   #context_size: 65536
   context_size: 131072
   n_gpu_layers: -1
@@ -38,7 +38,8 @@ backend:
     # ---- Qwen 3.8 Configuration ----
     #"--reasoning", "on",
     #"--reasoning-format", "deepseek",
-    #"--reasoning-budget", "8192",
+    ##"--reasoning-budget", "8192",
+    #"--reasoning-budget", "4096",
     #"--reasoning-preserve",
     #"--jinja",
     #"--flash-attn", "auto",
@@ -54,7 +55,7 @@ backend:
     #"--cache-type-k", "q8_0",
     #"--cache-type-v", "q8_0",
     #"--n-predict", "-1",
-    #"--no-context-shift",
+    ##"--no-context-shift",
     #"--no-mmap",
     # --------------------------------
     # ---- Glimmer / Ornith Configuration ----
