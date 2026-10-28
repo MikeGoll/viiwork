@@ -393,3 +393,49 @@ func TestFleetCtxIsUnsetWhenNoHostHasSlots(t *testing.T) {
 		t.Errorf("hosts = %+v, want both still listed", m.Hosts)
 	}
 }
+
+func imgMC(name string, slots int, images *bool) meshapi.ModelCapacity {
+	m := mc(name, slots, 0, 0, 8192)
+	m.Images = images
+	return m
+}
+
+// The fleet reads images when a host the router can use says so, and does not
+// only when every such host says so. A host that cannot say (an older
+// version, an engine without the answer), a stale host and a host without
+// slots prove nothing.
+func TestFleetImages(t *testing.T) {
+	yes, no := true, false
+	cases := []struct {
+		name  string
+		local *bool
+		peers []capacity.Report
+		want  *bool
+	}{
+		{"one yes among no", &no, []capacity.Report{rep("gb2", "a", time.Millisecond, imgMC("tg", 4, &yes))}, &yes},
+		{"yes beside unknown", nil, []capacity.Report{rep("gb2", "a", time.Millisecond, imgMC("tg", 4, &yes))}, &yes},
+		{"all no", &no, []capacity.Report{rep("gb2", "a", time.Millisecond, imgMC("tg", 4, &no))}, &no},
+		{"no beside unknown", &no, []capacity.Report{rep("gb2", "a", time.Millisecond, imgMC("tg", 4, nil))}, nil},
+		{"a stale yes", &no, []capacity.Report{rep("gb2", "a", 9*time.Second, imgMC("tg", 4, &yes))}, &no},
+		{"a yes without slots", nil, []capacity.Report{rep("gb2", "a", time.Millisecond, imgMC("tg", 0, &yes))}, nil},
+	}
+	for _, c := range cases {
+		got := aggregateFleet("gb1", []meshapi.ModelCapacity{imgMC("tg", 4, c.local)}, c.peers, fleetNow, 3*time.Second)
+		m := model(t, got, "tg")
+		if (m.Images == nil) != (c.want == nil) || (m.Images != nil && *m.Images != *c.want) {
+			t.Errorf("%s: fleet images = %v, want %v", c.name, m.Images, c.want)
+		}
+	}
+	got := aggregateFleet("gb1", []meshapi.ModelCapacity{imgMC("tg", 4, &no)},
+		[]capacity.Report{rep("gb2", "a", time.Millisecond, imgMC("tg", 4, &yes)), rep("gb3", "b", 9*time.Second, imgMC("tg", 4, &yes))}, fleetNow, 3*time.Second)
+	m := model(t, got, "tg")
+	if h := host(t, m, "gb2"); h.Images == nil || !*h.Images {
+		t.Errorf("gb2 keeps its own answer: %v", h.Images)
+	}
+	if h := host(t, m, "gb1"); h.Images == nil || *h.Images {
+		t.Errorf("gb1 keeps its own answer: %v", h.Images)
+	}
+	if h := host(t, m, "gb3"); h.Images != nil {
+		t.Errorf("a stale host asserts nothing: %v", *h.Images)
+	}
+}

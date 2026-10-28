@@ -181,6 +181,7 @@ reported. This is the one endpoint a fleet overview needs.
         "gpus":   [ { "gpu_id": 0, "util": 74, "vram_used_mb": 12568, "vram_total_mb": 16368, "power_w": 148 } ],
         "models": [ {
           "name": "some-model-27B", "engine": "llamacpp",
+          "engine_name": "llama.cpp", "engine_version": "b11804",
           "slots": 2, "busy": 1, "queued": 0, "ctx": 49152,
           "backends": [ {
             "id": "some-model-27B/0", "status": "healthy",
@@ -206,9 +207,11 @@ reported. This is the one endpoint a fleet overview needs.
 | `members[].status` | The member's last `/v1/status`, or `null` for a gateway or a member that has not answered yet. **Always null-check it.** |
 | `status.ver` | Build string of that machine. Mixed versions are normal during a rollout. |
 | `status.models[]` | One entry per configured model, with its aggregate `slots` / `busy` / `queued` and `ctx` per slot. |
+| `status.models[].engine`, `engine_name`, `engine_version` | `engine` is the stable id (`llamacpp`, `vllm`, `freetoken`, `strata`): key on it. `engine_name` is the name to show (`llama.cpp`, `vLLM`), present from v2.9.2; on an older node show `engine`. `engine_version` is the engine's own version on that machine, a version string and nothing else. It is absent for an engine that reports none (FreeToken, Strata), when it could not be read, and for the first moments after a node starts. Absent is "cannot say". Both fields reach you only when the node that answers is itself on v2.9.2 or later: an older node relaying a newer member's status drops them. |
 | `status.models[].backends[]` | The processes behind it. `gpus` is the list of cards one backend holds — two or more means a tensor-split group. `status` is `starting` · `healthy` · `unhealthy` · `dead`; cold-loading a large model sits in `starting` for minutes. |
 | `status.power` | `{watts, available, source}`. When `available` is false, ignore `watts` rather than rendering a zero. `source` is `dcmi`, `sdr`, `sensor:<NAME>`, `nvidia-smi` or `rocm-smi` — diagnostic, for when an operator asks why a host reads what it does. |
 | `status.energy_kwh_24h`, `energy_kwh_30d` | Rolling whole-machine energy from the durable store, present only where it is enabled. Absent is "not recording", not zero. |
+| `status.client_energy` | Energy per named client on this node: `since`, `through` and `clients[]` with `name`, `wh_total`, `w_1m`, `kwh_24h`, `kwh_30d`, `busy_s_total`, `tokens_total`. Present only on a node with the energy store that has served a named client. Counters per node: do not sum them across nodes. See `docs/client-energy.md`. |
 | `status.host_mem_*` | Host RAM, `used` being `MemTotal - MemAvailable`, so page cache is not counted as pressure. Coarsened on the pushed stream — see §6. |
 | `power_control.hosts` | Machines this node may power-control. Rows for the fleet should be the **union** of members and this list: a powered-off machine is absent from the mesh entirely, and this is the only place its name still exists. |
 
@@ -238,6 +241,14 @@ A model the node has measured also carries its performance score (v2.7.0):
 tokens) and `perf_samples`. All three are absent when the node cannot say —
 no measurement yet, an older version, or `routing.performance: false` —
 and absent never means zero.
+
+A model also carries `images` (v2.10.0): `true` when the node's backends of
+the model read images, `false` when they do not. It is absent when the node
+cannot say: an engine that does not report it, backends that are not healthy
+yet, or an older version. Absent is not `false`. The same field is on each
+model of `/v1/status` and `/v1/cluster`, and on `/v1/fleet/capacity`, where a
+model's `images` is `true` when some host with slots says yes and `false`
+only when every such host says no.
 
 ### `GET /v1/aliases`
 
@@ -478,6 +489,26 @@ lives elsewhere, so a session that spilled to another host while the
 preferred one was full moves back on its next turn and reads its prompt
 again there. `X-Viiwork-Node` on the response names the machine that ran it.
 
+**Images.** A message's content may hold `image_url` parts, as in the OpenAI
+API, with a `data:` URL or a link the engine can fetch. The body passes to the
+engine unchanged and may be 32 MB at most. From v2.10.0 such a request is
+routed only to a host that reads images with the model; see
+[models.md](models.md#models-that-read-images). When every host that serves
+the model says it reads none, the answer is immediate:
+
+```json
+{"error": {"type": "invalid_request", "message": "model \"some-model\" does not read images on any node"}}
+```
+
+with status `400`. With `?host=` naming a node that reads no images the
+message names that host instead: `model "some-model" does not read images on
+host "node-b"` (v2.10.1). Check a model's `images` on `/v1/fleet/capacity`,
+or its inputs in `/api.json`, before offering an upload.
+
+`X-Viiwork-Client` is a mesh header. A node removes it from a client's request;
+a client is named by its source address only. That holds once every node
+clients call runs v2.10 or later; a v2.9.x node passes the header on.
+
 ## 5. Prompt and output history
 
 The part of the API with real sharp edges. Read this before designing a request
@@ -610,6 +641,13 @@ per backend) remain correct regardless and are what to trust for totals.
 
 Do not present all three as equally current. A job appearing instantly next to a
 GPU utilisation figure that is ten seconds stale reads as a contradiction.
+
+`client_energy` changes once a minute and is 60 to 90 seconds behind the clock,
+like `energy_kwh_24h`. It adds no pushed snapshot of its own. Ignore a node's
+`w_1m` when its `through` is more than about three minutes old. "No
+`client_energy` anywhere" can also mean the node you poll `/v1/cluster`
+through is on an older version: it drops fields it does not know when it
+re-encodes member status.
 
 ### Host memory is coarsened on pushed snapshots
 

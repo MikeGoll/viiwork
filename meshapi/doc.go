@@ -15,5 +15,7 @@
 //
 // Event, MeshEvent and the activity message helpers are carried over from v1
 // unchanged. PromptEntry gained output_tokens and gen_ms in v2.8.0, both
-// omitted when not known.
+// omitted when not known. NodeStatus.ClientEnergy, added in v2.10, is the first
+// per-client figure on the wire: see ClientEnergy for why it is per node and
+// never summed.
 package meshapi

@@ -1,12 +1,15 @@
 package node
 
 import (
+	"math"
 	"net/netip"
+	"regexp"
 	"sort"
 	"time"
 
 	"github.com/janit/viiwork/v2/energy"
 	"github.com/janit/viiwork/v2/internal/cost"
+	"github.com/janit/viiwork/v2/internal/engine"
 	"github.com/janit/viiwork/v2/internal/gpu"
 	"github.com/janit/viiwork/v2/internal/hostinfo"
 	"github.com/janit/viiwork/v2/internal/perf"
@@ -42,22 +45,29 @@ var (
 
 // StatusSources is everything /v1/status is built from.
 type StatusSources struct {
-	Name          string
-	NodeID        string
-	Version       string
-	APIPort       int
-	Advertise     func() netip.Addr
-	Started       time.Time
-	Models        func() []meshapi.ModelStatus // Supervisor.Status
-	QueueLen      func(model string) int       // Router.QueueLen
-	Counters      func(model string) proxy.ModelCounters
-	Perf          func(model string) (perf.Score, bool)
-	GPUs          gpuLatest // nil = none
-	Inventory     []gpu.Identity
-	Vendor        gpu.Vendor
-	Power         NodePower
-	Energy        EnergyReader // nil = none
-	Cost          CostReader   // nil = none
+	Name      string
+	NodeID    string
+	Version   string
+	APIPort   int
+	Advertise func() netip.Addr
+	Started   time.Time
+	Models    func() []meshapi.ModelStatus // Supervisor.Status
+	QueueLen  func(model string) int       // Router.QueueLen
+	Counters  func(model string) proxy.ModelCounters
+	Perf      func(model string) (perf.Score, bool)
+	// EngineVersions is the version of each engine by id, as far as the node
+	// knows; nil, or a nil map, is "not known". It must not block: a status
+	// never waits for an engine's --version.
+	EngineVersions func() map[string]string
+	GPUs           gpuLatest // nil = none
+	Inventory      []gpu.Identity
+	Vendor         gpu.Vendor
+	Power          NodePower
+	Energy         EnergyReader // nil = none
+	// ClientEnergy is the store's energy per named client; nil = none. False
+	// from it means no client is named, and the field stays off the status.
+	ClientEnergy  func() (energy.ClientEnergy, bool)
+	Cost          CostReader // nil = none
 	PromptHistory int
 	HostMemory    func() (totalMB, usedMB int64) // nil = hostinfo.HostMemoryMB
 	Now           func() time.Time
@@ -115,7 +125,13 @@ func BuildStatus(s StatusSources) meshapi.NodeStatus {
 	}
 
 	if s.Models != nil {
+		var versions map[string]string
+		if s.EngineVersions != nil {
+			versions = s.EngineVersions()
+		}
 		for _, m := range s.Models() {
+			m.EngineName = engine.DisplayName(m.Engine)
+			m.EngineVersion = publishableVersion(versions[m.Engine])
 			if s.QueueLen != nil {
 				m.Queued = s.QueueLen(m.Name)
 			}
@@ -135,6 +151,11 @@ func BuildStatus(s StatusSources) meshapi.NodeStatus {
 	if s.Power != nil {
 		st.Power = meshapi.PowerInfo{Watts: s.Power.Watts(), Available: s.Power.Available(), Source: s.Power.Source()}
 	}
+	if s.ClientEnergy != nil {
+		if ce, ok := s.ClientEnergy(); ok {
+			st.ClientEnergy = clientEnergyStatus(ce)
+		}
+	}
 	if s.Energy != nil {
 		st.EnergyKWh24h, st.EnergyKWh30d = s.Energy.KWh24h(), s.Energy.KWh30d()
 	}
@@ -153,4 +174,37 @@ func BuildStatus(s StatusSources) meshapi.NodeStatus {
 		}
 	}
 	return st
+}
+
+// clientEnergyStatus is the store's client figures in their wire form. The
+// rounding is to what the measurement supports and no further: a tenth of a
+// watt-hour on the counter, a watt-hour on the kWh sums. A rounded counter is
+// still a counter: it never goes down.
+func clientEnergyStatus(ce energy.ClientEnergy) *meshapi.ClientEnergy {
+	out := &meshapi.ClientEnergy{Since: ce.Since, Through: ce.Through, Clients: make([]meshapi.ClientEnergyEntry, len(ce.Clients))}
+	for i, c := range ce.Clients {
+		out.Clients[i] = meshapi.ClientEnergyEntry{
+			Name:    c.Name,
+			WhTotal: roundTo(c.Wh, 10), W1m: roundTo(c.W1m, 10),
+			KWh24h: roundTo(c.KWh24h, 1000), KWh30d: roundTo(c.KWh30d, 1000),
+			BusySTotal: c.BusyS, TokensTotal: c.Tokens,
+		}
+	}
+	return out
+}
+
+func roundTo(v, scale float64) float64 { return math.Round(v*scale) / scale }
+
+// versionRe is what an engine version may look like on a status: a build or
+// a release number.
+var versionRe = regexp.MustCompile(`^[0-9A-Za-z][0-9A-Za-z.+_-]{0,39}$`)
+
+// publishableVersion is v when it is a version and nothing else, and ""
+// otherwise. A status is read by dashboards that are public, and what an
+// engine prints after its number can be a path or a build host.
+func publishableVersion(v string) string {
+	if versionRe.MatchString(v) {
+		return v
+	}
+	return ""
 }

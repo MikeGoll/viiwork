@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"sync/atomic"
 	"time"
 )
 
@@ -56,6 +57,15 @@ type Config struct {
 	// Empty means the caller cannot say, which leaves any label the directory
 	// already carries untouched rather than erasing it.
 	Source string
+	// Clients turns on the client dimension: the split of a model's energy
+	// between the clients it served, in sibling files of their own (see
+	// client.go). Off by default, so a producer that does not ask for it
+	// reads and writes exactly the files it always did. With it on, the files
+	// are still not created until a client is named.
+	Clients bool
+	// ClientLanes is how many (client, model) pairs a bucket holds. Geometry,
+	// like a slot count: changing it discards the two client rings.
+	ClientLanes int
 }
 
 // Store owns the six ring files, the model table and the provenance label.
@@ -68,6 +78,8 @@ type Store struct {
 
 	nodeMinute, nodeHour, nodeDay *ring
 	gpuMinute, gpuHour, gpuDay    *ring
+
+	clients atomic.Pointer[clientStore] // nil until a client is named
 }
 
 func Open(cfg Config, logger *log.Logger) (*Store, error) {
@@ -79,6 +91,9 @@ func Open(cfg Config, logger *log.Logger) (*Store, error) {
 	}
 	if cfg.DaySlots <= 0 {
 		cfg.DaySlots = DefaultDaySlots
+	}
+	if cfg.ClientLanes <= 0 {
+		cfg.ClientLanes = DefaultClientLanes
 	}
 	if cfg.Location == nil {
 		cfg.Location = time.UTC
@@ -142,6 +157,21 @@ func Open(cfg Config, logger *log.Logger) (*Store, error) {
 	if err := s.adoptSource(filepath.Join(cfg.Dir, sourceFile)); err != nil {
 		s.Close()
 		return nil, err
+	}
+
+	// Client files are opened only when they exist. A store nobody named a
+	// client in has none, and gets none by being opened.
+	if cfg.Clients {
+		if _, err := os.Stat(filepath.Join(cfg.Dir, clientsFile)); err == nil {
+			cs, err := openClientStore(cfg, logger, 0)
+			if err != nil {
+				// The client dimension is worth less than the node and GPU
+				// history: carry on without it, and leave the file as it is.
+				s.logger.Printf("client energy is off until this is fixed: %v", err)
+			} else {
+				s.clients.Store(cs)
+			}
+		}
 	}
 
 	s.logger.Printf("store at %s: %d GPUs, %d minutes / %d hours / %d days, %s on disk, node power via %s",
@@ -486,8 +516,16 @@ func (s *Store) NodeKWh(tier Tier, from, to time.Time) float64 {
 	return total
 }
 
+func (s *Store) rings() []*ring {
+	out := []*ring{s.nodeMinute, s.nodeHour, s.nodeDay, s.gpuMinute, s.gpuHour, s.gpuDay}
+	if cs := s.clients.Load(); cs != nil {
+		out = append(out, cs.rings()...)
+	}
+	return out
+}
+
 func (s *Store) Sync() {
-	for _, r := range []*ring{s.nodeMinute, s.nodeHour, s.nodeDay, s.gpuMinute, s.gpuHour, s.gpuDay} {
+	for _, r := range s.rings() {
 		if r != nil {
 			if err := r.sync(); err != nil {
 				s.logger.Printf("sync: %v", err)
@@ -497,7 +535,7 @@ func (s *Store) Sync() {
 }
 
 func (s *Store) Close() {
-	for _, r := range []*ring{s.nodeMinute, s.nodeHour, s.nodeDay, s.gpuMinute, s.gpuHour, s.gpuDay} {
+	for _, r := range s.rings() {
 		if r != nil {
 			r.Close()
 		}

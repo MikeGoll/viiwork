@@ -14,6 +14,7 @@ import (
 
 	"github.com/janit/viiwork/v2/internal/activity"
 	"github.com/janit/viiwork/v2/internal/api"
+	"github.com/janit/viiwork/v2/internal/gpu"
 	"github.com/janit/viiwork/v2/mesh"
 	"github.com/janit/viiwork/v2/meshapi"
 	"github.com/janit/viiwork/v2/web"
@@ -261,6 +262,37 @@ func TestServerRoutesRegisteredDialect(t *testing.T) {
 		if _, ok := api.Lookup(p); !ok {
 			t.Errorf("%s is not registered by any dialect", p)
 		}
+	}
+}
+
+// A node without GPU telemetry may never publish a sample; the stream must
+// open regardless, CORS header included, or an EventSource stays pending.
+func TestServerMetricsStreamOpensWithoutSamples(t *testing.T) {
+	d, _ := fakeServer(t)
+	d.GPUBroadcaster = gpu.NewBroadcaster()
+	d.CORS = testCORS()
+	srv := httptest.NewServer(NewServer(d))
+	t.Cleanup(srv.Close)
+	req, err := http.NewRequest(http.MethodGet, srv.URL+"/v1/metrics/stream", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Origin", "https://node0.tailnet-abc.ts.net")
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	resp, err := http.DefaultClient.Do(req.WithContext(ctx))
+	if err != nil {
+		t.Fatalf("no headers within 1 s: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "text/event-stream" {
+		t.Errorf("content-type = %q", ct)
+	}
+	if got := resp.Header.Get("Access-Control-Allow-Origin"); got != "https://node0.tailnet-abc.ts.net" {
+		t.Errorf("allow-origin = %q", got)
 	}
 }
 

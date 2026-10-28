@@ -110,6 +110,14 @@ func (t *modelTable) Name(idx uint16) string {
 	return t.names[idx]
 }
 
+// Lookup returns a name's index without adding it.
+func (t *modelTable) Lookup(name string) (uint16, bool) {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	idx, ok := t.index[name]
+	return idx, ok
+}
+
 // append writes one complete line and syncs it. A write that fails part way is
 // cut back off, best effort, so the file keeps ending on a line boundary; a
 // fragment that survives anyway (a crash) is dropped on the next open.

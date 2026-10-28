@@ -1,5 +1,499 @@
 # Changelog
 
+## v2.11.2
+
+**kv_share asks about the right conversation.** v2.11.1's check asked Strata
+about the conversation the session had last continued on that host. After the
+client compacted its context on another host, that is an older, longer
+branch: Strata answered "held", the node skipped the import, and the turn
+read the whole prompt cold. Under load on two RTX 5090 hosts this was most of
+the cold switches the check should have saved.
+
+- The node now names the conversation by the replica's resume point: the
+  token ids of its deepest checkpoint, as a count and an FNV-1a 64 hash, the
+  way Strata names a conversation. It imports when Strata holds no
+  conversation that starts there. The checkpoint, not the whole replica,
+  because the replica ends in the reply as it was generated, which the chat
+  template renders again on the next turn: no later conversation starts with
+  all of it, and a check on the full ids would import again on every turn
+  that stayed on the host.
+- This needs janit/Strata `v0.2.6-kvx2`. A `v0.2.6-kvx1` build ignores the
+  ids and answers as before; an older build answers 400 and the node imports
+  each copy once, as v2.11.0 did.
+- `engine.SessionHolder.SessionHeld` takes the ids' count and hash
+  (`docs/adding-an-engine.md`). No wire contract changes.
+
+Measured on the same two hosts (16 coding-agent sessions on 8 slots, 90
+minutes, direct 10 GbE): 95.5% of 1,367 host switches warm, 3.3% partly warm,
+1.2% cold. Of the 16 cold switches, 8 followed a context compaction (nothing
+to resume) and 4 came before the session's first copy had reached the other
+host; one was a turn the check let through, against five in an hour under
+v2.11.1.
+
+## v2.11.1
+
+**kv_share imports a copy again after Strata has evicted it** (#1). A node
+imported each replica version into a backend once and then assumed the
+engine still held it, but Strata's conversation cache evicts oldest first and
+says nothing about which conversation went. A session that came back after
+its imported copy was evicted ran a whole cold prefill even though the copy
+was on the host's disk. In the two-host runs behind v2.11.0 this was the most
+common avoidable cold switch: 26-33 per run of 750-1,600 switches, at every
+link speed.
+
+- Before a session turn whose copy the backend was already given, the node
+  now asks the engine how many tokens of that conversation it still holds,
+  and imports again when it holds fewer than the copy. The check is read only
+  and costs a lookup, not a save; it waits at most 2 s, and on a timeout or
+  an error the node imports nothing, as before.
+- For Strata this needs the janit/Strata `v0.2.6-kvx1` build or later, which
+  adds `POST /slots/session?action=held` (and the engine's `HELD` command).
+  An older fork build answers 400, and the node then behaves as v2.11.0.
+- An engine says so through a new optional capability, `SessionHolder`
+  (`docs/adding-an-engine.md`). No wire contract changes.
+
+## v2.11.0
+
+**A session's conversation follows it between hosts, now measured between
+two machines.** Everything from v2.11.0-beta1 to beta3 below, plus the
+cross-host test beta1 was waiting for: two RTX 5090 hosts (forge-white and
+forge-black, one card each, Qwen3.8-Flash-Next on the janit/Strata
+kv_share build of Strata 0.2.6, 4 slots each, a 64 GiB / 32 conversation
+cache), 12 or 16 coding-agent sessions at once for 90 minutes per run, so
+the hosts were full and sessions spilled all the time.
+
+- **93-97% of host switches resume warm**, 1-2% cold. A warm switch costs
+  what staying put costs (0.7-0.9 s of prefill at 50-60k tokens); a cold
+  one 10-14 s. Answers after an import matched the original word for word.
+- **1 GbE is enough for two hosts.** A copy takes 3.2 s over 1 GbE and
+  0.55-0.81 s over 10 GbE; 10 GbE moves only 2-3 points of switches from
+  partly warm to warm. kv_share used 320-450 Mb/s each way on average.
+- **Give Strata a large conversation cache.** At 16 GiB / 8 conversations
+  the engine evicted imported copies before their session came back and
+  17% of switches were cold; at 64 GiB / 32, under 2%.
+- **On a Broadcom BCM57416 (`bnxt_en`) with the AMD IOMMU on, boot with
+  `iommu=pt`.** The first 1.5 GB push hung the NIC through an
+  `IO_PAGE_FAULT`; with `iommu=pt` there was none in about 6,600 pushes
+  (1.9 TB).
+- Known: a replica is imported once per version, so a session whose
+  imported copy the engine evicted since comes back cold; this is most of
+  the remaining cold switches and the next fix. Fixed in v2.11.1.
+
+## v2.11.0-beta3
+
+- **A node that stopped cleanly could be recorded `dead` instead of `left`.**
+  memberlist hands a leaving node's notice and its own dead message over last
+  in, first out, so a busy receiver could see the failure first. A leave
+  notice that arrives within 5 s of the dead verdict now turns it into `left`
+  (and sends a leave event).
+- **`/v1/metrics/stream` sent no headers until the first GPU sample**, so on
+  a node without GPU telemetry an `EventSource` stayed pending forever and
+  never saw its CORS header. The headers are now flushed as soon as the
+  stream opens.
+
+## v2.11.0-beta2
+
+- **Strata is pinned at v0.2.3** (from v0.1.45), and the CUDA image now sits
+  on upstream's ready-made `ghcr.io/niko1221/strata:0.2.3-cuda13` (held by
+  digest) instead of compiling upstream's Dockerfile. **That image has
+  upstream's 0.2 layout, so a CUDA node's `strata:` block and JSON change
+  with it**: `dir: /opt/strata/terminal`, `python:
+  /opt/strata/terminal/python/bin/python3`, and the JSON's `exe` and
+  `lib_dirs` name
+  `/opt/strata/components/engine/0.1.48-linux-x86_64-cuda-cuda13/` with
+  `cwd` `/opt/strata/terminal`. With the old paths the backend dies at
+  launch. Table: [docs/models.md](docs/models.md#strata-one-moe-family-across-several-cards).
+  The cuda13 image needs NVIDIA driver 580 or newer. Served under viiwork on
+  an RTX A4000: 46 to 53 tok/s decode once warm, the same as the kv_share
+  fork.
+- The gfx906 image keeps its `/opt/strata` paths. Its patch shrinks to one
+  fix (two stream-priority aliases that `dflash2.cpp`, new in 0.2, needs);
+  the other three are upstream or no longer compiled. It is built and its
+  engine lists Qwen3.8-Flash-Next, but v0.2.3 has not yet served on a
+  Radeon VII.
+- **The ROCm image's llama.cpp reported "build 1"**, so a gfx906 node
+  published `engine_version: b1`: the clone is shallow and llama.cpp counts
+  commits. The pin is now passed as the build number. gb1 runs b11804 built
+  this way and publishes `b11804`.
+- **No more AppArmor denials every five seconds.** Finding a backend's
+  process tree read every host process's `/proc/<pid>/stat`, which with
+  `pid: host` is a ptrace read of an unconfined process: docker's default
+  AppArmor profile refused it and logged a denial on every health tick (on
+  every Docker node). The node now walks the tree's own
+  `/proc/<pid>/task/<tid>/children` lists, falling back to the scan where
+  the kernel has none.
+## v2.11.0-beta1
+
+**Headline: a session's conversation follows it between hosts
+(`strata.kv_share`).** A client that sends `X-Session-Affinity` (or
+`X-Session-Id`) keeps its turns on one host, where Strata's conversation cache
+holds the conversation. Until now, when that host was full the turn spilled
+to another one and paid a cold prefill: 41 s for 50k tokens on an RTX A4000.
+With `kv_share` the members of a group keep a
+replica of each other's long sessions, and a spilled turn resumes warm.
+Measured on teddy, two nodes, 50k tokens: **a spilled turn took 3.5–4.5 s
+instead of 42 s**, and back home 5.2 s.
+
+```yaml
+    strata:
+      dir: /opt/strata
+      kv_share:
+        group: flash        # members that share; same model files and JSON
+        min_tokens: 8192    # default
+        max_gib: 32         # default: replicas this node holds
+```
+
+- **Replication.** After a turn of `min_tokens` or more the node asks its
+  backend to save the session and sends it to the member the router would
+  spill that session to (the next member in its rendezvous order, or its home
+  when the turn ran on the spill host). Only what changed travels: the
+  engine's own incremental save, about 240 MB of a 1 GB file per 50k-token
+  turn (save 0.2–0.3 s, push 0.6 s at 10 Gbit/s, 2.3 s at 1 Gbit/s). The
+  receiver checks the header, base, fingerprints and every chunk before it
+  assembles a replica.
+- **Import.** Before a session's turn on a backend, the node imports the
+  replica it holds into that backend's conversation cache (about 1.5 s at
+  50k), once per replica and backend launch. A stale, foreign or failed
+  replica costs the import and serves the turn cold, never a wrong answer:
+  Strata checks the model and config fingerprints and resumes only on a
+  matching prompt.
+- **Routing knows where the state is.** The entry node remembers which host
+  ran each session's last turn and prices that host, and the one holding its
+  replica, by what resuming costs there (its published
+  `kv_share_import_ms_per_1k`) rather than by a cold prefill. So when the
+  session's host is full, the turn goes to the replica host even when another
+  host prefills faster.
+- **Mesh.** Replicas move on the API port (`/v1/kvshare/manifest`, `/put`),
+  accepted only from members under the forward rule (a signature in a
+  secured mesh, the member's own address in an open one). `/v1/capacity`
+  gains `kv_share_group` and `kv_share_import_ms_per_1k`, and `/v1/status`
+  a `kv_share` block of push, put and import counts. All additive and
+  `omitempty`: an older member simply shares nothing.
+- **Requirements**, refused at start when unmet: the janit/Strata
+  `kv-export-0.2` build (upstream 0.2.3.1 plus the session save and import
+  endpoints; upstream has neither), `slot_save_path` in the model's JSON on a
+  disk the node can read and write (not tmpfs), the conversation cache on,
+  and **one card per backend**: Strata saves no layer-split session, so the
+  multi-card gfx906 backends cannot share yet. `kv_share.dir` must be new or
+  empty; the node claims it with a marker and refuses one holding anything
+  else. [docs/models.md](docs/models.md#sharing-sessions-between-hosts-kv_share).
+- **What it looks like on RTX A4000s** (teddy: two viiwork nodes, one A4000
+  16 GB backend each, Qwen3.8-Flash-Next IQ3_XXS, a 50k-token conversation):
+
+  | | time |
+  |---|---|
+  | Spilled turn, cold prefill (no kv_share) | 41–42 s |
+  | Spilled turn, replica imported | 4.5 s (3.5 s from a delta-built replica) |
+  | Same session back on its home host | 5.2 s |
+  | Save after a turn, incremental / full | 0.24–0.33 s / 0.60 s |
+  | Data per turn, incremental / first full push | ~230 MiB / 954 MiB |
+  | Push of one delta, 10 Gbit/s / 1 Gbit/s | 0.6 s / 2.3 s |
+  | Import into the conversation cache | 1.1–1.5 s |
+
+  The two nodes shared one machine, and the link speeds are a shaped
+  loopback (`tc`), not a real network.
+- **Beta because:** it has not yet run between two machines, and warm
+  routing with three hosts of different speed is unit-tested only. **Coming
+  next: the cross-host test on two RTX 5090 hosts over 10 GbE**, which
+  replaces the shaped numbers above with a real link. It is off unless
+  written.
+
+Also in this release:
+
+- **llama.cpp b11804** (was b11718), images and the Mac download on the same
+  build. It fixes a wave64 reduction in `mul_mat_id` (#30836, MoE models on
+  gfx906), stops the server restoring an SWA checkpoint from an unrelated
+  earlier prompt (#30666), and fixes a race in CUDA's vector flash attention
+  (#30573); Qwen3.8-Flash-Next decodes about 3% faster on CUDA (#30602).
+  #27148's fix is still not merged: keep `--no-cache-idle-slots` and
+  `--cache-ram 0`. Not yet served under viiwork on gfx906.
+- **FreeToken 0.2.0** (was 0.1.3, still the floor). viiwork's command line is
+  unchanged. Before rebuilding a host: a Qwen3.5 / 3.6 / 3.8-27B FTW from an
+  older build loads and **answers wrongly** until reconverted with
+  `ft checkpoint`, and `moe_backend: auto` no longer picks `hybrid`.
+  [BUILDS.md](BUILDS.md).
+- **FreeToken: `FREETOKEN_API_KEY` in `models[].env` is refused.** The
+  model's env is applied after the engine's own, so v2.10.3's clearing of
+  an inherited key could still be undone there, keying the backend against
+  the node's probes and forwards. `engine.Spec` carries `models[].env` so
+  an engine can refuse a variable it clears.
+
+## v2.10.3
+
+- **llama.cpp b11718** (was b11609; images b11610). The ROCm image, the
+  published CUDA and Vulkan images and a Mac's download are on one build
+  again. Kolibri-1 is upstream (#30673) and needs no patched build. Served
+  under viiwork on Radeon VIIs (Qwen3.8-27B at 98k with MTP and the fleet's
+  cache flags, granite-4.2-8b, translategemma) and on RTX A4000s: same
+  answers, tool calls and a 64k needle; on the A4000s prompt reading and
+  decode are even with b11610. #27148's fix is still not merged: keep `--no-cache-idle-slots`
+  and `--cache-ram 0`.
+- **Strata v0.1.45** (was v0.1.44.1). The gfx906 build fails to link as
+  released: `moe_fused_iq.cu`'s HIP path calls the gfx11 F16 prompt kernels,
+  whose unit only the generic HIP build lists. The patch gives the gfx906
+  build that unit too; its kernels are never reached without
+  `STRATA_PF_F16=1`. Served under viiwork on five Radeon VII-class cards
+  (one an MI60): chat, tool calls, JSON mode and a 104k needle read at
+  959 tok/s. On an RTX 5090 also images, the 104k needle at 3,507 tok/s
+  (was 3,411) and eight requests at once with no respawn.
+- **vLLM v0.32.0** (was v0.31.0). The command line viiwork generates, the
+  health probe, slots from `/metrics` and the usage strip are unchanged.
+- **FreeToken: an inherited `FREETOKEN_API_KEY` is cleared for the backend,
+  and `--api-key` in `args` is refused.** FreeToken's main branch reads the
+  variable when the flag is absent and then keys every route but `/health`,
+  which would turn the node's own probes and forwards into 401s. A key set
+  in the model's `env:` still reaches the backend. The pin stays 0.1.3.
+
+## v2.10.2
+
+- **Go 1.27.2.** It fixes vulnerabilities in `net/http` (HTTP/1 connection
+  desync after a 2xx CONNECT, and several HTTP/2 server bugs), `net/textproto`
+  (a MIME header memory-limit bypass) and `crypto/tls`, which govulncheck
+  found reachable from the node. golang.org/x/net, sys, sync and term move
+  with it.
+- **llama.cpp b11609** (was b11371). The ROCm image and a Mac's download use
+  b11609; the published CUDA and Vulkan images sit on b11610, the next build
+  with upstream images. The server reports a model's modalities on
+  `GET /models`, a request that pins a busy slot leaves it alone, and a
+  CUDA/HIP flash-attention race is fixed. The prompt-cache fix for #27148
+  (PR #27624) is still not merged: keep `--no-cache-idle-slots` and
+  `--cache-ram 0`.
+- **Strata v0.1.44.1** (was v0.1.42). Faster decode on several NVIDIA cards,
+  an answer no longer comes back empty when the prompt quotes `</tool_call>`,
+  a tool call written as fenced JSON is recovered, and a client that leaves
+  while its images are prepared is cancelled at once. The gfx906 build of
+  v0.1.44.1 fails as released; the patch gains two fixes (a HIP define for
+  the new NVFP4 W4A4 kernel, two cuBLAS aliases for the Qwen3.6 engine). It
+  builds; it has not served on a Radeon VII.
+- **An HTTP/1 response body is no longer drained by hand.** Since Go 1.27
+  `Close` drains what is left in the background, at most 50 ms or 256 KiB,
+  so a connection is reused. The proxy's drain of a 429 or 503 before a retry
+  had no bound and held the retry up while it ran; it is gone, as are the
+  engines' probe drains. A test pins that capacity polls keep one connection.
+
+## v2.10.1
+
+- **An image request pinned to a node that reads no images is told about
+  that node.** With `?host=node-b`, the 400 now reads `model "<name>" does
+  not read images on host "node-b"`. v2.10.0 said "on any node" there,
+  which was wrong whenever another node did read images. The status, the
+  type and the unpinned message are unchanged.
+
+## v2.10.0
+
+**Image input: a request with a picture goes to a backend that reads pictures, and a client can see which models do.**
+
+- **`models[].llamacpp.mmproj`** names a llama.cpp model's vision projector
+  (an absolute path to its GGUF) and becomes `--mmproj`. A file that is not a
+  projector is refused at start with the field named. A `--mmproj` in `args`
+  still works; write one or the other.
+- **A node says whether a model reads images.** A new `images` field on
+  `/v1/capacity`, on each model of `/v1/status` and `/v1/cluster`, and on each
+  model and host of `/v1/fleet/capacity`. llama.cpp answers from what the
+  backend was started with, Strata from its own `/health`. vLLM and FreeToken
+  do not answer yet. The field is absent when a node cannot say, and absent
+  never means no.
+- **A chat request with an `image_url` part is routed by that answer.** It
+  goes to a host that says yes. When no host says yes it goes to hosts that
+  cannot say, which is every host on an older version, so a mesh that worked
+  before works the same. When every host that serves the model says no, the
+  client gets a 400 at once: `model "<name>" does not read images on any
+  node`. Until v2.10 that request reached an engine and came back as the
+  engine's own 400 or 500.
+- **The pin, the preference list and sessions follow the same rule.**
+  `?host=` naming a node that reads no images is the 400; a preferred node
+  that reads none is passed over; a session's image turns go to its host
+  among those that read images.
+- **Discovery.** `/api.json` lists `image` among a model's inputs, and
+  `/v1/model/info` sets `supports_vision`, when a host with slots says yes.
+- **The setup wizard** serves a model with its projector when the two are
+  alone in a directory, counts the projector in the card plan and says so.
+- **Mixed versions.** An older node ignores the field and routes an image
+  request as it always did, so during an upgrade an image request that enters
+  through an older node can still reach a backend that refuses it. Upgrade
+  the nodes clients call first.
+- **Not changed.** The request limit is 32 MB, images included. The prompt
+  history shows a request's text and leaves its images out.
+
+**Energy per client: a node can say how much of its models' energy went to each named client.**
+
+- **A client is named by its source address** in a new `clients` section
+  (`factory-a: [100.64.0.10]`), on the nodes clients call. The name travels
+  with a forward in `X-Viiwork-Client`, which a node accepts only on a forward
+  it has verified and removes from anything else, so a client cannot name
+  itself once every node that clients call is on v2.10 or later. A node still
+  on v2.9.x does not strip the header from a client's request and copies it
+  onto its signed forward, which a v2.10 node honours: add `clients` only
+  after that upgrade.
+- **A model's energy is split by busy slot-seconds.** Baseline is not shared
+  out, and a model that draws power with no request running is recorded
+  against nobody. For every model and minute the clients' shares add up to
+  the model's attributed energy.
+- **`client_energy` on `/v1/status` and `/v1/cluster`**: cumulative
+  watt-hours, busy seconds and tokens per client, with this node's own draw
+  over the last minute and its 24-hour and 30-day sums. The counters are per
+  node. There is no mesh total: a sum over machines that are switched off and
+  on would go down.
+- **Four new files beside the energy store's own**: `client-minute.ring`,
+  `client-hour.ring`, `clients.txt` and `client-totals`. The existing files
+  and the `VIIWENG1` magic are unchanged, and the new files are created only
+  when a client is first named.
+- **Off unless asked for.** With no `clients` section on any node, nothing is
+  labelled, recorded or published, and a node serves the status it served
+  before. `energy.clients: false` keeps one node out. `clients_reload: true`
+  applies a changed section on reload; without it the change waits for a
+  restart.
+- **During an upgrade the figures are low, never high.** A node on an older
+  version records nothing per client, and an older entry node sends no name of
+  its own, which the receiver counts as `other`, but passes one a client sent.
+- **Known limits.** A request to a pipeline is counted as `other`, because the
+  pipeline's steps call back into the node from its own address. In an open
+  mesh any process on a member machine can name itself, which affects
+  accounting only.
+
+## v2.9.2
+
+**The status names each model's engine for people and says which version of it the machine runs.**
+
+Two new fields on every entry of `models[]` in `GET /v1/status`, and so on
+every `members[].status.models[]` of `GET /v1/cluster` and of the pushed
+`/v1/mesh/stream` snapshots. Nothing else on the wire changed, and no request
+parameter is needed to get them:
+
+```json
+{ "name": "some-model-27B", "engine": "llamacpp",
+  "engine_name": "llama.cpp", "engine_version": "b11371",
+  "slots": 2, "busy": 1, "queued": 0, "ctx": 49152 }
+```
+
+- **`engine`** is what it was: the stable id (`llamacpp`, `vllm`,
+  `freetoken`, `strata`). Key and group on it. It never changes spelling.
+- **`engine_name`** is the name to show: `llama.cpp`, `vLLM`, `FreeToken`,
+  `Strata`. A string, present on every model a v2.9.2 node reports, parked
+  models included. Each engine declares its own name in its own package
+  (`engine.DisplayNamer`, which the conformance kit now requires of a new
+  engine), so a reader needs no table of names and a new engine brings its
+  name with it. For an id the node has no engine for, it is the id.
+- **`engine_version`** is the version of the engine that machine runs, in the
+  engine's own spelling: a llama.cpp build as `b11371`, a vLLM release as
+  `0.31.0`. It is the value `GET /v1/update` reports under `engines` for that
+  engine, now in the cluster snapshot, so a reader no longer needs one call
+  per machine. A string, or **absent**. It is absent:
+  - for an engine that cannot report a version (FreeToken, Strata);
+  - when the engine's binary could not be run or printed no version;
+  - for the first moments after a node starts, until the node has read it
+    (about as long as the engine's `--version` takes; vLLM's is the slowest);
+  - when what the engine printed is not a plain version. Only letters,
+    digits and `. + _ -`, at most 40 characters, are published, because what
+    an engine prints after its number can be a path or a host name, and a
+    status is shown on public dashboards.
+
+  Absent is "cannot say". It is never `""` and never a guess.
+- **How to read them.** Show `engine_name` where there is one and `engine`
+  where there is not, then `engine_version` where there is one:
+  `llama.cpp b11371`, `Strata`, or `llamacpp` from a node older than v2.9.2,
+  which sends neither field. A mesh of mixed versions needs no other rule.
+- **Ask a v2.9.2 node.** `/v1/cluster` is one node's view: the node that
+  answers decodes every member's status and sends it on, and a node older
+  than v2.9.2 does not know the two fields, so it drops them for every
+  member, the v2.9.2 ones included. During a rollout, read the cluster from a
+  node that is already on v2.9.2 (`members[].status.ver` of the member named
+  in `view`), or expect the fields to be missing until the answering node is
+  updated. `/v1/status` of a v2.9.2 node always carries them.
+- **When the values change.** The node reads its engines' versions once,
+  in the background, when it starts (before v2.9.2: on the first
+  `GET /v1/update`). Building a status never runs or waits for a process.
+  The version is per engine and per process: a node that swaps its engine
+  restarts to do it, and reports the new version after that restart. A model
+  of an engine the node did not run at start, added by a reload, has no
+  `engine_version` until the node restarts, and two models of one engine
+  with different binaries both report the first one's version.
+- `/v1/capacity` and `/v1/fleet/capacity` are unchanged: they carry `engine`
+  only.
+
+## v2.9.1
+
+**Engine pins: Strata v0.1.42 and vLLM v0.31.0, and more than one slot per Strata backend.**
+
+- **Both Strata images build Strata v0.1.42** (`docker/pins.env`, commit
+  `61b3fb5d`). Since v0.1.40.1 upstream fixes a deadlock with more than one
+  request waiting on a slot, evicts old conversation-cache entries instead of
+  dropping a snapshot, and runs one pipeline group per GPU for batched
+  requests. `/slots`, the defaults the node assumes and the JSON keys it
+  checks are in v0.1.42 as in v0.1.41.
+- **v0.1.42 served under the node on CUDA**, on an RTX 5090 and on two RTX
+  4090 in a layer split, IQ3_XXS at 262,144 context, from images built on
+  each machine: one to six slots, prompts up to 87,000 tokens, no failed
+  request and no respawn. Against v0.1.40.1 on the RTX 5090 with one slot, a
+  request alone decoded at 227 tokens per second where it had 207, and
+  prompts were read as fast as before (4,060 tokens per second at 87,000
+  tokens). **The gfx906 image builds at v0.1.42 and has not served a model
+  on a Radeon VII**: what is measured on Radeon VIIs below is v0.1.41.
+- **What more slots cost and buy, measured at v0.1.42.** Every slot keeps the
+  model's full `context`. On the RTX 5090 each slot after the first took
+  about 1 to 2 GiB of VRAM from the expert cache (24.4 GiB with one slot,
+  20.6 with four) and 3 to 7 GB of RAM, and prompts were read about 25%
+  slower with any number above one; on two RTX 4090 about 10% slower. Four
+  short requests at once, four slots against one: all four started within 2
+  seconds instead of the last waiting 6 to 7 for its turn, each decoded at
+  about 53 tokens per second instead of about 200, and the total was the
+  same within 15% (184 against 195 tokens per second on the RTX 5090, 186
+  against 165 on two RTX 4090). Two and three slots gave less in total than
+  either one or four on both machines. Four prompts of 7,000 tokens at once
+  finished later with four slots than with one on the RTX 5090.
+- **The gfx906 patch is down to one fix** (`docker/strata/gfx906-v0.1.42.patch`):
+  the two stream-priority aliases. Their one use is compiled out of a HIP
+  build, and the engine was seen to compile for gfx906 without the patch as
+  well as with it; it stays for this release. The checkpoint copy on a
+  stream of the saving thread's own, the fix for `saving a checkpoint part
+  failed`, is upstream in v0.1.42, and the two compile fixes v0.1.40.1 needed
+  are upstream since v0.1.41.
+- **On NVIDIA two new upstream defaults change answers slightly**, on a
+  backend of one GPU or a layer split whose experts do not all fit in VRAM
+  and that has one slot: missed experts ranked 7th or lower are skipped
+  (upstream measured 13 to 16% faster decoding), and on one GPU the PCIe
+  share is set from what the CPU measures in the first decode windows.
+  `"STRATA_ROUTE_TAIL_SKIP": "0"` and `"STRATA_PCIE_FRAC_DEFAULT": "old"` in
+  the JSON's `env` block restore v0.1.41's answers. Neither applies on AMD
+  or with `"parallel"` above 1.
+- **`"replicas"` in the Strata JSON is not checked.** Upstream's new opt-in
+  runs several engines on card groups behind one server; the node has not
+  been run against it, so leave it unset.
+- **Served at v0.1.41 on Radeon VIIs under the node**, five cards (four
+  Radeon VIIs and an Instinct MI60 in one layer split), IQ3_XXS at 262,144 context: loaded in
+  five minutes, a 76,087-token first prompt after the load read at 885 tokens
+  per second and answered correctly, the next turn reused the cache (2.3
+  seconds to the first token), a tool call and streamed reasoning, 34 to 42
+  tokens per second generated, no respawn.
+- **The CUDA image served at v0.1.41** on two RTX 4090 at 262,144 context: a
+  76,087-token prompt read at 6,482 tokens per second, about 200 tokens per
+  second generated, cache reuse and a tool call. **Build it with BuildKit,
+  on the machine that runs it** (`BUILDS.md`): Docker's legacy builder skips
+  the step that compiles the engine and reports success, and the engine is
+  now compiled for the building machine's CPU. On one NVIDIA GPU upstream
+  lets the CPU take part of a short prompt, which changes the last bits of
+  an answer; `"STRATA_PREFILL_CPU_SHARE": "0"` in the JSON's `env` block
+  turns it off.
+- **A Strata model can have more than one slot.** `models[].parallel` from 1
+  to 8, with the same `"parallel"` in the Strata JSON. v0.1.41 lists its
+  batch slots on `/slots` where earlier versions listed one whatever the
+  file said, and the node publishes the count it finds there: the engine
+  runs fewer slots than asked when they do not fit in VRAM. Each slot has the
+  model's full `context`. A request that runs alone is decoded outside the
+  slots, so the node's own count of requests in flight is what marks that
+  slot taken. On an older Strata such a model publishes one slot. Measured
+  with two slots on two RTX 4090: two requests at once generated 85 to 90
+  tokens per second each, against 120 to 200 for one alone, and a third
+  waited at the node. Two long prompts are still read one after the other,
+  and a slot's decoding pauses while another's prompt is read: on five
+  Radeon VIIs under agent traffic, two slots per backend dropped requests
+  to between 1 and 7 tokens per second, where one slot gave 16 to 40.
+- **vLLM v0.31.0** (`VLLM_VERSION`). The image's `vllm serve` still takes
+  every flag the node generates, and none is in upstream's list of removed
+  or renamed options. It has not served a model on a fleet host.
+- llama.cpp stays at b11371 and FreeToken at 0.1.3, which is still upstream's
+  latest.
+
 ## v2.9.0
 
 **A request can name the machines it would rather run on.**

@@ -95,6 +95,16 @@ func TestValidate(t *testing.T) {
 		{name: "power control without hosts", mutate: func(c *Config) { c.Power.Control.Enabled = true }, wantErr: "power.control.hosts is empty"},
 		{name: "bad power source", mutate: func(c *Config) { c.Power.Source = "ipmi" }, wantErr: "power.source"},
 		{name: "energy without dir", mutate: func(c *Config) { c.Energy.Enabled = true; c.Energy.Dir = "" }, wantErr: "energy.dir"},
+		// clients
+		{name: "clients", mutate: func(c *Config) {
+			c.Clients = map[string][]string{"factory-a": {"100.64.0.10"}, "batch-b": {"100.64.1.0/24"}}
+		}},
+		{name: "client named other", mutate: func(c *Config) { c.Clients = map[string][]string{"other": {"100.64.0.10"}} }, wantErr: "clients.other"},
+		{name: "client bad name", mutate: func(c *Config) { c.Clients = map[string][]string{"Factory A": {"100.64.0.10"}} }, wantErr: "clients.Factory A"},
+		{name: "client bad address", mutate: func(c *Config) { c.Clients = map[string][]string{"a": {"tehas"}} }, wantErr: "clients.a[0]"},
+		{name: "client prefix under two names", mutate: func(c *Config) { c.Clients = map[string][]string{"a": {"100.64.0.10"}, "b": {"100.64.0.10"}} }, wantErr: "is already listed under a"},
+		{name: "one client lane", mutate: func(c *Config) { c.Energy.ClientLanes = 1 }, wantErr: "energy.client_lanes"},
+		{name: "too many client lanes", mutate: func(c *Config) { c.Energy.ClientLanes = 65 }, wantErr: "energy.client_lanes"},
 
 		// models
 		{name: "zero-model super peer", mutate: func(c *Config) { c.Models = nil }},

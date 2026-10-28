@@ -1,8 +1,10 @@
 package route
 
 import (
+	"cmp"
 	"log"
 	"math/rand/v2"
+	"slices"
 	"time"
 
 	"github.com/janit/viiwork/v2/internal/logging"
@@ -89,14 +91,23 @@ func (r *Router) pickScoredLocked(req Request, backends []LocalBackend, localEli
 	medOv, medRate := median(ovs[:pool]), median(rates[:pool])
 	var learning [maxScored]int
 	nl := 0
-	for i := range cands {
-		if !cands[i].scored {
+	warm := r.warmLocked(req, anyHealthy(backends), reports, now)
+	warmCand := false
+	for i, c := range cands {
+		if !c.scored {
 			learning[nl] = i
 			nl++
 		}
+		name := c.rep.Node
+		if c.local {
+			name = r.c.Self
+		}
+		warmCand = warmCand || (warm.ok && (name == warm.last || name == warm.replica))
 	}
 	pick, why := -1, "weighted"
-	if nl > 0 && r.rand() < trickleShare {
+	// No trickle away from a host that holds the session's state: a newcomer
+	// earns its score from requests that would be cold anyway.
+	if nl > 0 && !warmCand && r.rand() < trickleShare {
 		pick, why = learning[min(int(r.rand()*float64(nl)), nl-1)], "trickle"
 	} else {
 		var pred [maxScored]float64
@@ -106,7 +117,11 @@ func (r *Router) pickScoredLocked(req Request, backends []LocalBackend, localEli
 			if !c.scored {
 				ov, rate = medOv, medRate
 			}
-			pred[i] = max(ov+rate*req.EstK+c.rttMs, 1)
+			name := c.rep.Node
+			if c.local {
+				name = r.c.Self
+			}
+			pred[i] = warm.pred(name, ov, req.EstK, c.rttMs, max(ov+rate*req.EstK+c.rttMs, 1))
 			if i == 0 || pred[i] < best {
 				best = pred[i]
 			}
@@ -183,6 +198,22 @@ func rendezvous(key uint64, node string) uint64 {
 	h *= 0x94d049bb133111eb
 	h ^= h >> 31
 	return h
+}
+
+// SessionRank orders names for a session the way the scored pick prefers
+// them among equals, best first: by rendezvous(key, name), highest first,
+// ties by name. kv_share places a session's replica on the best-ranked
+// member other than the one that ran the turn, where the session goes when
+// its own host is full. names is not modified.
+func SessionRank(key uint64, names []string) []string {
+	out := slices.Clone(names)
+	slices.SortFunc(out, func(a, b string) int {
+		if c := cmp.Compare(rendezvous(key, b), rendezvous(key, a)); c != 0 {
+			return c
+		}
+		return cmp.Compare(a, b)
+	})
+	return out
 }
 
 func (r *Router) rand() float64 {

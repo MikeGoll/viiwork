@@ -202,6 +202,9 @@ func chooseModels(_ context.Context, h Host, p prompt.Prompter, s *state) error 
 				}
 				p.Say("Use letters, digits, '.', '_' and '-', and a name not used above.")
 			}
+			if w.mmproj != "" {
+				p.Say("  %s reads images: its vision projector %s is loaded with it (llamacpp.mmproj in the config; remove the line to serve text only).", w.name, clean(w.mmproj))
+			}
 			s.models = append(s.models, w)
 		}
 		s.modelsDir = dir
@@ -262,13 +265,17 @@ func findKey(doc any, key string) string {
 var modelNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 
 // scan lists the models under root, three directories deep: first shards
-// only, vision projectors (arch clip) left out, unreadable files and
-// directories reported. In a container (container true) only root is
+// only, unreadable files and directories reported. A vision projector (arch
+// clip) is not a model and is not listed; it is given to the model it sits
+// beside when the directory holds that one model and that one projector,
+// which is how a model with a projector is published. Any other layout is
+// left for the operator to pair (llamacpp.mmproj), and said so. In a container (container true) only root is
 // mounted, so a model symlinked to a file outside it is reported and left
 // out: it would be planned, then missing.
 func scan(p prompt.Prompter, root string, container bool) []weights {
 	var out []weights
 	seen := map[string]bool{}
+	projectors := map[string][]weights{} // by directory
 	// Walk the resolved directory: WalkDir does not descend into a root that
 	// is itself a symlink (/models -> a big disk).
 	realRoot, err := filepath.EvalSymlinks(root)
@@ -319,13 +326,28 @@ func scan(p prompt.Prompter, root string, container bool) []weights {
 			p.Say("  skipped %s: %s", clean(rel), clean(err.Error()))
 			return nil
 		}
+		seen[rel] = true
 		if info.Arch == "clip" {
+			dir := filepath.Dir(rel)
+			projectors[dir] = append(projectors[dir], weights{file: rel, info: info})
 			return nil
 		}
-		seen[rel] = true
 		out = append(out, weights{file: rel, info: info})
 		return nil
 	})
+	inDir := map[string]int{}
+	for _, w := range out {
+		inDir[filepath.Dir(w.file)]++
+	}
+	for i, w := range out {
+		dir := filepath.Dir(w.file)
+		switch proj := projectors[dir]; {
+		case len(proj) == 1 && inDir[dir] == 1:
+			out[i].mmproj, out[i].mmprojSize = proj[0].file, proj[0].info.Size
+		case len(proj) > 0:
+			p.Say("  %s: its directory holds %d models and %d vision projectors, so none is paired with it; set llamacpp.mmproj in the config for a model that reads images", clean(w.file), inDir[dir], len(proj))
+		}
+	}
 	return out
 }
 
@@ -350,7 +372,10 @@ func layout(_ context.Context, _ Host, p prompt.Prompter, s *state) error {
 	}
 	models := make([]plan.Model, len(s.models))
 	for i, m := range s.models {
-		models[i] = plan.Model{Name: m.name, Info: m.info}
+		// A projector is loaded onto the model's cards with it.
+		info := m.info
+		info.Size += m.mmprojSize
+		models[i] = plan.Model{Name: m.name, Info: info}
 	}
 	apple := s.vendor == string(gpu.VendorApple)
 	var pl plan.Plan
@@ -601,8 +626,14 @@ func (s *state) answers() render.Answers {
 			}
 			m := render.Model{Name: pl.Name, Path: "/models/" + filepath.ToSlash(w.file),
 				Size: w.info.Size, GPUs: pl.GPUs, PerBackend: pl.PerBackend, Context: pl.Context, Parallel: pl.Parallel}
+			if w.mmproj != "" {
+				m.Mmproj = "/models/" + filepath.ToSlash(w.mmproj)
+			}
 			if apple {
 				m.Path, m.Binary = filepath.Join(s.modelsDir, w.file), s.llama
+				if w.mmproj != "" {
+					m.Mmproj = filepath.Join(s.modelsDir, w.mmproj)
+				}
 			}
 			a.Models = append(a.Models, m)
 		}

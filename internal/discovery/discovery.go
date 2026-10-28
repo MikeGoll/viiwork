@@ -34,9 +34,9 @@ import (
 // Absent is not zero, as everywhere else in viiwork: a field this node cannot
 // measure is left at its zero value meaning "no host can currently say", never
 // meaning "measured as none". Deliberately absent from the type: any
-// prompt-only ceiling, any output ceiling, cost, and any modality beyond text.
-// viiwork knows none of them, and a record that carried them would be
-// fabricating rather than reporting.
+// prompt-only ceiling, any output ceiling, cost, and any modality beyond text
+// and images. viiwork knows none of them, and a record that carried them
+// would be fabricating rather than reporting.
 type Model struct {
 	// Name is the id a client names, and is what /v1/models lists.
 	Name string
@@ -62,6 +62,12 @@ type Model struct {
 	// passes tool definitions straight through to the engine, so this is a
 	// property of the seam rather than of the checkpoint.
 	Tools bool
+
+	// Images is whether a request that carries an image has somewhere to go:
+	// a fresh host with slots whose engine says its backends read images.
+	// False covers "no host does" and "no host can say"; the fleet view keeps
+	// the two apart for a consumer that needs to.
+	Images bool
 
 	// Hosts is how many hosts stand behind ServedContext: fresh, and with
 	// slots the router can use. Zero means nothing can currently take work
@@ -118,6 +124,7 @@ func Models(src Source) []Model {
 			m.Engine = fm.Engine
 			m.ServedContext = fm.Ctx
 			m.Hosts, m.OldestAgeMS = provenance(fm)
+			m.Images = fm.Images != nil && *fm.Images
 		}
 		out = append(out, m)
 	}

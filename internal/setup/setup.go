@@ -70,6 +70,10 @@ type weights struct {
 	file string // relative to the models directory
 	name string
 	info gguf.Info
+	// mmproj is the model's vision projector, relative to the models
+	// directory, when scan found the one that belongs to it; "" otherwise.
+	mmproj     string
+	mmprojSize int64
 }
 
 // state is what the steps decide, in order.

@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/janit/viiwork/v2/energy"
+	"github.com/janit/viiwork/v2/internal/clientuse"
 	"github.com/janit/viiwork/v2/internal/config"
 	"github.com/janit/viiwork/v2/internal/cost"
 )
@@ -37,6 +38,8 @@ func openEnergy(cfg config.EnergyConfig, timezone string, gpuIDs []int, pw NodeP
 		DaySlots:    cfg.DaySlots,
 		Location:    loc,
 		Source:      source,
+		Clients:     cfg.ClientsOn(),
+		ClientLanes: cfg.ClientLanes,
 	}, nil)
 	if err != nil {
 		return nil, err
@@ -142,4 +145,18 @@ func newCostTracker(cfg config.CostConfig, apiKey string, pw NodePower, logf fun
 	}, pw)
 	logf("cost tracking enabled (zone: %s)", cfg.BiddingZone)
 	return tracker
+}
+
+// clientUse hands the ledger's minutes to the energy recorder. The energy
+// package takes a function and knows nothing of requests; the ledger knows
+// nothing of energy.
+func clientUse(ledger *clientuse.Ledger) energy.ClientUseFunc {
+	return func(bucketStart int64) []energy.ClientUse {
+		taken := ledger.Take(bucketStart)
+		out := make([]energy.ClientUse, len(taken))
+		for i, u := range taken {
+			out[i] = energy.ClientUse{Client: u.Client, Model: u.Model, BusyS: u.BusyS, Tokens: uint64(max(u.Tokens, 0))}
+		}
+		return out
+	}
 }

@@ -198,3 +198,20 @@ func TestAnUnnamedProviderFallsBackToItsID(t *testing.T) {
 		t.Errorf("provider name = %q, want the id", n)
 	}
 }
+
+// A client that reads "image" attaches pictures, so the catalogue says it
+// only for a model the fleet can read them with.
+func TestInputListsImageOnlyWhenTheFleetReadsImages(t *testing.T) {
+	yes := true
+	src := fakeSource{
+		entries: []meshapi.ModelEntry{entry("eyes", meshapi.OwnedByLocal), entry("tg", meshapi.OwnedByLocal)},
+		fleet:   []meshapi.FleetModel{{Name: "eyes", Ctx: 8192, Images: &yes}, {Name: "tg", Ctx: 8192}},
+	}
+	got := Build(Config{ProviderID: "viiwork"}, discovery.Models(src), "http://gb1:8086/v1")["viiwork"].Models
+	if in := got["eyes"].Modalities.Input; len(in) != 2 || in[0] != "text" || in[1] != "image" {
+		t.Errorf("eyes input = %v, want [text image]", in)
+	}
+	if in := got["tg"].Modalities.Input; len(in) != 1 || in[0] != "text" {
+		t.Errorf("tg input = %v, want [text]", in)
+	}
+}

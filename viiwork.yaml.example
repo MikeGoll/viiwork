@@ -63,6 +63,10 @@ models:
     llamacpp:                # optional; these are the defaults
       binary: llama-server
       split_mode: layer      # layer | row
+      # mmproj: /models/mmproj-Qwen3.8-27B-F16.gguf
+      #                      # the model's vision projector: with it the backend
+      #                      # reads images, the node says so to the mesh, and a
+      #                      # request with an image is routed here. No default.
   - name: granite-4.2-8b
     engine: llamacpp
     path: /models/granite-4.2-8b-Q8_0.gguf
@@ -162,15 +166,28 @@ models:
   #   gpus: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
   #   gpus_per_backend: 5      # two backends of five cards
   #   context: 131072
-  #   parallel: 1              # must be 1: Strata v0.1.40.1 reports one slot
+  #   parallel: 1              # 1 to 8; above 1 needs Strata v0.1.41 and the same "parallel" in the JSON
   #   # Loads took 3.5 to 6 minutes on ten Radeon VIIs, well inside the
   #   # engine's 30m default; viiwork-accept asks 45m of any multi-card backend.
   #   startup_timeout: 45m
   #   env: {STRATA_ARENA_MMAP: "1"}   # needs --pcie-frac 0 in the JSON's args
   #   strata:
-  #     dir: /opt/strata       # the Strata checkout; required, absolute
-  #     python: python3        # default; /opt/strata/.venv/bin/python in the CUDA image
+  #     dir: /opt/strata       # the Strata checkout; required, absolute (gfx906 image)
+  #     python: python3        # default
+  #     # The CUDA image (Strata 0.2) has another layout: dir /opt/strata/terminal,
+  #     # python /opt/strata/terminal/python/bin/python3, and the JSON's exe, cwd and
+  #     # lib_dirs move too (docs/models.md#strata-one-moe-family-across-several-cards).
   #     warmup: 30s            # default; the wait between loaded and the first request (0s: none)
+  #     # Session sharing (docs/models.md#sharing-sessions-between-hosts-kv_share):
+  #     # after a session's turn the conversation is saved and sent, as a delta,
+  #     # to the member the session would spill to, which imports it before a
+  #     # spilled turn. Needs the janit/Strata kv-export build, one card per
+  #     # backend, and "slot_save_path" plus --conversation-cache-mib in the JSON.
+  #     kv_share:
+  #       group: flash           # required; members with the same model files and JSON
+  #       min_tokens: 8192       # default; shorter conversations are not sent
+  #       max_gib: 32            # default; replicas received, oldest dropped first
+  #       # dir: /var/lib/viiwork/kvshare/flash   # default <state_dir>/kvshare/<model>
 
   # A model fetched and seeded by the host's viiwork-parrot instead of a local
   # file (docs/models.md). Set path or source, not both.
@@ -191,6 +208,20 @@ models:
 
 power:
   source: none               # auto | dcmi | sdr | sensor:<NAME> | none
+
+# Energy history (docs/power-and-energy.md). Off unless enabled.
+# energy:
+#   enabled: true
+#   dir: /var/lib/viiwork/energy
+#   clients: true          # false keeps this node out of energy per client
+#   client_lanes: 8        # client and model pairs per minute; changing it discards the client rings
+
+# Energy per client (docs/power-and-energy.md). Off until a client is named.
+# Write this on every node that clients call directly.
+# clients:
+#   factory-a: [100.64.0.10]
+#   batch-b:   [100.64.0.20, 198.51.100.0/24]
+# clients_reload: true     # apply a changed clients section on reload
 
 # Rolling updates (docs/releases.md). Off unless enabled.
 # update:

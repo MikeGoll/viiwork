@@ -336,4 +336,7 @@ func TestCompatibilitySurfaceIsPinned(t *testing.T) {
 	if DefaultMinuteSlots != 1440 || DefaultHourSlots != 8760 || DefaultDaySlots != 365 {
 		t.Errorf("default geometry changed: %d/%d/%d", DefaultMinuteSlots, DefaultHourSlots, DefaultDaySlots)
 	}
+	if ClientRecordSize != 24 || DefaultClientLanes != 8 {
+		t.Errorf("client record size is on-disk format, and the lane default is geometry: got %d/%d, want 24/8", ClientRecordSize, DefaultClientLanes)
+	}
 }

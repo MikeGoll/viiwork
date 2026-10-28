@@ -38,6 +38,14 @@ const (
 	// PathAliases+"/<name>"; revert is POST on AliasRevertPath(name).
 	PathAliases       = "/v1/aliases"
 	AliasRevertSuffix = "/revert"
+
+	// PathKVShareManifest (GET) and PathKVSharePut (PUT) (v2.11) carry a
+	// session's engine state between the members of a kv_share group: what a
+	// node holds of a conversation, and a delta against it. Both take
+	// ?model=&key=, and the put also &size=&digest= of the file it rebuilds.
+	// Accepted only from members, authorised like a forward.
+	PathKVShareManifest = "/v1/kvshare/manifest"
+	PathKVSharePut      = "/v1/kvshare/put"
 )
 
 // Named SSE events on PathMeshStream.

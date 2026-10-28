@@ -43,7 +43,7 @@ test:
 		go test ./... -v && $(MAKE) --no-print-directory vet-cross; \
 	else \
 		echo "go not found on host, running tests in container (--cpus=$(TEST_CPUS))..."; \
-		docker run --rm --cpus=$(TEST_CPUS) -v $(CURDIR):/src -w /src -e GOFLAGS=-buildvcs=false golang:1.27.1 \
+		docker run --rm --cpus=$(TEST_CPUS) -v $(CURDIR):/src -w /src -e GOFLAGS=-buildvcs=false golang:1.27.2 \
 			sh -c 'go test ./... -v && GOOS=linux GOARCH=amd64 go vet ./... && GOOS=darwin GOARCH=arm64 go vet ./...'; \
 	fi
 
@@ -97,9 +97,8 @@ docker-freetoken:
 docker-strata:
 	docker build --build-arg VERSION=$(VERSION) -f docker/Dockerfile.strata -t viiwork-strata .
 
-# Upstream publishes a Dockerfile, not an image: build theirs at the pin first.
+# On upstream's ready-made image at the pin (STRATA_CUDA_IMAGE).
 docker-strata-cuda:
-	. docker/pins.env && docker build -t strata-cuda:$$STRATA_VERSION https://github.com/Niko1221/Strata.git#$$STRATA_COMMIT
 	docker build --build-arg VERSION=$(VERSION) -f docker/Dockerfile.strata-cuda -t viiwork-strata-cuda .
 
 up:

@@ -247,7 +247,6 @@ func serveLocal(w http.ResponseWriter, r *http.Request, body []byte, b route.Loc
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable {
-		_, _ = io.Copy(io.Discard, resp.Body)
 		return refused("backend %s answered %d", b.ID(), resp.StatusCode)
 	}
 
@@ -327,14 +326,20 @@ func endStream(res execResult, r *http.Request, clientGone bool, upstreamErr err
 // forwardToPeer runs the request on a peer. The body is passed explicitly
 // because the forward signature covers its digest. The peer's response goes to
 // the client byte for byte: thinking is rewritten once, on the executing node
-// (Decision 9).
-func forwardToPeer(w http.ResponseWriter, r *http.Request, body []byte, t route.Target, auth *ForwardAuth, self string) execResult {
+// (Decision 9). client is the name this node resolved for the request, "" for
+// none.
+func forwardToPeer(w http.ResponseWriter, r *http.Request, body []byte, t route.Target, auth *ForwardAuth, self, client string) execResult {
 	req, err := http.NewRequestWithContext(r.Context(), r.Method, targetURL(t.Addr, r), bytes.NewReader(body))
 	if err != nil {
 		return retryable("peer %s: %v", t.Node, err)
 	}
 	copyRequestHeaders(req.Header, r.Header)
 	req.ContentLength = int64(len(body))
+	if client != "" {
+		// The name this node resolved, for the node that will do the work.
+		// Outside the signature on purpose: see meshapi.HeaderClient.
+		req.Header.Set(meshapi.HeaderClient, client)
+	}
 	if err := auth.Sign(req, body); err != nil { // last: the signature covers the request
 		return retryable("peer %s: signing the forward: %v", t.Node, err)
 	}
@@ -351,7 +356,6 @@ func forwardToPeer(w http.ResponseWriter, r *http.Request, body []byte, t route.
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable {
-		_, _ = io.Copy(io.Discard, resp.Body)
 		return refused("peer %s answered %d", t.Node, resp.StatusCode)
 	}
 

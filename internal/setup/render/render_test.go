@@ -246,3 +246,20 @@ func TestComposeMountsTheConfigDirectory(t *testing.T) {
 		t.Errorf("no directory mount:\n%s", data)
 	}
 }
+
+// A projector is written under llamacpp.mmproj, and a block that only names
+// one does not write an empty binary over the engine's default.
+func TestConfigNamesTheProjector(t *testing.T) {
+	a := Answers{Node: "n", Network: config.NetworkLAN, Open: true, Vendor: "nvidia", Models: []Model{
+		{Name: "eyes", Path: "/models/eyes.gguf", GPUs: []int{0}, PerBackend: 1, Context: 8192, Parallel: 1, Mmproj: "/models/mmproj-eyes.gguf"},
+		{Name: "text", Path: "/models/text.gguf", GPUs: []int{1}, PerBackend: 1, Context: 8192, Parallel: 1},
+	}}
+	out, err := Config(a, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(out)
+	if !strings.Contains(s, "mmproj: /models/mmproj-eyes.gguf") || strings.Count(s, "llamacpp:") != 1 || strings.Contains(s, "binary:") {
+		t.Errorf("config:\n%s", s)
+	}
+}

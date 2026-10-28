@@ -19,6 +19,19 @@ or firewall rules in front of it.
   your fleet is sensitive, restrict access at the network layer. There is
   currently no switch to disable the history. See
   [dashboards.md](dashboards.md#prompt-and-output-history).
+- **Client names and energy.** With a `clients` section, `/v1/status` and
+  `/v1/cluster` list each named client and the energy spent on it. A client is
+  named by source address, so anything that can send from a named address is
+  counted as that client. `X-Viiwork-Client` from a client is removed; a node
+  accepts it only on a forward it has verified, and it is not covered by the
+  forward's signature, so any mesh member can attach a label, as any member can
+  already forward a request. A client cannot name itself only once every node
+  that clients call runs v2.10 or later: a node still on v2.9.x does not know
+  the header, so it does not strip it from a client's request and copies it
+  onto its signed forward, where a v2.10 node honours it. Add `clients` only
+  after that upgrade. In an open mesh a verified forward is the source
+  address of an alive member, so any process on a member machine can name
+  itself.
 - **Aliases change what every client gets.** In a secured mesh a write needs the
   mesh secret's signature; in an open mesh it is accepted only from the node's own
   machine. A reverse proxy on that machine in front of the API would make every

@@ -38,8 +38,9 @@ type Engine struct {
 }
 
 // New returns the engine for this host. Its HTTP client keeps up to 100 idle
-// connections (v1's healthClient) and has no client-wide timeout: every probe
-// and load poll is bounded by its caller's context.
+// connections in all but two per backend (the default MaxIdleConnsPerHost,
+// enough while one backend's probes run one at a time), and has no client-wide
+// timeout: every probe and load poll is bounded by its caller's context.
 func New() *Engine {
 	return &Engine{
 		client: &http.Client{Transport: &http.Transport{
@@ -54,6 +55,9 @@ func New() *Engine {
 }
 
 func (e *Engine) Name() string { return Name }
+
+// DisplayName is the project's own spelling.
+func (e *Engine) DisplayName() string { return "llama.cpp" }
 
 // UsageReporting: llama-server always carries cached_tokens in usage; on
 // 2,436 overnight requests prompt_tokens-cached_tokens equalled timings.prompt_n
@@ -152,6 +156,13 @@ func (e *Engine) Command(s engine.Spec) (engine.Command, error) {
 				args = append(args, "--no-mmap")
 			}
 		}
+	}
+
+	if o.Mmproj != "" {
+		if _, err := os.Stat(o.Mmproj); err != nil {
+			return engine.Command{}, fmt.Errorf("llamacpp: model %s: llamacpp.mmproj %s: %w", s.Name, o.Mmproj, err)
+		}
+		args = append(args, "--mmproj", o.Mmproj)
 	}
 
 	// Operator args last, so their flag wins. One of them is translated: a

@@ -61,6 +61,80 @@ Those five are the ROCm hosts. The fleet also runs `vllm` on one host and
 v2.2.0 is. `strata` is the fourth engine, added later; it has run on one
 ten-card Radeon VII host (below).
 
+## Models that read images
+
+A chat request may carry a picture as an `image_url` content part. A backend
+reads it only when it was started with the model's vision part, and from
+v2.10.0 the mesh knows which backends were.
+
+**Turning it on, per engine.**
+
+| Engine | How | What the node says |
+|---|---|---|
+| `llamacpp` | `llamacpp.mmproj: /models/<projector>.gguf` (or `--mmproj` in `args`) | yes with a projector, no without; cannot say for a model fetched with `-hf` |
+| `strata` | a `"vision"` section in the model's Strata JSON: `exe` (`strata-vision`), `mmproj`, `model`, `gpu`, `max_tokens`, and `threads` for a CPU encoder | what the server's `/health` reports as `images` |
+| `vllm`, `freetoken` | the engine's own flags | cannot say |
+
+Strata's encoder runs on the model's card (`"gpu": true`, about 700 MiB of
+VRAM held back for it) or on the CPU (`"gpu": false`), which costs no VRAM.
+
+**What the mesh does.** Each node publishes `images` per model: `true`,
+`false`, or absent for "cannot say". A request with an image then goes:
+
+1. to a host that says yes, waiting in the queue for it when it is full;
+2. when no host says yes, to hosts that cannot say, as before v2.10.0;
+3. when every host that serves the model says no, nowhere: the client gets
+   `400` with `model "<name>" does not read images on any node`, or, with
+   `?host=` naming a host that says no, `... does not read images on host
+   "<host>"`.
+
+So one name can be served with a projector on one node and without on
+another, and a picture still lands where it can be read. A text request is
+not affected by any of this.
+
+**What to expect.** A request body is at most 32 MB, images included. The
+prompt history keeps a request's text and not its images. How many tokens an
+image costs and how well a model reads a screenshot depend on the model and
+its projector.
+
+### Measured: Strata with a CPU encoder on one RTX 5090
+
+2026-10-13, one host: an RTX 5090 (32 GB), 128 CPU threads, 247 GB of RAM,
+`qwen3.8-flash-next` (IQ3_XXS) under Strata v0.1.41 at 262144 tokens of
+context and 4 slots. The card was full before the change (31992 of 32607
+MiB). The vision section used the CPU encoder: `"gpu": false`,
+`"threads": 64`, projector `mmproj-Qwen3.8-Flash-Next-BF16.gguf` (908 MB).
+
+| | Text only | With the vision section |
+|---|---|---|
+| VRAM in use | 31992 MiB | 32000 MiB |
+| RAM of the node's container | 58.8 GiB | 59.8 GiB |
+| Load, park to healthy | not measured | 60 s, of which 30 s is the warm-up |
+| One text request, 400 tokens out | 125 tok/s | 125 tok/s |
+| Four text requests at once | 182 tok/s together | 185 tok/s together |
+| Slots | 4 | 4 |
+
+So the encoder cost this host no VRAM, no slot and no text speed.
+
+A 1440x1000 PNG screenshot (26 KB) cost about 990 prompt tokens with
+`"max_tokens": 1024` in the vision section, and about 290 with 300, Strata's
+default for a CPU encoder. One request with the screenshot and a short
+question took 6.5 s to answer with about 240 tokens; four at once took 7.6 s
+and produced 142 tok/s together.
+
+The screenshot was a web dashboard with a red rectangle drawn at the right
+end of a titled band, and the question was which panel the rectangle is in.
+
+- At 1024 image tokens, 7 of 8 answers placed the rectangle correctly (top
+  right, above the row of cards, beside the intro text), and 5 of those 7
+  named the band's title. One answer put it in the navigation bar.
+- At 300 image tokens, 0 of 3 answers were right: all put it in or beside the
+  navigation bar.
+
+A screenshot with small text needs the larger budget. This is one image and
+eleven answers on one model, enough to choose a setting and not enough to
+call the model reliable at reading interfaces.
+
 ## Large models on one card: FreeToken and MoE offload
 
 FreeToken's unit of deployment is **one card per process** — it has a
@@ -159,6 +233,25 @@ models:
       warmup: 30s                    # default
 ```
 
+- **The paths depend on the image.** The gfx906 image (`viiwork-strata`,
+  built from source) and the CUDA image (`viiwork-strata-cuda`, upstream's
+  ready-made 0.2 image) lay Strata out differently, and the model's block and
+  the JSON must name what is in the image they run on:
+
+  | | `viiwork-strata` (gfx906) | `viiwork-strata-cuda` (Strata 0.2.3) |
+  |---|---|---|
+  | `strata.dir` | `/opt/strata` | `/opt/strata/terminal` |
+  | `strata.python` | `python3` (default) | `/opt/strata/terminal/python/bin/python3` |
+  | JSON `"exe"` | `/opt/strata/build-906/strata` | `/opt/strata/components/engine/0.1.48-linux-x86_64-cuda-cuda13/strata` |
+  | JSON `"cwd"` | `/opt/strata` | `/opt/strata/terminal` |
+  | JSON `"lib_dirs"` | — | `["/opt/strata/components/engine/0.1.48-linux-x86_64-cuda-cuda13"]` |
+  | expert profile | `/opt/strata/data/expert-profile.bin` | `/opt/strata/terminal/data/expert-profile.bin` |
+
+  The engine directory is named for the engine package's version (0.1.48 in
+  Strata 0.2.3; the fork's kv_share build is 0.1.48.1). With another image's
+  paths the backend dies at launch. The CUDA image's paths were the
+  `/opt/strata` checkout and `/opt/strata/.venv/bin/python` up to Strata
+  0.1.45 (viiwork v2.11.0-beta1 and earlier).
 - **One JSON serves every backend of the model.** The node passes host, port
   and cards as flags; the file's `host`, `port` and `gpu` are ignored. Leave
   `layer_split` out and Strata splits the layers itself; the measurements below
@@ -167,8 +260,15 @@ models:
   names the key: `model_name` (or an alias) with `name`, `--max-context` with
   `context`, and `lazy_load`, `idle_unload_s` and `api_key` off. See
   [configuration.md](configuration.md#models).
-- **`parallel` must be 1.** Strata v0.1.40.1 reports one slot whatever its own
-  `parallel` says, so the node refuses more. Capacity comes from more backends.
+- **`parallel` is 1 to 8, and the JSON's `"parallel"` must say the same.**
+  Each slot is a conversation of the full `context`, and every slot takes VRAM
+  that the expert cache would otherwise hold, so a second slot can cost more
+  speed than it gains; upstream's `docs/BATCHING.md` has the numbers. The
+  engine runs fewer slots than asked when they do not fit and says so only in
+  its log; the node publishes the count `/slots` lists, so look at
+  `/v1/status` after a load. A request that is alone decodes on the engine's
+  faster single path, and a second one moves both into batch slots. Needs
+  Strata v0.1.41: an older build lists one slot whatever the file says.
 - **Preparing the model is upstream's job.** The pack, the GGUF shards and the
   MTP layer come from Strata's own `setup.py`; viiwork does not fetch or build
   them. Images and their traps are in [BUILDS.md](../BUILDS.md).
@@ -191,7 +291,7 @@ models:
   Radeon VIIs and does not prevent it; `warmup: 0s` turns it off.
 - **`saving a checkpoint part failed` on Radeon VIIs is fixed in the
   `viiwork-strata` image from Strata v0.1.40.1** (the gfx906 patch,
-  [BUILDS.md](../BUILDS.md)). It was the first long prompt after a load, on a
+  [BUILDS.md](../BUILDS.md); upstream has the fix itself since v0.1.42). It was the first long prompt after a load, on a
   backend of more than one card: the engine saves a checkpoint every 16,384
   prompt tokens while another thread is still capturing its prompt graphs,
   and the ROCm runtime refuses that copy. An image built before that still
@@ -239,6 +339,111 @@ Known gaps, as of 2026-10-05:
   reply by closing the connection, so when a backend dies mid-reply the node
   cannot tell the early close from the end: the client's stream ends cleanly
   without a `[DONE]` line. A client that needs to know checks for `[DONE]`.
+
+### Sharing sessions between hosts (kv_share)
+
+A client that sends `X-Session-Affinity` (or `X-Session-Id`) keeps its turns
+on one host, where Strata's conversation cache holds the conversation. When
+that host is full, the turn spills to the next one and pays a cold prefill:
+41 s for 50k tokens on an RTX A4000, minutes at 200k on gfx906. With
+`strata.kv_share`, the conversation follows the session:
+
+```yaml
+    strata:
+      dir: /opt/strata/terminal                        # the kv-export image's (Strata 0.2) layout
+      python: /opt/strata/terminal/python/bin/python3
+      kv_share:
+        group: flash        # the members that share; same model files and JSON
+        min_tokens: 8192    # default: a shorter conversation is cheap to prefill
+        max_gib: 32         # default: replicas this node holds
+        # dir: ...          # default <state_dir>/kvshare/<model>; new or empty, never shared
+```
+
+- After a turn of 8192 tokens or more, the node that ran it asks its backend
+  to save the session (`POST /slots/session?action=save`, about 0.7 s at 50k
+  tokens, during which that backend's slots pause) and sends the file to one
+  member: the first after itself in the session's rendezvous order, which is
+  where the router spills the session, or the session's home when the turn
+  ran on the spill host. Only what changed travels: about 240 MB of a 1 GB
+  file per 50k-token turn (0.6 s at 10 Gbit/s, 2.3 s at 1 Gbit/s). A save
+  waits 2 s after its turn and is dropped when the session's next turn
+  starts first.
+- Before a session's turn runs on a backend, the node imports the replica it
+  holds into that backend's conversation cache (`POST
+  /slots/0?action=import`, about 1.5 s at 50k tokens, on the turn's clock),
+  once per replica and backend launch. Strata resumes from it only if the
+  prompt matches, so a stale or foreign replica costs the import and nothing
+  else, and a failed import serves the turn cold.
+- Replicas travel on the API port (`/v1/kvshare/manifest` and `/put`) and are
+  accepted only from members, under the same rule as a forward: a signature
+  in a secured mesh, the member's own address in an open one. A replica is a
+  conversation's prompt.
+- Routing knows where a session's state is. The entry node remembers which
+  host ran each session's last turn and prices that host, and the member
+  holding its replica, by what resuming costs there rather than by a full
+  prefill: the replica host at its measured import time per 1000 tokens. So
+  when the session's host is full, the turn goes to the replica host even if
+  another host is faster at a cold prefill. This holds for turns that enter
+  through the same node; a session that enters elsewhere routes as without
+  kv_share.
+- `/v1/capacity` publishes the model's group as `kv_share_group` and the
+  measured import cost as `kv_share_import_ms_per_1k`, and `/v1/status`
+  counts pushes, puts and imports under `kv_share`.
+
+Requirements, refused at start when unmet: a janit/Strata kv-export build
+(upstream Strata plus the session save, import and delta endpoints, which
+upstream lacks; `v0.2.6-kvx2` on Strata 0.2.6 is current, and the oldest that
+lets the node re-import an evicted copy reliably), `"slot_save_path"` in the JSON at a path the
+node reads and writes (in the Docker image the node and the engine share the
+container, so it is the same path), a conversation cache (on by default
+since Strata 0.2; an explicit `--conversation-cache-mib` of 0 in `args` is
+refused), and one card per backend (Strata saves no layer-split session). Keep
+`slot_save_path` on disk, not tmpfs: Strata writes it with O_DIRECT, and
+tmpfs was slower (1.12 s against 0.68 s). Members of a group must load the
+same model files with the same JSON: Strata checks both fingerprints and
+refuses anything else on import.
+
+**The fork's image has the 0.2 layout** of the CUDA image (the table under
+[Strata](#strata-one-moe-family-across-several-cards)), with its own engine package: the JSON's `"exe"` is
+`/opt/strata/components/engine/0.1.51-linux-x86_64-cuda-cuda13/strata` on
+`v0.2.6-kvx1` and later (`0.1.48.1` on the older `v0.2.3.1-kvx1`), and `"lib_dirs"`
+names that same directory (its `libcublas`, `libcudart` and
+`libstrata_kq`). forge-white (one RTX 5090) has served this way since
+v2.11.0-beta1, and forge-black beside it since 2026-10-25.
+
+**Measured between those two hosts** (12-16 coding-agent sessions
+on 8 slots, 90 minutes per run): 93-97% of host switches resumed warm and
+1-2% cold, over 1 GbE as over 10 GbE. A copy took 3.2 s at 1 GbE and under
+a second at 10 GbE, which moved only 2-3 points of switches from partly warm
+to warm. What mattered was the conversation cache: at 16 GiB / 8
+conversations Strata evicted imported copies before their session came
+back (17% cold); at 64 GiB / 32, under 2%.
+
+**An evicted copy is imported again** (v2.11.1). The conversation cache
+evicts oldest first and does not say which conversation went, so a node
+cannot assume that a copy it imported earlier is still there. When a session
+comes back to a backend with the copy that backend was already given, the
+node asks Strata how much it still holds of the conversation that starts with
+the copy's resume point (its deepest checkpoint's tokens) (`POST /slots/session?action=held`, in janit/Strata
+`v0.2.6-kvx2` and later; `v0.2.6-kvx1` asks about the session's latest
+branch on that host, which after a compaction elsewhere is the wrong one)
+and imports again when that is less than the copy. With an older fork build
+the question gets a 400, and the node imports each copy once as before; in
+the measured runs that was most of the remaining avoidable cold switches.
+
+**Where the files go.** `kv_share.dir` (the replicas a host holds for its
+peers) and the JSON's `slot_save_path` (the engine's own saves, and the file
+an import reads) are a cache: a lost or damaged file costs one cold prefill,
+never a wrong answer, so what matters is write endurance and speed, not
+durability. Every turn of a long session writes about 240 MB on the host
+that ran it and about as much on the host that receives it, and an import
+writes the whole file (about 1 GB at 50k tokens) before the engine reads it;
+a save pauses the backend's slots while it runs. Put both on a drive of their
+own, Optane where there is one, rather than on the root disk or the one the
+weights are read from. Size them at about 1 GB per 50k-token conversation
+each (`max_gib` bounds `kv_share.dir`, default 32). Mount the drive at the
+same path on every host of a group, so one JSON, and with it one
+`slot_save_path`, serves them all.
 
 ## Models from viiwork-parrot
 

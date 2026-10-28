@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/janit/viiwork/v2/energy"
+	"github.com/janit/viiwork/v2/internal/clientuse"
 	"github.com/janit/viiwork/v2/internal/config"
 )
 
@@ -169,5 +170,40 @@ func TestNewCostTracker(t *testing.T) {
 	}
 	if tr := newCostTracker(config.CostConfig{BiddingZone: "10YFI-1--------U", Timezone: "Europe/Helsinki"}, "key", &fakePower{}, logs.logf); tr == nil {
 		t.Error("E5: zone and key must build a tracker")
+	}
+}
+
+func TestClientUseAdapter(t *testing.T) {
+	now := time.Unix(1790000050, 0)
+	ledger := clientuse.NewLedger(func() time.Time { return now })
+	u := ledger.Begin("factory-a", "m")
+	now = now.Add(5 * time.Second)
+	u.End(40)
+	got := clientUse(ledger)(1790000040)
+	if len(got) != 1 || got[0] != (energy.ClientUse{Client: "factory-a", Model: "m", BusyS: 5, Tokens: 40}) {
+		t.Errorf("got %+v", got)
+	}
+}
+
+func TestOpenEnergyPassesClientSettings(t *testing.T) {
+	off := false
+	for _, tc := range []struct {
+		clients *bool
+		want    bool
+	}{{nil, true}, {&off, false}} {
+		dir := t.TempDir()
+		cfg := config.Defaults().Energy
+		cfg.Dir, cfg.Clients, cfg.ClientLanes = dir, tc.clients, 4
+		store, err := openEnergy(cfg, "UTC", []int{0}, &fakePower{}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.WriteClientMinute(1790000040, []energy.ClientShare{{Client: "factory-a", ModelIdx: 1, Wh: 1}}); err != nil {
+			t.Fatal(err)
+		}
+		if store.HasClients() != tc.want {
+			t.Errorf("energy.clients=%v: HasClients = %v", tc.clients, store.HasClients())
+		}
+		store.Close()
 	}
 }

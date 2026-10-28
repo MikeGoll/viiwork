@@ -90,19 +90,29 @@ func (t Toggle) Resolve(auto bool) bool {
 func (t Toggle) valid() bool { return t == ToggleAuto || t == ToggleOn || t == ToggleOff }
 
 type Config struct {
-	Node          NodeConfig                         `yaml:"node"`
-	API           APIConfig                          `yaml:"api"`
-	Mesh          MeshConfig                         `yaml:"mesh"`
-	Routing       RoutingConfig                      `yaml:"routing"`
-	GPU           GPUConfig                          `yaml:"gpu"`
-	Models        []Model                            `yaml:"models"`
-	Health        HealthConfig                       `yaml:"health"`
-	Activity      ActivityConfig                     `yaml:"activity"`
-	Power         PowerConfig                        `yaml:"power"`
-	Energy        EnergyConfig                       `yaml:"energy"`
-	Cost          CostConfig                         `yaml:"cost"`
-	ViiworkParrot ViiworkParrotConfig                `yaml:"viiwork_parrot"`
-	Update        UpdateConfig                       `yaml:"update"`
+	Node          NodeConfig          `yaml:"node"`
+	API           APIConfig           `yaml:"api"`
+	Mesh          MeshConfig          `yaml:"mesh"`
+	Routing       RoutingConfig       `yaml:"routing"`
+	GPU           GPUConfig           `yaml:"gpu"`
+	Models        []Model             `yaml:"models"`
+	Health        HealthConfig        `yaml:"health"`
+	Activity      ActivityConfig      `yaml:"activity"`
+	Power         PowerConfig         `yaml:"power"`
+	Energy        EnergyConfig        `yaml:"energy"`
+	Cost          CostConfig          `yaml:"cost"`
+	ViiworkParrot ViiworkParrotConfig `yaml:"viiwork_parrot"`
+	Update        UpdateConfig        `yaml:"update"`
+	// Clients names the clients of this node by source address: a name to a
+	// list of addresses or prefixes. With it, the node labels each request
+	// with its client and the energy store splits a model's energy between
+	// them. Absent, the node labels nothing. See docs/power-and-energy.md.
+	Clients map[string][]string `yaml:"clients"`
+	// ClientsReload applies a changed clients section on reload. Off by
+	// default: every section but models waits for a restart (P6 Decision 6),
+	// and this exception is a choice, because restarting an entry node
+	// interrupts every client of the mesh.
+	ClientsReload bool                               `yaml:"clients_reload"`
 	Pipelines     map[string]pipeline.PipelineConfig `yaml:"pipelines"`
 }
 
@@ -434,4 +444,14 @@ type EnergyConfig struct {
 	MinuteSlots int `yaml:"minute_slots"`
 	HourSlots   int `yaml:"hour_slots"`
 	DaySlots    int `yaml:"day_slots"`
+	// Clients keeps this node in or out of client energy. Default true, which
+	// does nothing until a named request arrives. False records nothing per
+	// client and publishes nothing, whatever labels reach the node.
+	Clients *bool `yaml:"clients"`
+	// ClientLanes is how many (client, model) pairs a minute can hold. Like a
+	// slot count it is file geometry: changing it discards the client rings.
+	ClientLanes int `yaml:"client_lanes"`
 }
+
+// ClientsOn is energy.clients with its default applied.
+func (e EnergyConfig) ClientsOn() bool { return e.Clients == nil || *e.Clients }

@@ -52,7 +52,7 @@ func (r *Router) Acquire(ctx context.Context, req Request) (*Lease, time.Duratio
 		return nil, 0, ErrQueueFull
 	}
 	w := &waiter{
-		req:      Request{Model: req.Model, Host: req.Host, Prefer: req.Prefer, EstK: req.EstK, SessionKey: req.SessionKey},
+		req:      Request{Model: req.Model, Host: req.Host, Prefer: req.Prefer, EstK: req.EstK, SessionKey: req.SessionKey, Images: req.Images},
 		enqueued: time.Now(),
 		result:   make(chan waitResult, 1),
 	}
@@ -156,7 +156,8 @@ func (r *Router) Run(ctx context.Context) {
 // to the first waiter that has one, repeating until a full scan hands out
 // nothing. Scanning past a waiter with no candidate is what keeps a request
 // pinned to a full host from stalling unpinned requests behind it (Decision 7).
-// A waiter whose model or pinned host is gone completes with that error.
+// A waiter whose model or pinned host is gone completes with that error, and so
+// does one with an image once every host says it reads none.
 //
 // Within one model's scan, once an unpinned waiter finds no free slot, every
 // later unpinned waiter would ask exactly the same question (queued requests
@@ -176,9 +177,12 @@ func (r *Router) dispatchLocked() {
 		for _, ws := range r.queues {
 			// A copy: completing a waiter edits the queue being scanned.
 			scan = append(scan[:0], ws...)
-			unpinnedFull := false
+			// A request with an image may use fewer hosts than one without,
+			// so its refusal says nothing about the requests behind it that
+			// carry none; theirs covers every unpinned request.
+			unpinnedFull, imagesFull := false, false
 			for _, w := range scan {
-				if unpinnedFull && w.req.Host == "" {
+				if w.req.Host == "" && (unpinnedFull || (imagesFull && w.req.Images)) {
 					continue
 				}
 				l, err := r.pickWithReportsLocked(w.req, reports)
@@ -186,9 +190,11 @@ func (r *Router) dispatchLocked() {
 				case err == nil:
 					r.completeLocked(w, waitResult{lease: l})
 					progressed = true
-				case errors.Is(err, ErrModelNotFound), errors.Is(err, ErrHostNotServing):
+				case errors.Is(err, ErrModelNotFound), errors.Is(err, ErrHostNotServing), errors.Is(err, ErrNoImageInput):
 					r.completeLocked(w, waitResult{err: err})
 					progressed = true
+				case w.req.Host == "" && w.req.Images:
+					imagesFull = true
 				case w.req.Host == "":
 					unpinnedFull = true
 				}

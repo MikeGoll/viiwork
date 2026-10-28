@@ -27,7 +27,7 @@ that silently meant "llama.cpp for gfx906" as though no other kind existed.
 ## `docker/Dockerfile.rocm`
 
 Standard upstream llama.cpp from `ggml-org/llama.cpp`, pinned to a release tag
-(currently `b11371`, which carries Qwen3.5/3.6/3.8 hybrid DeltaNet support and
+(currently `b11804`, which carries Kolibri-1, Qwen3.5/3.6/3.8 hybrid DeltaNet support and
 MTP speculative decoding) and patched for the gfx906 FP8 header
 incompatibility. Built on `rocm/dev-ubuntu-24.04:6.2.4-complete` — the last
 ROCm with reliable gfx906 support.
@@ -59,7 +59,7 @@ docker build --build-arg LLAMA_CPP_VERSION=<tag> -f docker/Dockerfile.rocm -t vi
 ## `docker/Dockerfile.vllm`
 
 The binary dropped into vLLM's own published image, `vllm/vllm-openai`, pinned
-by `VLLM_VERSION` (currently `v0.30.0`). Nothing is rebuilt: that image already
+by `VLLM_VERSION` (currently `v0.32.0`). Nothing is rebuilt: that image already
 carries a matched torch, CUDA and kernel set, and rebuilding the stack is how
 you end up with a torch that disagrees with the driver.
 
@@ -99,6 +99,35 @@ build is slow (torch and its CUDA wheels) and the image is several GB.
 
 Build: `make docker-freetoken`, off-peak.
 
+### FreeToken 0.2.0 is the pin
+
+`FREETOKEN_VERSION` defaults to `0.2.0`; 0.1.3 is still the floor. The command
+line viiwork generates is unchanged: every flag it passes (`--model`,
+`--served-model-name`, `--host`, `--port`, `--moe-strategy`, `--memory-ratio`,
+`--max-running-requests`, `--max-seq-len-override`, `--kv-reserve-tokens`) is
+in 0.2.0's `ft serve`, and `/health` and `/v1/stats` are still where the probes
+look. What an upgrading host has to check:
+
+- **Old FTW checkpoints.** A Qwen3.5 / Qwen3.6 / Qwen3.8-27B FTW from an older
+  build **loads without an error and answers wrongly** (its norm weights
+  already hold the +1 that 0.2.0 now adds at run time). Experts converted with
+  `--moe-backend fused` or `triton`, NVFP4 FTWs with fp16 global scales and
+  Muse-Glimmer FTWs with a fused `qkvg_proj` are refused at load. Reconvert
+  with `ft checkpoint`. HF checkpoints and GGUF files are not affected.
+- **`FREETOKEN_API_KEY` in `ft serve`'s environment now turns authentication
+  on.** The node already clears it for the backend (`FREETOKEN_API_KEY=`, which
+  0.2.0 reads as unset) and refuses `--api-key` in `args:` and the variable in
+  `env:` (v2.10.3, v2.10.4), so a node keeps probing and forwarding without a
+  key. Behind a node older than v2.10.3, an inherited key would put every route
+  but `/health` behind auth.
+- **`--moe-strategy auto` no longer picks `hybrid`** from an `ft bench bw`
+  profile, and profiles from older builds are ignored. A host that relied on it
+  sets `moe_backend: hybrid` and reruns `ft bench bw --model <checkpoint>`.
+- **0.2.0 serves GGUF files** (`ft serve --model <file>.gguf`; no image input
+  from GGUF yet). The node passes `models[].path` through as `--model`, but
+  no GGUF has been served under viiwork yet. The kernel cache resolves to the published
+  `freetoken_kernel_cache-0.2.0+cu130` wheel. torch moves to 2.14.
+
 ### FreeToken 0.1.3 is the floor (viiwork 2.3.0)
 
 `FREETOKEN_VERSION` defaults to `0.1.3` rather than to empty, so a rebuild
@@ -137,10 +166,12 @@ installed release resolves to the published
 ## `docker/Dockerfile.strata` and `docker/Dockerfile.strata-cuda`
 
 [Strata](https://github.com/Niko1221/Strata) at the tag `STRATA_VERSION` pins in
-`docker/pins.env` (currently `v0.1.40.1`), with `viiwork` added. Two files rather
-than one with a build argument, because the engine is compiled differently for
-each accelerator. In both images the checkout is `/opt/strata`, which is what
-`models[].strata.dir` names.
+`docker/pins.env` (currently `v0.2.3`), with `viiwork` added. Two files rather
+than one with a build argument, because the gfx906 image compiles the engine
+and the CUDA image does not, and the two lay Strata out differently: the
+model's block and the JSON name different paths on each
+([docs/models.md](docs/models.md#strata-one-moe-family-across-several-cards)
+has the table).
 
 **`Dockerfile.strata` is the gfx906 build** (Radeon VII, Instinct MI50 / MI60).
 
@@ -149,33 +180,51 @@ each accelerator. In both images the checkout is `/opt/strata`, which is what
   upstream's own `docs/AMD_HIP.md` documents. AMD's ROCm no longer ships
   gfx906 libraries, so this image does not sit on the ROCm 6.2.4 base the
   llama.cpp image uses.
-- **Strata v0.1.40.1 does not compile for gfx906 as released, and compiled it
-  fails the first long prompt after a load.**
-  `docker/strata/gfx906-v0.1.40.1.patch` carries four fixes, all inside the
-  gfx906 build: `fused_gr_read_multi` became a `bool` function in v0.1.40 and
-  its gfx906-only branch (`STRATA_GR_SPLIT=1`, off by default) still returns
-  nothing; `vmm.cpp` compiles the CUDA driver API out for `STRATA_USE_HIP` but
-  not for `STRATA_HIP_GFX906`; two stream-priority names have no HIP alias;
-  and a checkpoint's state is copied on a stream of the saving thread's own.
-  The last is the cause of `saving a checkpoint part failed`: on the default
-  stream HIP refuses the copy while another thread captures its prompt graphs
-  (CUDA's thread-local capture mode lets it through), and the refusal
-  invalidates that capture too. The patch is named for the version and must
-  be re-cut when `STRATA_VERSION` changes. Not reported upstream as of
-  2026-10-07.
-- The engine binary is `/opt/strata/build-906/strata`: the Strata JSON's `exe`.
+- **The checkout is `/opt/strata`**, built in place as `docs/AMD_HIP.md`
+  does: `strata: {dir: /opt/strata}` and the JSON's `exe`
+  `/opt/strata/build-906/strata`, as at 0.1.x. Upstream's 0.2 Terminal and
+  engine packages are release archives this build does not make.
+- **`docker/strata/gfx906-v0.2.3.patch` carries one fix**: HIP aliases in
+  `strata_hip.h` for `cudaDeviceGetStreamPriorityRange` and
+  `cudaStreamCreateWithPriority`, which `src/core/dflash2.cpp` (new in 0.2)
+  calls on every build; without them the engine does not compile (built
+  without the patch on 2026-10-24 to check). The v0.1.45 patch's other three
+  fixes are gone: the two CMake ones are upstream since 0.2.1, and the cuBLAS
+  aliases were for the Qwen3.6 engine, which a gfx906 build no longer
+  compiles (`strata --families` lists `qwen4exp`, Qwen3.8-Flash-Next). The
+  patch is named for the version and must be re-cut when `STRATA_VERSION`
+  changes; `scripts/pins_test.sh` checks that the file the Dockerfile names
+  exists.
+- **v0.2.3 is compiled, not yet served on a card.** v0.1.45 served
+  Qwen3.8-Flash-Next under viiwork on 2026-10-18, one backend on four Radeon
+  VIIs and an MI60 (a 104k-token prompt read at 959 tok/s).
 - The image has no group named `render`. Give the container the host's render
   group by number, as `docker/compose.strata.yaml` does (`RENDER_GID`); with
   the name the container does not start.
 
-**`Dockerfile.strata-cuda` is two builds.** Upstream publishes a Dockerfile, not
-an image, so `make docker-strata-cuda` first builds upstream's image from the
-pinned tag (`strata-cuda:<version>`) and then drops `viiwork` into it — the same
-shape as `Dockerfile.vllm`. Python packages are in a venv there, so the model's
-block is `strata: {dir: /opt/strata, python: /opt/strata/.venv/bin/python}` and
-the JSON's `exe` is `/opt/strata/engine/strata`. It needs GPUs granted like the
-other two NVIDIA images (below). It has served under viiwork on three RTX A4000 at the model's full
-262,144-token context ([models.md](docs/models.md)).
+**`Dockerfile.strata-cuda` sits on upstream's image.** Since 0.2.1 upstream
+publishes ready-made images, so this is the same shape as `Dockerfile.vllm`:
+`STRATA_CUDA_IMAGE` (`ghcr.io/niko1221/strata:0.2.3-cuda13`, held by digest;
+its `/opt/strata/terminal/COMMIT` is `STRATA_COMMIT`) with `viiwork` added.
+Nothing is compiled, and the legacy builder works.
+
+- **cuda13 needs NVIDIA driver 580 or newer.** Its engine is built for sm_75,
+  86, 89 and 120 plus PTX: RTX 20 to 50 and the A4000.
+- **The layout is upstream's 0.2 one**: the server and its Python in the
+  Terminal (`strata: {dir: /opt/strata/terminal, python:
+  /opt/strata/terminal/python/bin/python3}`) and the engine in a component
+  package, `/opt/strata/components/engine/0.1.48-linux-x86_64-cuda-cuda13/`,
+  which is the JSON's `exe` directory and its `lib_dirs`. With the 0.1.x
+  paths (`/opt/strata`, `/opt/strata/.venv/bin/python`,
+  `/opt/strata/engine/strata`) the backend dies at launch: **moving a CUDA
+  node from v2.11.0-beta1's image means editing its `strata:` block and
+  JSON in the same step.**
+- **No curl and no `python3` on PATH.** A compose healthcheck has to use
+  `/opt/strata/terminal/python/bin/python3` (urllib) instead.
+- Served under viiwork on an RTX A4000 on 2026-10-24 (load about 50 s;
+  chat, tool call and JSON output correct; decode 46 to 53 tok/s once the
+  expert cache was warm, the same as the kv_share fork on the card beside
+  it). It needs GPUs granted like the other two NVIDIA images (below).
 
 What an operator will not guess, for either image:
 
@@ -198,7 +247,7 @@ Neither engine has to be in a container — `models[].vllm.binary` and
 works and is the simpler shape for a FreeToken host. Two things bite, both
 found bringing this up on teddy:
 
-- **Python must be older than 3.15.** vLLM 0.30.0 requires `>=3.10,<3.15` (0.11.2
+- **Python must be older than 3.15.** vLLM 0.31.0 requires `>=3.10,<3.15` (0.11.2
   required `<3.14`), and a host whose `python3` is newer cannot install it at all — pip reports only that
   no version satisfies the requirement, without saying why. `uv python install
   3.12` and `uv venv --python 3.12` is the quickest fix and touches no system
