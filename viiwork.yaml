@@ -3,7 +3,7 @@ server:
   port: 8080
 
 model:
-  path: models/Qwen3.8-27B-UD-Q8_K_XL.gguf
+  path: models/Qwen3.8-27B-UD-Q4_K_XL.gguf
   #context_size: 65536
   context_size: 131072
   n_gpu_layers: -1
