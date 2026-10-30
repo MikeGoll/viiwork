@@ -216,3 +216,20 @@ func TestModelsAdvertiseToolCalling(t *testing.T) {
 		t.Error("Tools is false: no client would run this model as an agent")
 	}
 }
+
+// A model reads images for a client only when the fleet says yes. "No" and
+// "cannot say" both leave it a text model.
+func TestImagesComeFromTheFleetView(t *testing.T) {
+	yes, no := true, false
+	src := fakeSource{
+		entries: []meshapi.ModelEntry{entry("a", meshapi.OwnedByLocal), entry("b", meshapi.OwnedByLocal), entry("c", meshapi.OwnedByLocal),
+			{ID: "pic", OwnedBy: meshapi.OwnedByAlias, Target: "a"}},
+		fleet: []meshapi.FleetModel{{Name: "a", Images: &yes}, {Name: "b", Images: &no}, {Name: "c"}},
+	}
+	got := Models(src)
+	for name, want := range map[string]bool{"a": true, "b": false, "c": false, "pic": true} {
+		if m, _ := byName(got, name); m.Images != want {
+			t.Errorf("%s: Images = %v, want %v", name, m.Images, want)
+		}
+	}
+}

@@ -144,11 +144,56 @@ func (p *Process) RSSMB() int64 {
 	return pages * pageSize / (1 << 20)
 }
 
-// descendants returns root and every process under it, breadth-first, found
-// from parent links in <procRoot>/<pid>/stat. The command name in a stat line
-// is parenthesised and may itself contain spaces and parentheses, so the parent
-// PID is read from the fields after the last ')'.
+// descendants returns root and every process under it, breadth-first. It walks
+// the tree's own <pid>/task/<tid>/children lists where the kernel has them:
+// with pid: host, reading every host process's stat is a ptrace read of an
+// unconfined peer, which docker-default AppArmor denies and logs on every
+// health tick, while the tree's own processes share the node's profile.
+// Without those lists it falls back to scanning every <procRoot>/<pid>/stat.
 func descendants(procRoot string, root int) []int {
+	if _, err := os.Stat(filepath.Join(procRoot, strconv.Itoa(root), "task", strconv.Itoa(root), "children")); err == nil {
+		out := []int{root}
+		for i := 0; i < len(out); i++ {
+			kids := childrenOf(procRoot, out[i])
+			slices.Sort(kids)
+			for _, k := range kids {
+				if !slices.Contains(out, k) {
+					out = append(out, k)
+				}
+			}
+		}
+		return out
+	}
+	return scanDescendants(procRoot, root)
+}
+
+// childrenOf is the union of pid's threads' children lists; a process that
+// has exited has none.
+func childrenOf(procRoot string, pid int) []int {
+	tasks, err := os.ReadDir(filepath.Join(procRoot, strconv.Itoa(pid), "task"))
+	if err != nil {
+		return nil
+	}
+	var kids []int
+	for _, t := range tasks {
+		data, err := os.ReadFile(filepath.Join(procRoot, strconv.Itoa(pid), "task", t.Name(), "children"))
+		if err != nil {
+			continue
+		}
+		for _, f := range strings.Fields(string(data)) {
+			if k, err := strconv.Atoi(f); err == nil && !slices.Contains(kids, k) {
+				kids = append(kids, k)
+			}
+		}
+	}
+	return kids
+}
+
+// scanDescendants finds the tree from parent links in <procRoot>/<pid>/stat.
+// The command name in a stat line is parenthesised and may itself contain
+// spaces and parentheses, so the parent PID is read from the fields after the
+// last ')'.
+func scanDescendants(procRoot string, root int) []int {
 	entries, err := os.ReadDir(procRoot)
 	if err != nil {
 		return []int{root}

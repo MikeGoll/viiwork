@@ -15,9 +15,9 @@ import (
 const maxBody = 4 << 20
 
 // get fetches http://<addr><path>. The caller's context is the only deadline.
-// The body is read through maxBody, then the rest drained and closed, so the
-// connection goes back to the pool: the load poll runs every second per
-// backend.
+// The body is read through maxBody and closed; Close drains what is left
+// (net/http, Go 1.27), so the connection goes back to the pool: the load poll
+// runs every second per backend.
 func (e *Engine) get(ctx context.Context, addr, path string) (int, []byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+addr+path, nil)
 	if err != nil {
@@ -33,7 +33,6 @@ func (e *Engine) get(ctx context.Context, addr, path string) (int, []byte, error
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBody))
-	_, _ = io.Copy(io.Discard, resp.Body)
 	if err != nil {
 		return resp.StatusCode, nil, err
 	}

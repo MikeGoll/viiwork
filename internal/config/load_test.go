@@ -343,3 +343,22 @@ func TestRoutingPerformanceDefaultsOn(t *testing.T) {
 		t.Fatal("routing.performance: false must switch it off")
 	}
 }
+
+func TestClientKeys(t *testing.T) {
+	base := "mesh:\n  open: true\n"
+	cfg, err := Parse([]byte(base))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Clients != nil || cfg.ClientsReload || !cfg.Energy.ClientsOn() || cfg.Energy.ClientLanes != 8 {
+		t.Errorf("defaults: clients=%v reload=%v on=%v lanes=%d", cfg.Clients, cfg.ClientsReload, cfg.Energy.ClientsOn(), cfg.Energy.ClientLanes)
+	}
+
+	cfg, err = Parse([]byte(base + "clients:\n  factory-a: [100.64.0.10]\n  batch-b: [100.64.0.20, 100.64.1.0/24]\nclients_reload: true\nenergy:\n  clients: false\n  client_lanes: 16\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Clients) != 2 || len(cfg.Clients["batch-b"]) != 2 || !cfg.ClientsReload || cfg.Energy.ClientsOn() || cfg.Energy.ClientLanes != 16 {
+		t.Errorf("written: %+v reload=%v on=%v lanes=%d", cfg.Clients, cfg.ClientsReload, cfg.Energy.ClientsOn(), cfg.Energy.ClientLanes)
+	}
+}

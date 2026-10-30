@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/janit/viiwork/v2/internal/activity"
+	"github.com/janit/viiwork/v2/internal/clientuse"
 	"github.com/janit/viiwork/v2/internal/engine"
 	"github.com/janit/viiwork/v2/internal/pipeline"
 	"github.com/janit/viiwork/v2/internal/route"
@@ -155,8 +156,10 @@ type handlerFx struct {
 	perf         PerfRecorder
 	usage        func(string) engine.UsageReporting
 	separate     func(string) bool
-	performance  bool           // routing.performance: the scored pick
-	rand         func() float64 // the router's draws, for the scored pick
+	performance  bool              // routing.performance: the scored pick
+	rand         func() float64    // the router's draws, for the scored pick
+	clients      *clientuse.Table  // the clients section; nil = none
+	ledger       *clientuse.Ledger // nil = no client energy on this node
 
 	counters *Counters
 	log      *activity.Log
@@ -195,6 +198,8 @@ func (f *handlerFx) build() *handlerFx {
 		Perf:              f.perf,
 		Usage:             f.usage,
 		SeparateReasoning: f.separate,
+		Clients:           func() *clientuse.Table { return f.clients },
+		ClientUse:         f.ledger,
 	})
 	return f
 }

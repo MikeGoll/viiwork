@@ -7,12 +7,14 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/netip"
 	"sort"
 	"strconv"
 	"time"
 
 	"github.com/janit/viiwork/v2/internal/activity"
 	"github.com/janit/viiwork/v2/internal/api"
+	"github.com/janit/viiwork/v2/internal/clientuse"
 	"github.com/janit/viiwork/v2/internal/discovery"
 	"github.com/janit/viiwork/v2/internal/engine"
 	"github.com/janit/viiwork/v2/internal/httpjson"
@@ -20,6 +22,7 @@ import (
 	"github.com/janit/viiwork/v2/internal/perf"
 	"github.com/janit/viiwork/v2/internal/pipeline"
 	"github.com/janit/viiwork/v2/internal/route"
+	"github.com/janit/viiwork/v2/internal/sessionshare"
 	"github.com/janit/viiwork/v2/meshapi"
 )
 
@@ -78,6 +81,23 @@ type Deps struct {
 	// from the answer (engine.ReasoningSeparator). nil = no: untagged
 	// reasoning is renamed to content, the rule llama-server needs.
 	SeparateReasoning func(model string) bool
+	// Clients is this node's clients section as a table. nil, or a nil
+	// table, names nobody. A function, so a reload can swap the table.
+	Clients func() *clientuse.Table
+	// ClientUse measures busy slot time per client for the energy store. nil
+	// = this node keeps no client energy; it still labels its forwards.
+	ClientUse *clientuse.Ledger
+	// Sessions is kv_share (*sessionshare.Manager). nil = off.
+	Sessions SessionSharing
+}
+
+// SessionSharing is kv_share as the proxy uses it: around every local turn
+// of a client session, and the group published on /v1/capacity.
+type SessionSharing interface {
+	BeforeLocal(ctx context.Context, model, raw string, key uint64, b sessionshare.Backend)
+	AfterLocal(model, raw string, key uint64, b sessionshare.Backend, promptTokens int64)
+	Group(model string) string
+	ImportCost(model string) (msPer1k int, ok bool)
 }
 
 // PerfRecorder is *perf.Tracker as the proxy uses it.
@@ -178,7 +198,9 @@ func (h *Handler) handleInference(w http.ResponseWriter, r *http.Request, dialec
 	}
 
 	_, forwarded := h.d.Auth.Verify(r, body)
+	label := r.Header.Get(meshapi.HeaderClient)
 	stripMeshHeaders(r.Header)
+	client := h.clientOf(r, forwarded, label)
 
 	if !forwarded && h.d.Pipelines != nil {
 		if p, locale, localeKey, ok := h.d.Pipelines.Resolve(fields.Model); ok {
@@ -261,7 +283,9 @@ func (h *Handler) handleInference(w http.ResponseWriter, r *http.Request, dialec
 	// Forwards leave no prompt history: the origin already has it (Decision 12).
 	d := &dispatch{
 		model: model, alias: alias, host: host, prefer: prefer, taskID: taskID, body: body,
-		forwarded: forwarded, thinkDisabled: thinkDisabled,
+		forwarded: forwarded, thinkDisabled: thinkDisabled, client: client,
+		// A forward is not looked at: its origin chose this node for it.
+		images: !forwarded && hasImageParts(body),
 		record: !forwarded && h.d.Activity != nil, start: start, capture: capture,
 	}
 	if d.record {
@@ -287,7 +311,9 @@ type dispatch struct {
 	model, alias, host, taskID string
 	body                       []byte
 	prefer                     []string // ?prefer= list, nil with a pin or on a forward
+	client                     string   // the client's name, "" = no label (see clientOf)
 	forwarded, thinkDisabled   bool
+	images                     bool  // the request carries an image (see hasImageParts)
 	outTokens, genMS           int64 // the reply's completion tokens and generation time, 0 = not known
 	record                     bool  // emit activity events (the origin only)
 	rid                        int64
@@ -298,16 +324,23 @@ type dispatch struct {
 	localBuilt                 bool
 }
 
+// sessionHeader is the request's session as the client sent it: the first
+// non-empty of X-Session-Affinity and X-Session-Id, the order Strata's
+// kv-export reads them in too. Client headers, never stripped as mesh
+// headers, and forwarded to members and engines as they are.
+func sessionHeader(r *http.Request) string {
+	if v := r.Header.Get("X-Session-Affinity"); v != "" {
+		return v
+	}
+	return r.Header.Get("X-Session-Id")
+}
+
 // sessionKey is the request's session for the scored pick's stickiness: FNV-1a
-// 64 over the first non-empty of X-Session-Affinity and X-Session-Id, 0 when
-// the client sends neither. Client headers, never stripped as mesh headers.
+// 64 over sessionHeader, 0 when the client sends neither.
 func sessionKey(r *http.Request) uint64 {
-	v := r.Header.Get("X-Session-Affinity")
+	v := sessionHeader(r)
 	if v == "" {
-		v = r.Header.Get("X-Session-Id")
-		if v == "" {
-			return 0
-		}
+		return 0
 	}
 	h := uint64(14695981039346656037)
 	for i := 0; i < len(v); i++ {
@@ -334,7 +367,7 @@ func sessionKey(r *http.Request) uint64 {
 func (h *Handler) dispatch(w http.ResponseWriter, r *http.Request, d *dispatch) {
 	estK := float64(len(d.body)) / 4000 // ~4 bytes per token; the entry cannot see caches
 	session := sessionKey(r)
-	lease, queued, err := h.d.Router.Acquire(r.Context(), route.Request{Model: d.model, Host: d.host, Prefer: d.prefer, Forwarded: d.forwarded, EstK: estK, SessionKey: session})
+	lease, queued, err := h.d.Router.Acquire(r.Context(), route.Request{Model: d.model, Host: d.host, Prefer: d.prefer, Forwarded: d.forwarded, EstK: estK, SessionKey: session, Images: d.images})
 	if err != nil {
 		if d.forwarded && errors.Is(err, route.ErrModelNotFound) {
 			// The origin chose this node from a report that still listed
@@ -379,10 +412,7 @@ func (h *Handler) dispatch(w http.ResponseWriter, r *http.Request, d *dispatch) 
 			// every such request would count no tokens.
 			var tokens int64
 			if d.record || t.Local {
-				tokens, _ = d.capture.CompletionTokens()
-				if n, ok := completionTokensFromEvent(res.StrippedUsage); ok {
-					tokens = n
-				}
+				tokens = completionTokens(d.capture, res)
 			}
 			if d.record {
 				// For the /prompt page's average rate.
@@ -402,6 +432,7 @@ func (h *Handler) dispatch(w http.ResponseWriter, r *http.Request, d *dispatch) 
 			if t.Local {
 				h.d.Counters.Add(d.model, tokens)
 				h.recordPerf(d.model, res, d.capture)
+				h.afterSessionTurn(r, d, res, lease.Backend(), session)
 			}
 			if res.Truncated {
 				// The headers are out, so the status cannot say it failed; a
@@ -442,7 +473,7 @@ func (h *Handler) dispatch(w http.ResponseWriter, r *http.Request, d *dispatch) 
 		tried[t.Key()] = true
 		if retries < h.d.ForwardRetry {
 			retries++
-			if next, err := h.d.Router.Pick(route.Request{Model: d.model, Host: d.host, Prefer: d.prefer, Exclude: tried, EstK: estK, SessionKey: session}); err == nil {
+			if next, err := h.d.Router.Pick(route.Request{Model: d.model, Host: d.host, Prefer: d.prefer, Exclude: tried, EstK: estK, SessionKey: session, Images: d.images}); err == nil {
 				lease = next
 				continue
 			}
@@ -455,7 +486,7 @@ func (h *Handler) dispatch(w http.ResponseWriter, r *http.Request, d *dispatch) 
 			budget = -1
 		}
 		var waited time.Duration
-		lease, waited, err = h.d.Router.Acquire(r.Context(), route.Request{Model: d.model, Host: d.host, Prefer: d.prefer, QueueBudget: budget, EstK: estK, SessionKey: session})
+		lease, waited, err = h.d.Router.Acquire(r.Context(), route.Request{Model: d.model, Host: d.host, Prefer: d.prefer, QueueBudget: budget, EstK: estK, SessionKey: session, Images: d.images})
 		queued += waited
 		if err != nil {
 			h.endUnserved(d, label)
@@ -487,6 +518,24 @@ func (h *Handler) localBodyFor(d *dispatch) ([]byte, bool) {
 		}
 	}
 	return d.localBody, d.localStrip
+}
+
+// afterSessionTurn hands a session's completed local turn to kv_share with
+// the prompt's length, which decides whether the conversation is worth
+// replicating. Only a whole 200: a cut or failed turn leaves the engine's
+// state where the next turn will not resume from it.
+func (h *Handler) afterSessionTurn(r *http.Request, d *dispatch, res execResult, b route.LocalBackend, key uint64) {
+	if h.d.Sessions == nil || key == 0 || res.Status != http.StatusOK || res.Aborted || res.Truncated || b == nil {
+		return
+	}
+	u, ok := promptUsageFromEvent(res.StrippedUsage)
+	if !ok {
+		u, ok = d.capture.PromptUsage()
+	}
+	if !ok {
+		return
+	}
+	h.d.Sessions.AfterLocal(d.model, sessionHeader(r), key, b, u.Prompt)
 }
 
 // recordPerf records one local serve's service TTFT (spec §1): only a 200
@@ -522,26 +571,51 @@ func (h *Handler) recordPerf(model string, res execResult, c *captureWriter) {
 // every path out, a panic included: a slot that is never released is lost
 // until the process restarts. A panic also closes the request's dashboard row
 // as aborted before it propagates.
+//
+// A local attempt is also the client ledger's busy time: Begin once the slot
+// is leased, End where the lease is released. An attempt on a peer does not
+// touch the ledger; the peer's own counts it.
 func (h *Handler) attempt(w http.ResponseWriter, r *http.Request, lease *route.Lease, d *dispatch, label string) (res execResult) {
+	t := lease.Target()
+	var use clientuse.Use
 	defer func() {
+		rv := recover()
+		if use.Active() {
+			var tokens int64
+			if rv == nil && res.Outcome == outcomeServed {
+				tokens = completionTokens(d.capture, res)
+			}
+			use.End(tokens)
+		}
 		lease.Release()
-		if rv := recover(); rv != nil {
+		if rv != nil {
 			if d.record {
 				h.d.Activity.EmitRequestTask(d.rid, -1, d.taskID, "%s", meshapi.RequestAborted(d.model, label, time.Since(d.start).Round(time.Millisecond)))
 			}
 			panic(rv)
 		}
 	}()
-	t := lease.Target()
 	if t.Local {
 		body, strip := h.localBodyFor(d)
+		use = h.d.ClientUse.Begin(d.client, d.model)
+		if h.d.Sessions != nil {
+			// Inside the lease and on the client's clock: a spilled turn
+			// waits for its replica's import, which its prefill then saves.
+			if raw := sessionHeader(r); raw != "" {
+				h.d.Sessions.BeforeLocal(r.Context(), d.model, raw, sessionKey(r), lease.Backend())
+			}
+		}
+		// After the import: a spilled turn has few uncached tokens, and
+		// counting its import as time to first token would raise this
+		// node's published overhead, sending traffic away from the host
+		// that holds the replicas. Import cost is published on its own.
 		granted := time.Now()
 		separate := h.d.SeparateReasoning != nil && h.d.SeparateReasoning(d.model)
 		res = serveLocal(w, r, body, lease.Backend(), d.model, h.d.Self, d.thinkDisabled, strip, separate)
 		res.Granted = granted
 		return res
 	}
-	res = forwardToPeer(w, r, d.body, t, h.d.Auth, h.d.Self)
+	res = forwardToPeer(w, r, d.body, t, h.d.Auth, h.d.Self, d.client)
 	if res.Outcome == outcomeRetryable {
 		lease.Refused() // before Release: its wake must not hand the peer back (Decision 18)
 	}
@@ -600,6 +674,11 @@ func (h *Handler) writeAcquireError(w http.ResponseWriter, err error, model, hos
 		httpjson.Error(w, http.StatusNotFound, errTypeNotFound, fmt.Sprintf("model %q not found", model))
 	case errors.Is(err, route.ErrHostNotServing):
 		httpjson.Error(w, http.StatusNotFound, errTypeNotFound, fmt.Sprintf("model %q is not served by host %q", model, host))
+	case errors.Is(err, route.ErrNoImageInput) && host != "":
+		// The pin is the whole question: other nodes may well read images.
+		httpjson.Error(w, http.StatusBadRequest, errTypeInvalidRequest, fmt.Sprintf("model %q does not read images on host %q", model, host))
+	case errors.Is(err, route.ErrNoImageInput):
+		httpjson.Error(w, http.StatusBadRequest, errTypeInvalidRequest, fmt.Sprintf("model %q does not read images on any node", model))
 	case errors.Is(err, route.ErrNoFreeSlot):
 		httpjson.Error(w, http.StatusTooManyRequests, meshapi.ErrTypeRateLimit, "no free slot")
 	case errors.Is(err, route.ErrQueueFull):
@@ -694,6 +773,14 @@ func (h *Handler) handleCapacity(w http.ResponseWriter) {
 	models := make([]meshapi.ModelCapacity, len(local))
 	for i, m := range local {
 		m.Queued = h.d.Router.QueueLen(m.Name)
+		if h.d.Sessions != nil {
+			m.KVShareGroup = h.d.Sessions.Group(m.Name)
+			if m.KVShareGroup != "" {
+				if c, ok := h.d.Sessions.ImportCost(m.Name); ok {
+					m.KVShareImportMsPer1k = c
+				}
+			}
+		}
 		if h.d.PublishPerf && h.d.Perf != nil {
 			if s, ok := h.d.Perf.Score(m.Name); ok {
 				m.TTFTOverheadMs, m.PrefillMsPer1k, m.PerfSamples = s.OverheadMs, s.MsPer1k, s.Samples
@@ -713,4 +800,50 @@ func recordReply(l *activity.Log, rid int64, model, output string, elapsed time.
 	if output != "" {
 		l.StoreUsage(rid, outTokens, genMS)
 	}
+}
+
+// completionTokens is a served response's completion tokens: the capture's
+// count, or the stripped usage event's when the client did not ask for usage.
+// Call it only once the response is complete: the capture caches its first
+// answer, so asking after an attempt that wrote nothing would fix it at zero
+// for the attempt that does.
+func completionTokens(c *captureWriter, res execResult) int64 {
+	tokens, _ := c.CompletionTokens()
+	if n, ok := completionTokensFromEvent(res.StrippedUsage); ok {
+		tokens = n
+	}
+	return tokens
+}
+
+// clientOf names the client of a request, for client energy. The entry node
+// decides from the source address of the connection, never from a header: a
+// label a client sends is already gone (stripMeshHeaders). A verified forward
+// carries the name its entry node resolved.
+//
+// "" is "no label", which is not the same as Other. A node with no clients
+// section labels nothing it receives directly, so a mesh where nobody named a
+// client sends no header and counts nothing. Other is for a node that does
+// name clients and met an address, or a forward, without a name.
+func (h *Handler) clientOf(r *http.Request, forwarded bool, label string) string {
+	var table *clientuse.Table
+	if h.d.Clients != nil {
+		table = h.d.Clients()
+	}
+	if forwarded {
+		if clientuse.ValidName(label) {
+			return label
+		}
+		if table != nil {
+			return clientuse.Other
+		}
+		return ""
+	}
+	if table == nil {
+		return ""
+	}
+	src, err := netip.ParseAddrPort(r.RemoteAddr)
+	if err != nil {
+		return clientuse.Other
+	}
+	return table.Lookup(src.Addr())
 }

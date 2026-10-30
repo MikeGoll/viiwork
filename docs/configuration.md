@@ -77,7 +77,7 @@ with the `models[]` entry:
 |---|---|
 | `model_name`, or one of `aliases` | `name` |
 | `--max-context` in `args` | `context` |
-| `parallel` | absent or 1, and the entry's `parallel` must be 1: Strata v0.1.40.1 reports one slot whatever its own `parallel` says |
+| `parallel` | the same number as the entry's `parallel` (absent is 1), from 1 to 8. Above 1 needs Strata v0.1.41, which lists its batch slots on `/slots`; an older build publishes one slot whatever the file says |
 | `lazy_load`, `idle_unload_s` | off — an unloaded server looks dead to the node |
 | `api_key` | not set — the node probes and forwards without a key, and the backend listens on loopback only |
 
@@ -93,6 +93,19 @@ absolute path), `python` (default `python3`) and `warmup` (default `30s`,
 has loaded before the node sends it work. It shows as phase `warming up`.
 Engine tuning stays in the JSON's `args`, where upstream puts it. See
 [models.md](models.md#strata-one-moe-family-across-several-cards).
+
+`strata.kv_share` (off unless written) shares a model's client sessions
+between the members of a group, so that a turn that spills to another host
+resumes from the conversation instead of prefilling it again:
+`group` (required), `min_tokens` (default 8192), `max_gib` (default 32),
+`dir` (default `<state_dir>/kvshare/<model>`; a directory the node claims, so it must be
+new or empty: one that already holds anything else is refused and the model shares nothing) and `transport` (`http`, the
+only one, over the API port). The JSON must name a `slot_save_path` the node
+can read and write and must not turn the engine's conversation cache off
+(`--conversation-cache-mib` 0), and a backend must have one card. Both
+directories are a write-heavy cache, about 240 MB per long-session turn:
+give them a drive of their own, mounted at the same path on every host of
+the group. See [models.md](models.md#sharing-sessions-between-hosts-kv_share).
 
 ## Tensor-split mode
 
@@ -112,6 +125,27 @@ models:
     llamacpp:
       split_mode: layer      # "layer" is the only mode that works on gfx906
 ```
+
+A llama.cpp model reads images when it is started with its vision projector.
+Name the file in the model's block; it is an absolute path, as the node sees
+it (`/models/...` in a container):
+
+```yaml
+models:
+  - name: gemma-4-12B-it
+    engine: llamacpp
+    path: /models/gemma-4-12B-it-Q4_K_M.gguf
+    gpus: [0]
+    context: 16384
+    parallel: 2
+    llamacpp:
+      mmproj: /models/mmproj-gemma-4-12B-it-F16.gguf
+```
+
+The node passes it as `--mmproj`, refuses a file that is not a projector, and
+tells the mesh that this model reads images here. See
+[models.md](models.md#models-that-read-images) for what the mesh does with
+that.
 
 Trade-offs against one backend per GPU:
 
@@ -138,6 +172,10 @@ in [models.md](models.md); the design record is
 models start, removed ones drain and stop, and a changed entry restarts that
 model only. The whole file is re-validated first, so a bad edit is refused
 rather than half-applied.
+
+The `clients` section is also applied on reload when the file sets
+`clients_reload: true`. Without that it waits for a restart, and the reload's
+log line says so.
 
 `viiwork init` writes this file on a new machine, checked by the same
 validation the node runs; see [setup.md](setup.md). To write it by hand, start
@@ -207,6 +245,17 @@ routing:
 with a free slot, else the member with the most free slots — stops this node
 publishing its scores, and makes it ignore session headers. What the scores
 are and how a session header is used: [mesh.md](mesh.md#routing).
+
+## Clients (`clients`)
+
+| Key | Default | Meaning |
+|---|---|---|
+| `clients` | none | A name to a list of source addresses or prefixes. Names the clients of this node for energy per client. |
+| `clients_reload` | `false` | Apply a changed `clients` section on reload. |
+| `energy.clients` | `true` | `false` keeps this node out of energy per client. |
+| `energy.client_lanes` | `8` | Client and model pairs per minute, 2 to 64. Changing it discards the client rings. |
+
+See "Energy per client" in `docs/power-and-energy.md`.
 
 ## Client discovery
 

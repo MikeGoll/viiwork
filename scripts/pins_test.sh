@@ -20,8 +20,13 @@ check "Dockerfile.vllm VLLM_VERSION" "$(sed -n 's/^ARG VLLM_VERSION=//p' docker/
 check "Dockerfile.strata STRATA_VERSION" "$(sed -n 's/^ARG STRATA_VERSION=//p' docker/Dockerfile.strata)" "$STRATA_VERSION"
 check "Dockerfile.strata STRATA_COMMIT" "$(sed -n 's/^ARG STRATA_COMMIT=//p' docker/Dockerfile.strata)" "$STRATA_COMMIT"
 check "Dockerfile.strata STRATA_ROCM_BASE" "$(sed -n 's/^ARG STRATA_ROCM_BASE=//p' docker/Dockerfile.strata)" "$STRATA_ROCM_BASE"
-check "Dockerfile.strata-cuda STRATA_VERSION" "$(sed -n 's/^ARG STRATA_VERSION=//p' docker/Dockerfile.strata-cuda)" "$STRATA_VERSION"
-check "gfx906 patch for STRATA_VERSION exists" "$([ -f "docker/strata/gfx906-$STRATA_VERSION.patch" ] && echo yes || echo no)" yes
+check "Dockerfile.strata-cuda STRATA_CUDA_IMAGE" "$(sed -n 's/^ARG STRATA_CUDA_IMAGE=//p' docker/Dockerfile.strata-cuda)" "$STRATA_CUDA_IMAGE"
+v=${STRATA_VERSION#v}
+check "STRATA_CUDA_IMAGE is STRATA_VERSION's" "$(printf '%s' "$STRATA_CUDA_IMAGE" | sed -n 's|^ghcr.io/niko1221/strata:\([^-@]*\)-.*|\1|p')" "$v"
+# The Dockerfile applies docker/strata/gfx906-<version>.patch exactly when it names one.
+if grep -q 'gfx906-${STRATA_VERSION}.patch' docker/Dockerfile.strata; then
+	check "gfx906 patch for STRATA_VERSION exists" "$([ -f "docker/strata/gfx906-$STRATA_VERSION.patch" ] && echo yes || echo no)" yes
+fi
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 ./scripts/gobuild.sh ./cmd/viiwork "$tmp/viiwork" v0.0.0-pins

@@ -1,0 +1,152 @@
+// Package kvshare moves Strata conversation snapshots between hosts: the
+// session-file layout, block manifests, deltas against a base the receiver
+// already holds, and the transports that carry them.
+//
+// It reads Strata's session files (format STRSESS v1, docs/DETAILS.md "Session
+// files" in Strata) but never writes one itself: a file is rebuilt from a base
+// and a delta byte for byte, and its whole-file hash is checked before it is
+// published. Strata validates it again on restore.
+package kvshare
+
+import (
+	"encoding/binary"
+	"errors"
+	"fmt"
+	"io"
+)
+
+const (
+	sessMagic   = "STRSESS\x01"
+	sessVersion = 1
+	sessHeader  = 64
+	sessTrailer = 16 // payload hash + end marker
+)
+
+// Section is one named byte range of a session file whose length the file
+// declares: a state array, a token list or one part of a K/V layer. Bytes
+// between sections (the header, counts, K/V layer headers, the trailer) are
+// framing and always travel in a delta as data.
+type Section struct {
+	Name string
+	Off  int64
+	Len  int64
+}
+
+// Layout is a parsed session file.
+type Layout struct {
+	Size     int64
+	Model    uint64 // Strata's model fingerprint
+	Config   uint64 // Strata's config fingerprint
+	Payload  int64
+	Sections []Section
+}
+
+// ParseLayout walks a session file's payload without reading the bulk data.
+func ParseLayout(r io.ReaderAt, size int64) (*Layout, error) {
+	if size < sessHeader+sessTrailer {
+		return nil, errors.New("kvshare: too short for a session file")
+	}
+	var h [sessHeader]byte
+	if _, err := r.ReadAt(h[:], 0); err != nil {
+		return nil, fmt.Errorf("kvshare: reading the header: %w", err)
+	}
+	if string(h[:8]) != sessMagic {
+		return nil, errors.New("kvshare: not a Strata session file")
+	}
+	if v := binary.LittleEndian.Uint32(h[8:]); v != sessVersion {
+		return nil, fmt.Errorf("kvshare: session file version %d, want %d", v, sessVersion)
+	}
+	if hs := binary.LittleEndian.Uint32(h[12:]); hs != sessHeader {
+		return nil, fmt.Errorf("kvshare: header size %d, want %d", hs, sessHeader)
+	}
+	l := &Layout{
+		Size:    size,
+		Model:   binary.LittleEndian.Uint64(h[16:]),
+		Config:  binary.LittleEndian.Uint64(h[24:]),
+		Payload: int64(binary.LittleEndian.Uint64(h[32:])),
+	}
+	if l.Payload < 0 || sessHeader+l.Payload+sessTrailer != size {
+		return nil, fmt.Errorf("kvshare: payload %d does not fit a %d-byte file", l.Payload, size)
+	}
+	w := walker{r: r, p: sessHeader, end: sessHeader + l.Payload}
+	w.skip(18*8 + 3*8) // geometry, layer range, cvec flag
+	w.checkpoint("live")
+	n := w.u64()
+	for i := uint64(0); i < n && w.err == nil; i++ {
+		w.checkpoint(fmt.Sprintf("ckpt%d", i))
+	}
+	nkv := w.u64()
+	for i := uint64(0); i < nkv && w.err == nil; i++ {
+		w.skip(7 * 8) // format, cells, heads, head_dim, page_size, pooled_rows, idx_dim
+		for _, part := range []string{"k", "v", "k_scale", "v_scale", "pooled"} {
+			w.vec(fmt.Sprintf("kv%d.%s", i, part), 1)
+		}
+	}
+	if w.err != nil {
+		return nil, w.err
+	}
+	if w.p != w.end {
+		return nil, fmt.Errorf("kvshare: payload walk ended at %d, payload ends at %d", w.p, w.end)
+	}
+	l.Sections = w.out
+	return l, nil
+}
+
+type walker struct {
+	r      io.ReaderAt
+	p, end int64
+	out    []Section
+	err    error
+}
+
+func (w *walker) skip(n int64) {
+	if w.err != nil {
+		return
+	}
+	if n < 0 || n > w.end-w.p {
+		w.err = fmt.Errorf("kvshare: a field of %d bytes at %d runs past the payload", n, w.p)
+		return
+	}
+	w.p += n
+}
+
+func (w *walker) u64() uint64 {
+	if w.err != nil {
+		return 0
+	}
+	var b [8]byte
+	if 8 > w.end-w.p {
+		w.err = fmt.Errorf("kvshare: a count at %d runs past the payload", w.p)
+		return 0
+	}
+	if _, err := w.r.ReadAt(b[:], w.p); err != nil {
+		w.err = fmt.Errorf("kvshare: reading at %d: %w", w.p, err)
+		return 0
+	}
+	w.p += 8
+	return binary.LittleEndian.Uint64(b[:])
+}
+
+// vec is a count followed by count*elem bytes, recorded as a section.
+func (w *walker) vec(name string, elem uint64) {
+	n := w.u64()
+	if w.err != nil {
+		return
+	}
+	if elem != 0 && n > uint64(w.end-w.p)/elem {
+		w.err = fmt.Errorf("kvshare: %s: %d elements run past the payload", name, n)
+		return
+	}
+	size := int64(n * elem)
+	w.out = append(w.out, Section{Name: name, Off: w.p, Len: size})
+	w.p += size
+}
+
+func (w *walker) checkpoint(tag string) {
+	w.vec(tag+".ids", 4)
+	w.vec(tag+".imgs", 16) // (start i64, hash u64) pairs
+	for _, part := range []string{"gdn", "ple", "tails", "dead", "block_pos"} {
+		w.vec(tag+"."+part, 1)
+	}
+	w.skip(8) // used
+}

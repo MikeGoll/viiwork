@@ -43,6 +43,9 @@ func New() *Engine {
 
 func (e *Engine) Name() string { return name }
 
+// DisplayName is the project's own spelling.
+func (e *Engine) DisplayName() string { return "FreeToken" }
+
 // DefaultStartupTimeout is 30 minutes (v2.2 plan, Decision 10). FreeToken loads
 // weights, sizes its cache pools and captures CUDA graphs before it serves, and
 // on an offload MoE backend it then fills a GPU expert cache from host memory.
@@ -100,5 +103,10 @@ func (e *Engine) Command(s engine.Spec) (engine.Command, error) {
 	}
 
 	// Operator args last: argparse takes the last occurrence.
-	return engine.Command{Path: opts.Binary, Args: append(args, s.Args...)}, nil
+	//
+	// Since main after 0.1.3 the server reads FREETOKEN_API_KEY when --api-key
+	// is absent, and a key keys every route but /health: one inherited from
+	// the node's environment would turn the node's probes and forwards into
+	// 401s. Empty is "off" to the engine (resolve_api_key).
+	return engine.Command{Path: opts.Binary, Args: append(args, s.Args...), Env: []string{"FREETOKEN_API_KEY="}}, nil
 }

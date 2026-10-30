@@ -17,16 +17,22 @@ const name = "strata"
 // and the engine's tuning already lives there. What is left for viiwork to
 // know is how to start the server: which Python, and where the checkout is.
 type Options struct {
-	// Python runs serve/server.py. An image built from upstream's Dockerfile
-	// keeps its packages in a venv, so there it is /opt/strata/.venv/bin/python.
+	// Python runs serve/server.py. Upstream's 0.2 images bring their own, so
+	// there it is /opt/strata/terminal/python/bin/python3 (0.1.x images:
+	// /opt/strata/.venv/bin/python).
 	Python string `yaml:"python"`
-	// Dir is the Strata checkout. It becomes PYTHONPATH, which is all
+	// Dir is the directory that holds serve/ (the checkout, or a 0.2 image's
+	// /opt/strata/terminal). It becomes PYTHONPATH, which is all
 	// `python -m serve.server` needs: the server finds its own files relative
 	// to itself and starts the engine in the JSON's "cwd".
 	Dir string `yaml:"dir"`
 	// Warmup is how long a backend's /health must have said loaded before the
 	// node sends it work ("30s"; "0s" turns it off). See WarmUp.
 	Warmup time.Duration `yaml:"warmup"`
+	// KVShare replicates this model's client sessions to the other members
+	// of a group, so that a turn that spills to one of them resumes warm.
+	// nil = off. See kvshare.go.
+	KVShare *KVShareOptions `yaml:"kv_share"`
 }
 
 // defaultWarmup and maxWarmup bound the `warmup` key. The ceiling is there so
@@ -67,8 +73,11 @@ func options(path string, s engine.Spec) (Options, error) {
 		// the program the server runs. It has to be one the operator wrote.
 		return opts, fmt.Errorf("%s.path is required for engine %s: Strata's JSON config (source: is not supported)", path, name)
 	}
-	if s.Parallel != 1 {
-		return opts, fmt.Errorf("%s.parallel must be 1 for engine %s: Strata v0.1.40.1 reports one slot on /slots whatever its \"parallel\" says, so the node could not publish the rest (got %d)", path, name, s.Parallel)
+	if s.Parallel < 1 || s.Parallel > parallelMax {
+		return opts, fmt.Errorf("%s.parallel must be between 1 and %d for engine %s: the engine's batch window holds %d requests (got %d)", path, parallelMax, name, parallelMax, s.Parallel)
+	}
+	if err := opts.KVShare.validate(path+"."+name+".kv_share", s); err != nil {
+		return opts, err
 	}
 	for _, flag := range []string{"--config", "--api-key"} {
 		if slices.ContainsFunc(s.Args, func(a string) bool { return a == flag || strings.HasPrefix(a, flag+"=") }) {

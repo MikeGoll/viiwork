@@ -24,6 +24,9 @@ type Options struct {
 	SplitWeights []float64 `yaml:"split_weights"`
 	MainGPU      int       `yaml:"main_gpu"`
 	Threads      int       `yaml:"threads"`
+	// Mmproj is the model's vision projector, a GGUF file. With it the
+	// backend reads images, and the node says so to the mesh.
+	Mmproj string `yaml:"mmproj"`
 }
 
 // defaults are what an operator gets when they write no block at all, or leave
@@ -75,5 +78,5 @@ func (e *Engine) ValidateOptions(path string, s engine.Spec) error {
 	if o.Threads < 0 {
 		return fmt.Errorf("%s.llamacpp.threads must be >= 0 (0 = auto)", path)
 	}
-	return nil
+	return validateMmproj(path, o, s)
 }

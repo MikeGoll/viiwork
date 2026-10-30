@@ -2,6 +2,8 @@ package engine
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"time"
 )
 
@@ -126,6 +128,32 @@ type PerfKeyer interface {
 	PerfKey(s Spec) string
 }
 
+// ImageReader is implemented by an engine that can say whether a backend
+// reads images (image_url parts of a chat request). It is asked once per
+// launch, on the transition to healthy, with the Spec the backend was started
+// with. ok is false when the engine cannot say for this backend, which is not
+// "no": the router sends a request with an image only to a backend that says
+// yes while one exists, to one that cannot say when none does, and never to
+// one that says no. An engine that would have to guess does not implement
+// this.
+type ImageReader interface {
+	ReadsImages(ctx context.Context, s Spec, addr string) (reads, ok bool, err error)
+}
+
+// ImagesOf asks e whether the backend at addr reads images. ok is false for
+// an engine without the capability, for one that cannot say, and on an error.
+func ImagesOf(ctx context.Context, e Engine, s Spec, addr string) (reads, ok bool) {
+	r, is := e.(ImageReader)
+	if !is {
+		return false, false
+	}
+	reads, ok, err := r.ReadsImages(ctx, s, addr)
+	if err != nil || !ok {
+		return false, false
+	}
+	return reads, true
+}
+
 // WarmUpper is implemented by an engine whose server answers its probe as
 // ready before it is safe to send it work. WarmUp is how long a backend must
 // have been ready, without a break, before the node calls it healthy; until
@@ -147,3 +175,100 @@ func WarmUpOf(e Engine, s Spec) time.Duration {
 	}
 	return 0
 }
+
+// DisplayNamer is implemented by an engine to say what it is called by
+// people: "llama.cpp" where Name is "llamacpp". Name stays the id that
+// configuration and the mesh use; this is the spelling a dashboard shows,
+// and only the engine's own package knows it. The conformance kit requires
+// it, because every engine can answer it.
+type DisplayNamer interface {
+	DisplayName() string
+}
+
+// DisplayName is the display name of the engine registered under id, or id
+// itself when there is no such engine or it declares none: a reader gets
+// the id rather than nothing.
+func DisplayName(id string) string {
+	if e, ok := Lookup(id); ok {
+		if d, ok := e.(DisplayNamer); ok {
+			if n := strings.TrimSpace(d.DisplayName()); n != "" {
+				return n
+			}
+		}
+	}
+	return id
+}
+
+// SessionSharer is implemented by an engine that can write a client
+// session's conversation to a file and park such a file in its own cache,
+// so that another node can take a session over warm (kv_share). The node
+// moves the files between members; the engine only saves and imports them,
+// and decides whether a later prompt matches what it parked.
+type SessionSharer interface {
+	// SessionShare is the model's kv_share settings; ok is false when the
+	// model shares nothing. Called at start and on reload with the Spec
+	// ValidateOptions gets, after Command has accepted the same file.
+	SessionShare(s Spec) (cfg SessionShareConfig, ok bool)
+	// SaveSession asks the backend at addr to save the conversation that
+	// `session` (the client's raw X-Session-Affinity or X-Session-Id) last
+	// continued, as the file `name` in SaveDir. With a base (a save id the
+	// receiver holds) the engine may write a delta against it instead of a
+	// whole file, and says which it wrote. ErrSessionGone when the backend
+	// no longer holds the conversation, which is not a failure.
+	SaveSession(ctx context.Context, addr, session, name, base string) (SavedSession, error)
+	// ImportSession parks the file `name` in SaveDir in the backend's cache
+	// without touching what it is serving.
+	ImportSession(ctx context.Context, addr, name string) error
+}
+
+// SessionHolder is implemented by a SessionSharer that can say what a
+// backend still holds of a session's conversation. An engine's cache evicts
+// on its own, so an import made earlier proves nothing about the next turn;
+// without this the node assumes an imported replica stays held.
+type SessionHolder interface {
+	// SessionHeld is how many tokens the backend at addr still holds of the
+	// longest conversation whose first n token ids (little-endian int32)
+	// hash to `hash` (FNV-1a 64), 0 for none: the replica's own ids, since
+	// the branch `session` last continued there can be another one (a
+	// compaction elsewhere). With n = 0 the engine names the conversation by
+	// `session` alone. An error means the backend cannot say (an engine
+	// without the query, or a timeout).
+	SessionHeld(ctx context.Context, addr, session string, n int64, hash uint64) (int64, error)
+}
+
+// SavedSession is what a save wrote.
+type SavedSession struct {
+	// ID names the save; the next save may name it as its base. "" when
+	// the engine gives saves no ids.
+	ID string
+	// Delta: the file is a delta against the base asked for (STRSDLT), not
+	// a whole session file.
+	Delta bool
+}
+
+// SessionShareConfig is one model's kv_share settings, as its engine reads
+// them.
+type SessionShareConfig struct {
+	// Group names the members that replicate to each other. Members agree
+	// on it, and on the model and engine configuration behind it.
+	Group string
+	// Transport is the kvshare transport spec ("http").
+	Transport string
+	// StoreDir holds the replicas this node receives; "" is
+	// <state_dir>/kvshare/<model>.
+	StoreDir string
+	// MaxBytes bounds StoreDir; the least recently received go first.
+	MaxBytes int64
+	// MinTokens: a shorter conversation is neither sent nor imported.
+	MinTokens int64
+	// SaveDir is the directory the backend saves and imports session files
+	// in, as an absolute path the node can read and write.
+	SaveDir string
+	// MaxFileBytes is the largest session file the model can write; a
+	// member's put declaring more is refused.
+	MaxFileBytes int64
+}
+
+// ErrSessionGone: the backend does not hold the session's conversation
+// (never saw it, or another conversation has taken its place).
+var ErrSessionGone = errors.New("engine: the session's conversation is no longer held")

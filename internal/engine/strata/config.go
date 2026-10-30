@@ -13,7 +13,7 @@ import (
 	"github.com/janit/viiwork/v2/internal/engine"
 )
 
-// Upstream's own defaults (serve/server.py, v0.1.40.1).
+// Upstream's own defaults (serve/server.py, v0.1.42).
 const (
 	defaultModelName = "qwen3.8-flash-next"
 	parallelMax      = 8 // PARALLEL_MAX: the engine's batch window
@@ -39,6 +39,10 @@ type fileConfig struct {
 	LazyLoad    json.RawMessage
 	IdleUnloadS json.RawMessage
 	APIKey      json.RawMessage
+	// kv_share's: where session files go, and what a relative one is
+	// relative to.
+	SlotSavePath json.RawMessage
+	Cwd          json.RawMessage
 }
 
 // readConfigFile reads models[].path, refusing anything that cannot be a
@@ -73,6 +77,7 @@ func readConfig(path string) (fileConfig, error) {
 	c := fileConfig{
 		ModelName: keys["model_name"], Aliases: keys["aliases"], Parallel: keys["parallel"],
 		LazyLoad: keys["lazy_load"], IdleUnloadS: keys["idle_unload_s"], APIKey: keys["api_key"],
+		SlotSavePath: keys["slot_save_path"], Cwd: keys["cwd"],
 	}
 	if a, ok := keys["args"]; ok {
 		if err := json.Unmarshal(a, &c.Args); err != nil {
@@ -111,7 +116,7 @@ func (c fileConfig) names() ([]string, error) {
 }
 
 // maxContext is the engine's --max-context from "args": the flag and its value
-// as two args. --max-context=N is refused, because Strata v0.1.40.1 reads only
+// as two args. --max-context=N is refused, because Strata v0.1.42 reads only
 // the two-argument form: its server would take the default for that file and
 // its engine exits on an unknown argument, so the backend would never start.
 // Given twice it is refused: upstream's server reads the first and an engine

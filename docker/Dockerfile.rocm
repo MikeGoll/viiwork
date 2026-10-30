@@ -3,21 +3,22 @@
 FROM rocm/dev-ubuntu-24.04:6.2.4-complete AS llama-build
 RUN apt-get update && apt-get install -y cmake git
 # Pin llama.cpp to a known-good release to prevent upstream breakage.
-# b11371 (2026-10-03) is the newest build with upstream server-cuda and
-# server-vulkan images, so every viiwork llama.cpp image sits on one build.
-# It carries hybrid DeltaNet (Qwen3.5/3.6 arches) and MTP speculative decoding
-# (PR #22673 + follow-ups #23198, #23237), and is >= the b10430 the Qwen3.8
-# quants were cut with.
+# b11804 (2026-10-22) is a release (a Mac downloads the same build), and the
+# CUDA and Vulkan images sit on it too: upstream published images for it. It
+# carries the wave64 mul_mat_id reduction fix (#30836, MoE on gfx906), the
+# server's SWA checkpoint fix (#30666), Kolibri-1 (#30673), hybrid DeltaNet
+# (Qwen3.5/3.6 arches) and MTP speculative decoding (PR #22673 + follow-ups
+# #23198, #23237), and is >= the b10430 the Qwen3.8 quants were cut with.
 #
-# b11371 no longer reads --mmap/--no-mmap (or --mlock, --direct-io): the one
-# spelling is --load-mode. The node generates whichever the binary's --help
-# lists, and passes an operator's own `--no-mmap` in models[].args as
-# `--load-mode none` to a build that no longer reads it.
+# Since b11371 llama.cpp no longer reads --mmap/--no-mmap (or --mlock,
+# --direct-io): the one spelling is --load-mode. The node generates whichever
+# the binary's --help lists, and passes an operator's own `--no-mmap` in
+# models[].args as `--load-mode none` to a build that no longer reads it.
 #
 # Do not drop this below b10430: the previous b9222 pin cannot load Qwen3.8-27B,
 # which the README recommends, and fails at load with "unknown model
 # architecture" rather than anything self-explanatory.
-ARG LLAMA_CPP_VERSION=b11371
+ARG LLAMA_CPP_VERSION=b11804
 RUN git clone --branch ${LLAMA_CPP_VERSION} --depth 1 \
     https://github.com/ggml-org/llama.cpp /llama.cpp
 WORKDIR /llama.cpp
@@ -25,14 +26,18 @@ WORKDIR /llama.cpp
 # __hip_fp8_e4m3 only for newer archs, causing a compile error.
 RUN sed -i 's/#if HIP_VERSION >= 60200000/#if HIP_VERSION >= 99999999/' \
     ggml/src/ggml-cuda/vendors/hip.h
+# The clone is shallow, so llama.cpp's own build number (a commit count) would
+# be 1 and `llama-server --version` would say "build 1": the node then
+# publishes engine_version "b1". The pin is the build number.
 RUN cmake -B build -DGGML_HIP=ON -DAMDGPU_TARGETS=gfx906 \
+    -DLLAMA_BUILD_NUMBER="${LLAMA_CPP_VERSION#b}" \
     && cmake --build build --target llama-server llama-perplexity -j$(nproc)
 # Smoke test: verify binary runs and can find HIP runtime
 RUN ldd /llama.cpp/build/bin/llama-server    && /llama.cpp/build/bin/llama-server    --help > /dev/null
 RUN ldd /llama.cpp/build/bin/llama-perplexity && /llama.cpp/build/bin/llama-perplexity --help > /dev/null
 
 # Stage 2: Build viiwork
-FROM golang:1.27.1 AS go-build
+FROM golang:1.27.2 AS go-build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download

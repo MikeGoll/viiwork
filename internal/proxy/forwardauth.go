@@ -164,12 +164,12 @@ func (a *ForwardAuth) noteRejection(origin string, reason error) {
 	a.logf("ignoring an unproven forward claiming to be %s: %v", origin, reason)
 }
 
-// stripMeshHeaders removes the forward claim and the meshauth headers, and
-// nothing else. The handler calls it on every request right after Verify, so
+// stripMeshHeaders removes the forward claim, the client label and the
+// meshauth headers, and nothing else. The handler calls it on every request right after Verify, so
 // an ordinary client cannot smuggle a claim through to a peer, and engines
 // never see mesh headers (Decision 15).
 func stripMeshHeaders(h http.Header) {
-	for _, k := range []string{meshapi.HeaderForwarded, meshauth.HeaderNode, meshauth.HeaderTs, meshauth.HeaderNonce, meshauth.HeaderAuth} {
+	for _, k := range []string{meshapi.HeaderForwarded, meshapi.HeaderClient, meshauth.HeaderNode, meshauth.HeaderTs, meshauth.HeaderNonce, meshauth.HeaderAuth} {
 		h.Del(k)
 	}
 }

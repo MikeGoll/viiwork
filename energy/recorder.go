@@ -69,6 +69,11 @@ type Recorder struct {
 	interval  time.Duration
 	logger    *log.Logger
 
+	// clientUse, when set, supplies each finalised minute's busy time per
+	// client, and the minute's model energy is split by it. nil = no client
+	// dimension.
+	clientUse ClientUseFunc
+
 	mu  sync.Mutex
 	acc *accumulator
 }
@@ -114,6 +119,16 @@ func NewRecorderWithAttribution(store *Store, interval time.Duration, nodeFn Nod
 		logger = log.New(os.Stdout, "[energy] ", log.LstdFlags)
 	}
 	return &Recorder{store: store, nodeFn: nodeFn, gpuFn: gpuFn, attribute: attribute, interval: interval, logger: logger}
+}
+
+// SetClientUse turns on the client dimension: when a minute is finalised, fn
+// is asked for that minute's use and each model's energy is split between the
+// clients that held its slots (SplitClients). Call it before Run. The store
+// must have been opened with Config.Clients; without it nothing is written.
+func (r *Recorder) SetClientUse(fn ClientUseFunc) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.clientUse = fn
 }
 
 // Run samples until ctx is cancelled, flushing the bucket in progress on the
@@ -170,6 +185,12 @@ func (r *Recorder) Sample(now time.Time) {
 }
 
 // Flush finalises the bucket in progress. Used on shutdown.
+//
+// The minute may be partial. Its energy is split between clients like any
+// other: the use function reports the busy time up to now, and the rest of
+// the minute is lost, which makes the totals low and never high. The totals
+// count a minute once (they refuse one at or before their through mark), so a
+// restart inside the same minute does not count it twice.
 func (r *Recorder) Flush(now time.Time) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -225,6 +246,29 @@ func (r *Recorder) finalise(acc *accumulator) {
 	node := NodeRecord{TS: startTS, Watts: float32(nodeW), CoveredS: covered}
 	if err := r.store.WriteMinute(node, gpuRecords); err != nil {
 		r.logger.Printf("writing minute %d: %v", startTS, err)
+		return
+	}
+	if r.clientUse != nil {
+		r.writeClients(startTS, gpuRecords)
+	}
+}
+
+// writeClients splits the minute's model energy between its clients. The
+// node and GPU records are already written and are not touched: the split is
+// of AttrW, which never held baseline.
+func (r *Recorder) writeClients(startTS int64, gpus []GPURecord) {
+	uses := r.clientUse(startTS)
+	if len(uses) == 0 && !r.store.HasClients() {
+		// Nobody has ever been named here. No file is created for that.
+		return
+	}
+	shares, err := SplitClients(gpus, uses, r.store.ModelIndex)
+	if err != nil {
+		r.logger.Printf("splitting minute %d between clients: %v", startTS, err)
+		return
+	}
+	if err := r.store.WriteClientMinute(startTS, shares); err != nil {
+		r.logger.Printf("writing client minute %d: %v", startTS, err)
 	}
 }
 

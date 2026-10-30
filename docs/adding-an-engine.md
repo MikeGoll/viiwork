@@ -184,6 +184,23 @@ type GPUBindingReader interface {
     BoundGPU(ctx context.Context, addr string) (uuid string, ok bool, err error)
 }
 
+// ImageReader is implemented by an engine that can say whether a backend
+// reads images. Called once per launch, on the transition to healthy, with
+// the Spec the backend was started with. ok=false means the engine cannot say
+// for this backend, which is not "no": a request with an image goes to a
+// backend that says yes while one exists, to one that cannot say when none
+// does, and never to one that says no.
+type ImageReader interface {
+    ReadsImages(ctx context.Context, s Spec, addr string) (reads, ok bool, err error)
+}
+
+// DisplayNamer says what the engine is called by people ("llama.cpp" where
+// Name is "llamacpp"). It is what status.models[].engine_name carries.
+// enginetest.Run requires it: 1 to 40 bytes, no control characters.
+type DisplayNamer interface {
+    DisplayName() string
+}
+
 // Versioner is an engine that can say which version of itself is installed
 // and which version this viiwork needs. MinVersion "" means no requirement;
 // Version runs the binary the Spec's options name; AtLeast compares in the
@@ -231,6 +248,21 @@ type PerfKeyer interface {
 type WarmUpper interface {
     WarmUp(s Spec) time.Duration
 }
+
+// SessionSharer is implemented by an engine that can write a client
+// session's conversation to a file and park such a file in its own cache
+// (kv_share). The node moves the files between members.
+type SessionSharer interface {
+    SessionShare(s Spec) (cfg SessionShareConfig, ok bool)
+    SaveSession(ctx context.Context, addr, session, name, base string) (SavedSession, error)
+    ImportSession(ctx context.Context, addr, name string) error
+}
+
+// SessionHolder is implemented by a SessionSharer that can say what a
+// backend still holds of a session's conversation.
+type SessionHolder interface {
+    SessionHeld(ctx context.Context, addr, session string, n int64, hash uint64) (int64, error)
+}
 ```
 
 `ReasoningSeparator` decides what a client sees when it streams without
@@ -243,6 +275,29 @@ back instead leaves an interactive client with nothing on screen for as long
 as the model thinks. The plain, non-streamed reply still drops the reasoning.
 Declare the capability only for a server that always writes its answer to
 `content`.
+
+`SessionSharer` lets a session that spills to another member resume warm
+(kv_share; Strata only today). After a local turn of a session the node asks
+the backend to save that session's conversation (`SaveSession`, keyed by the
+client's raw `X-Session-Affinity` or `X-Session-Id`), sends the file as a delta
+to the member the session would spill to, and deletes it. Before a session's
+turn runs on a backend the node imports the replica it holds, if any
+(`ImportSession`), which must only **park** it: a later prompt that matches
+resumes from it, and one that does not is served as if nothing had been
+imported. A miss must never be a wrong answer. Return `engine.ErrSessionGone`
+when the backend no longer holds the session; the node drops that save
+quietly. `SessionShare` names the directory both calls use (`SaveDir`), which
+the node must be able to read and write at the same path.
+
+`SessionHolder` is optional. A node imports each replica version into a
+backend once, but an engine's cache evicts on its own, so when a session comes
+back with the replica it was already given, the node asks `SessionHeld` how
+many tokens the backend still holds of the conversation that starts with the
+replica's own token ids (their count and FNV-1a 64 hash; a session's latest
+branch on that backend may be another one after a compaction elsewhere), and
+imports again if that is fewer than the replica's. An error means "cannot say", and the node
+then trusts its record of the import, which is all an engine without the
+method gets.
 
 `UsageReporter` is what lets a host earn a performance score. A sample needs
 the prompt's uncached token count, so viiwork asks the engine for usage
@@ -563,7 +618,7 @@ cold start.
 ## Done when
 
 - [ ] `Options` with defaults, and `ValidateOptions` if any value can be wrong
-- [ ] The five methods, and any capability your engine can answer honestly
+- [ ] The five methods, `DisplayName`, and any other capability your engine can answer honestly
 - [ ] `engine.Register(New())` from `init`
 - [ ] `enginetest.Run` passes
 - [ ] Golden command-line tests, and `httptest` tests over captured `testdata/`

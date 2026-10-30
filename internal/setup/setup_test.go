@@ -220,8 +220,60 @@ func TestNewSecuredMesh(t *testing.T) {
 	if !strings.Contains(out, "viiwork1-") {
 		t.Errorf("no join code for the next machine:\n%s", out)
 	}
-	if !strings.Contains(out, "skipped broken.gguf") || strings.Contains(out, "mmproj") || strings.Contains(out, "00002-of") {
+	// A projector is never a row of the listing (a row carries its
+	// architecture), and neither is a later shard.
+	if !strings.Contains(out, "skipped broken.gguf") || strings.Contains(out, "clip") || strings.Contains(out, "00002-of") {
 		t.Errorf("model listing:\n%s", out)
+	}
+	// alpha's directory holds it and one projector: they are served together,
+	// the operator is told, and the config names the projector as the
+	// container sees it.
+	if !strings.Contains(out, "alpha reads images: its vision projector mmproj-alpha.gguf") {
+		t.Errorf("no word about the projector:\n%s", out)
+	}
+	written := string(mustRead(t, f.path(install.ConfigFile)))
+	if !strings.Contains(written, "mmproj: /models/mmproj-alpha.gguf") || strings.Count(written, "mmproj:") != 1 {
+		t.Errorf("config must name alpha's projector and no other:\n%s", written)
+	}
+}
+
+// A projector belongs to a model only when the two are alone in a directory.
+// Anything else is a guess, and the operator is told to pair them.
+func TestScanPairsAProjectorOnlyWhenItIsUnambiguous(t *testing.T) {
+	models := t.TempDir()
+	writeGGUF(t, filepath.Join(models, "one", "eyes.gguf"), "llama", 4<<20)
+	writeGGUF(t, filepath.Join(models, "one", "mmproj-eyes.gguf"), "clip", 1<<20)
+	writeGGUF(t, filepath.Join(models, "two", "a.gguf"), "llama", 1<<20)
+	writeGGUF(t, filepath.Join(models, "two", "b.gguf"), "llama", 1<<20)
+	writeGGUF(t, filepath.Join(models, "two", "mmproj.gguf"), "clip", 1<<20)
+	writeGGUF(t, filepath.Join(models, "three", "c.gguf"), "llama", 1<<20)
+	writeGGUF(t, filepath.Join(models, "three", "mmproj-f16.gguf"), "clip", 1<<20)
+	writeGGUF(t, filepath.Join(models, "three", "mmproj-q8.gguf"), "clip", 1<<20)
+	writeGGUF(t, filepath.Join(models, "four", "text.gguf"), "llama", 1<<20)
+
+	var out bytes.Buffer
+	got := map[string]weights{}
+	for _, w := range scan(prompt.Script(&out), models, true) {
+		got[filepath.ToSlash(w.file)] = w
+	}
+	if len(got) != 5 {
+		t.Fatalf("listed %d models, want 5 (no projector among them): %v", len(got), got)
+	}
+	if w := got["one/eyes.gguf"]; filepath.ToSlash(w.mmproj) != "one/mmproj-eyes.gguf" || w.mmprojSize != 1<<20 {
+		t.Errorf("one/eyes.gguf: projector %q size %d", w.mmproj, w.mmprojSize)
+	}
+	for _, name := range []string{"two/a.gguf", "two/b.gguf", "three/c.gguf", "four/text.gguf"} {
+		if got[name].mmproj != "" {
+			t.Errorf("%s was paired with %s", name, got[name].mmproj)
+		}
+	}
+	for _, name := range []string{"two/a.gguf", "two/b.gguf", "three/c.gguf"} {
+		if !strings.Contains(out.String(), name+": its directory holds") {
+			t.Errorf("no word about %s:\n%s", name, out.String())
+		}
+	}
+	if strings.Contains(out.String(), "text.gguf") {
+		t.Errorf("a directory without a projector needs no word:\n%s", out.String())
 	}
 }
 

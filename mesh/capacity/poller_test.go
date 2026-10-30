@@ -338,3 +338,38 @@ func TestFreshBoundary(t *testing.T) {
 		t.Error("exactly 3 s old must not be fresh")
 	}
 }
+
+// TestPollsReuseOneConnection pins connection reuse: every node polls every
+// member each interval, so a poll that abandoned its connection would cost a
+// handshake per member per second across the mesh. A refused poll (503) must
+// keep the connection too, since its body is read before the status is judged.
+func TestPollsReuseOneConnection(t *testing.T) {
+	for _, status := range []int{http.StatusOK, http.StatusServiceUnavailable} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			var hits, conns atomic.Int64
+			ts := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				hits.Add(1)
+				if status != http.StatusOK {
+					http.Error(w, "busy", status)
+					return
+				}
+				answer("A", modelM)(w, r)
+			}))
+			ts.Config.ConnState = func(_ net.Conn, s http.ConnState) {
+				if s == http.StateNew {
+					conns.Add(1)
+				}
+			}
+			ts.Start()
+			t.Cleanup(ts.Close)
+			members := &fakeMembers{}
+			members.set(member(t, "A", &server{Server: ts}, meshapi.MemberAlive, meshapi.RoleNode, false))
+			p := NewPoller(Config{Self: "L", Members: members, Interval: 30 * time.Millisecond, Logf: (&logLines{}).logf})
+			run(t, p)
+			eventually(t, 2*time.Second, "eight polls", func() bool { return hits.Load() >= 8 })
+			if n := conns.Load(); n != 1 {
+				t.Errorf("%d polls opened %d connections, want 1", hits.Load(), n)
+			}
+		})
+	}
+}

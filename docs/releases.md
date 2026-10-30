@@ -92,7 +92,7 @@ node runs a version that lacks the new one.
 
 The checksum proves the archive is the one listed in `SHA256SUMS`. The
 signature proves `SHA256SUMS` is the publisher's, for exactly that version.
-Checking the signature needs a checkout and Go 1.27.1:
+Checking the signature needs a checkout and Go 1.27.2:
 
 ```sh
 curl -fLO "$base/SHA256SUMS.sig"                  # beside the archive and SHA256SUMS

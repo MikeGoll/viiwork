@@ -9,6 +9,7 @@ import (
 
 	"github.com/janit/viiwork/v2/internal/config"
 	"github.com/janit/viiwork/v2/internal/engine"
+	"github.com/janit/viiwork/v2/internal/sessionshare"
 )
 
 // perfKeys hashes what makes a model's speed on this node: engine, weights,
@@ -29,6 +30,26 @@ func perfKeys(models []config.Model) map[string]string {
 		keys[m.Name] = hex.EncodeToString(h.Sum(nil)[:8])
 	}
 	return keys
+}
+
+// sessionModels is every model whose engine shares sessions (kv_share) with
+// the settings it reads for it.
+func sessionModels(models []config.Model) []sessionshare.Model {
+	var out []sessionshare.Model
+	for _, m := range models {
+		e, ok := engine.Lookup(m.Engine)
+		if !ok {
+			continue
+		}
+		ss, ok := e.(engine.SessionSharer)
+		if !ok {
+			continue
+		}
+		if cfg, ok := ss.SessionShare(config.ModelSpec(m)); ok {
+			out = append(out, sessionshare.Model{Name: m.Name, Engine: ss, Config: cfg})
+		}
+	}
+	return out
 }
 
 // usageReporting is how the engine serving model reports usage.

@@ -101,6 +101,10 @@ it for up to `routing.queue_timeout` (20 s), then gets 429 with
   over. `X-Viiwork-Prefer` carries the same list for a client that can set a
   header but not a query parameter. Like the pin, the names are only compared,
   and a forwarded request ignores them.
+- **A forward carries the client's name.** A forward also carries
+  `X-Viiwork-Client`, the client's name as the entry node resolved it, when
+  that node has a `clients` section. The receiver uses it for energy per client
+  and passes it no further.
 
 ## Aliases
 

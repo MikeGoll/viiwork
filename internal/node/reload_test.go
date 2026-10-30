@@ -1,6 +1,7 @@
 package node
 
 import (
+	"net/netip"
 	"reflect"
 	"strings"
 	"testing"
@@ -76,5 +77,66 @@ func TestReload(t *testing.T) {
 	until(t, 10*time.Second, "n removed", func() bool { _, ok := modelOf(tn.status(t), "n"); return !ok })
 	if !strings.Contains(tn.log.String(), "Pipelines") {
 		t.Errorf("RL5: the log does not name Pipelines: %q", tn.log.String())
+	}
+}
+
+func TestReloadClients(t *testing.T) {
+	addr := netip.MustParseAddr("100.64.0.10")
+	clients := func(name string) string { return "clients:\n  " + name + ": [100.64.0.10]\n" }
+	tn := startNode(t, meshtest.NewNetwork(), "n1", nil, clients("factory-a"), nil)
+	if got := tn.clients.Load().Lookup(addr); got != "factory-a" {
+		t.Fatalf("at start: %q", got)
+	}
+
+	// RC1: without clients_reload a changed section waits for a restart.
+	writeFile(t, tn.cfgPath, nodeConfig("n1", tn.stateDir, nil, clients("batch-b")))
+	if err := tn.Reload(); err != nil {
+		t.Fatalf("RC1: %v", err)
+	}
+	if got := tn.clients.Load().Lookup(addr); got != "factory-a" {
+		t.Errorf("RC1: the section was applied without clients_reload: %q", got)
+	}
+	if !strings.Contains(tn.log.String(), "changes to Clients need a restart") {
+		t.Errorf("RC1: log = %q", tn.log.String())
+	}
+
+	// RC2: with it, in the same file, the table is swapped.
+	writeFile(t, tn.cfgPath, nodeConfig("n1", tn.stateDir, nil, clients("batch-b")+"clients_reload: true\n"))
+	if err := tn.Reload(); err != nil {
+		t.Fatalf("RC2: %v", err)
+	}
+	if got := tn.clients.Load().Lookup(addr); got != "batch-b" {
+		t.Errorf("RC2: %q", got)
+	}
+	if !strings.Contains(tn.log.String(), "reload: clients applied (1 named)") {
+		t.Errorf("RC2: log = %q", tn.log.String())
+	}
+
+	// RC3: a file that fails validation changes nothing.
+	writeFile(t, tn.cfgPath, nodeConfig("n1", tn.stateDir, nil, "clients:\n  other: [100.64.0.10]\nclients_reload: true\n"))
+	if err := tn.Reload(); err == nil {
+		t.Error("RC3: a reserved name must fail the reload")
+	}
+	if got := tn.clients.Load().Lookup(addr); got != "batch-b" {
+		t.Errorf("RC3: a bad file changed the table: %q", got)
+	}
+
+	// RC4: an unchanged section is not applied or logged again.
+	before := strings.Count(tn.log.String(), "clients applied")
+	writeFile(t, tn.cfgPath, nodeConfig("n1", tn.stateDir, nil, clients("batch-b")+"clients_reload: true\n"))
+	if err := tn.Reload(); err != nil {
+		t.Fatalf("RC4: %v", err)
+	}
+	if strings.Count(tn.log.String(), "clients applied") != before {
+		t.Error("RC4: an unchanged section was applied again")
+	}
+
+	// RC5: removing the section, with clients_reload, stops the labelling.
+	writeFile(t, tn.cfgPath, nodeConfig("n1", tn.stateDir, nil, "clients_reload: true\n"))
+	if err := tn.Reload(); err != nil {
+		t.Fatalf("RC5: %v", err)
+	}
+	if tn.clients.Load() != nil {
+		t.Error("RC5: the table outlived its section")
 	}
 }

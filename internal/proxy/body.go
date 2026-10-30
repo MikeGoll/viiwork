@@ -210,6 +210,52 @@ func (m *messageText) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
+// keyImageURLJSON is the content part type of an image, as it stands in the
+// raw body with its quotes.
+var keyImageURLJSON = []byte(`"image_url"`)
+
+// hasImageParts reports whether a chat request carries an image: a content
+// part of type image_url in any message. The router sends such a request
+// only to backends that read images.
+//
+// A text request pays one scan of its body and no allocation. The quoted
+// bytes cannot come from prompt text, where JSON writes the quotes as \", so
+// a coding agent's prompt about image_url does not match; what does match
+// (a tool schema with a property of that name, say) is decoded once to see
+// whether a message really has such a part. A body that does not decode, or
+// one that spells the type with \u escapes, is a text request here, and the
+// engine answers it as it did before.
+func hasImageParts(body []byte) bool {
+	if !bytes.Contains(body, keyImageURLJSON) {
+		return false
+	}
+	var p struct {
+		Messages []struct {
+			Content json.RawMessage `json:"content"`
+		} `json:"messages"`
+	}
+	if json.Unmarshal(body, &p) != nil {
+		return false
+	}
+	for _, m := range p.Messages {
+		if len(m.Content) == 0 || m.Content[0] != '[' || !bytes.Contains(m.Content, keyImageURLJSON) {
+			continue
+		}
+		var parts []struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(m.Content, &parts) != nil {
+			continue
+		}
+		for _, part := range parts {
+			if part.Type == "image_url" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // extractPromptText is what a request adds to its conversation: the messages
 // after the last assistant message. For a chat turn that is the user's
 // message, as before. For a coding agent's turn it is usually tool results,

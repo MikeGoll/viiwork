@@ -4,21 +4,22 @@
 # they are two files because the engine is compiled differently for each.
 #
 # AMD's ROCm no longer ships gfx906 libraries, so the base is the community
-# image upstream itself documents (docs/AMD_HIP.md, "gfx906"). Strata v0.1.40.1
-# does not compile for gfx906 as released, and once compiled fails the first
-# long prompt after a load. docker/strata/gfx906-<version>.patch carries four
-# fixes, each inside the gfx906 build only:
-#   - fused_gr.cu: fused_gr_read_multi became a bool function in v0.1.40 and
-#     its gfx906-only branch still returns nothing;
-#   - vmm.cpp: the CUDA driver API is compiled out for STRATA_USE_HIP but not
-#     for STRATA_HIP_GFX906;
-#   - strata_hip.h: two stream-priority names had no HIP alias;
-#   - conversation_state.cpp: a checkpoint's state is copied on a stream of
-#     the saving thread's own. On the default stream HIP refuses the copy
-#     while another thread captures a graph ("saving a checkpoint part
-#     failed", seen since v0.1.39) and the refusal invalidates that capture.
-# The two strata_hip.h fixes v0.1.39 needed are upstream since v0.1.40. None
-# of the four is reported upstream as of 2026-10-07.
+# image upstream itself documents (docs/AMD_HIP.md, "gfx906").
+# docker/strata/gfx906-<version>.patch carries one fix for Strata v0.2.3,
+# inside the gfx906 build only: strata_hip.h gets HIP aliases for two
+# stream-priority calls, cudaDeviceGetStreamPriorityRange and
+# cudaStreamCreateWithPriority, which src/core/dflash2.cpp (new in 0.2) makes
+# unconditionally; without them the engine does not compile. The other three
+# fixes the v0.1.45 patch carried are upstream or unneeded at v0.2.3: the two
+# CMake ones (moe_f16_kq.cu in the gfx906 strata_mmq, GGML_USE_HIP for
+# strata_mmq_w4a4) since 0.2.1, and the cuBLAS aliases because the Qwen3.6
+# engine that called them is no longer part of a gfx906 build.
+# Built at v0.2.3 on 2026-10-24. v0.1.45 served under viiwork on 2026-10-18,
+# one backend on four Radeon VIIs and an MI60.
+#
+# The source checkout is the image's layout, as it was at 0.1.x: upstream's
+# 0.2 Terminal and component packages (the CUDA image's /opt/strata/terminal)
+# are its release archives, which this build does not make.
 #
 # WHAT AN OPERATOR WILL NOT GUESS:
 #   - The model is not in the image. Mount the pack, the GGUF shards and the
@@ -38,7 +39,7 @@
 ARG STRATA_ROCM_BASE=mixa3607/rocm-gfx906:7.14-complete@sha256:622c025824d465faa0f5e59eea4f723845032011df273c3b11e25031965fc428
 
 # Stage 1: Build viiwork.
-FROM golang:1.27.1 AS go-build
+FROM golang:1.27.2 AS go-build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
@@ -48,8 +49,8 @@ RUN CGO_ENABLED=0 go build -ldflags "-X main.version=${VERSION}" -o /viiwork ./c
 
 # Stage 2: Strata, built for gfx906, and the runtime.
 FROM ${STRATA_ROCM_BASE}
-ARG STRATA_VERSION=v0.1.40.1
-ARG STRATA_COMMIT=82f46a8c8f475f001ad76d92f58f4a4f8ffb0253
+ARG STRATA_VERSION=v0.2.3
+ARG STRATA_COMMIT=5c8dd322528cc84f68f461ad54a506b9da8fa8d4
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \

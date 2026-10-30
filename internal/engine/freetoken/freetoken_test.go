@@ -163,6 +163,14 @@ func TestValidateOptions(t *testing.T) {
 		{name: "unknown key", base: oneGPU, block: "memory_ration: 0.8\n", wantIn: "models[0].freetoken"},
 		// Decision 7, as close as the Spec allows it to be expressed. See F6.
 		{name: "two cards per backend", base: twoGPU, wantIn: "models[0].gpus_per_backend"},
+		// The node probes and forwards without a key; a keyed backend answers
+		// every one of those with a 401.
+		{name: "api key in args", base: withArgs(oneGPU, "--api-key", "k"), wantIn: "models[0].args"},
+		{name: "api key in args, joined", base: withArgs(oneGPU, "--api-key=k"), wantIn: "models[0].args"},
+		// models[].env is appended after the engine's clearing and would win.
+		{name: "api key in env", base: withEnv(oneGPU, "FREETOKEN_API_KEY", "k"), wantIn: "models[0].env"},
+		{name: "empty api key in env", base: withEnv(oneGPU, "FREETOKEN_API_KEY", ""), wantIn: "models[0].env"},
+		{name: "other env", base: withEnv(oneGPU, "HF_HOME", "/hf"), ok: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := spec(t, tc.base, tc.block)
@@ -180,6 +188,31 @@ func TestValidateOptions(t *testing.T) {
 				t.Errorf("error must name the field %q, got: %v", tc.wantIn, err)
 			}
 		})
+	}
+}
+
+func withArgs(s engine.Spec, args ...string) engine.Spec {
+	s.Args = args
+	return s
+}
+
+func withEnv(s engine.Spec, k, v string) engine.Spec {
+	s.Env = map[string]string{k: v}
+	return s
+}
+
+// Since main after 0.1.3, `ft serve` reads FREETOKEN_API_KEY when --api-key is
+// absent. One inherited from the node's environment would key the backend
+// against the node's own probes, so the command clears it; an empty value is
+// "off" to the engine.
+func TestCommandClearsInheritedAPIKey(t *testing.T) {
+	s := spec(t, engine.Spec{Name: "m", Path: "/m", GPUs: []int{0}, Port: 1, Context: 8, Parallel: 1}, "")
+	cmd, err := New().Command(s)
+	if err != nil {
+		t.Fatalf("Command: %v", err)
+	}
+	if !slices.Contains(cmd.Env, "FREETOKEN_API_KEY=") {
+		t.Errorf("Env = %q, want FREETOKEN_API_KEY= to clear an inherited key", cmd.Env)
 	}
 }
 
@@ -541,4 +574,10 @@ func argOf(args []string, flag string) string {
 		return ""
 	}
 	return args[i+1]
+}
+
+func TestDisplayName(t *testing.T) {
+	if got := New().DisplayName(); got != "FreeToken" {
+		t.Errorf("DisplayName() = %q, want FreeToken", got)
+	}
 }

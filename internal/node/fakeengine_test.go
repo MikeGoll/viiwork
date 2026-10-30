@@ -46,6 +46,9 @@ func TestMain(m *testing.M) {
 	case "ft":
 		serveFakeFreeToken()
 		os.Exit(0)
+	case "strata":
+		serveFakeStrata()
+		os.Exit(0)
 	}
 	os.Exit(m.Run())
 }

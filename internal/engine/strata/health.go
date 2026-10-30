@@ -18,6 +18,25 @@ type healthDoc struct {
 	Status  string `json:"status"`
 	Service string `json:"service"`
 	Loaded  *bool  `json:"loaded"`
+	// Images is whether the server started its vision encoder (a "vision"
+	// section in its config). A pointer: an older server does not say.
+	Images *bool `json:"images"`
+}
+
+// ReadsImages is engine.ImageReader: /health's own "images". The Spec cannot
+// answer, because vision is a section of Strata's JSON that the server may
+// also refuse to start.
+func (e *Engine) ReadsImages(ctx context.Context, _ engine.Spec, addr string) (reads, ok bool, err error) {
+	resp, err := e.get(ctx, addr, "/health")
+	if err != nil {
+		return false, false, err
+	}
+	defer resp.Body.Close()
+	var h healthDoc
+	if resp.StatusCode != http.StatusOK || json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&h) != nil || h.Service != name || h.Images == nil {
+		return false, false, nil
+	}
+	return *h.Images, true, nil
 }
 
 // Probe reads /health. Ready needs all three of service "strata", status "ok"
@@ -33,7 +52,7 @@ func (e *Engine) Probe(ctx context.Context, addr string) (engine.Probe, error) {
 	if err != nil {
 		return engine.Probe{}, err // transport failure only
 	}
-	defer drain(resp)
+	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 	if err != nil {
 		return engine.Probe{}, err
@@ -81,8 +100,17 @@ func (e *Engine) Load(ctx context.Context, s engine.Spec, addr string) (engine.L
 // LoadProgress is engine.TokenProgressReader.
 //
 // /slots is the part routing depends on. Anything wrong with it is an error,
-// never a zero. As of v0.1.40.1 it lists exactly one slot whatever the server's
-// "parallel" is, which is why this engine accepts only models[].parallel 1.
+// never a zero. From v0.1.41 it lists one entry per batch slot, each with the
+// engine's whole --max-context, and that count is what the node publishes: the
+// engine runs fewer slots than "parallel" asks for when they do not fit in
+// VRAM, and says so only in its log. Up to v0.1.40.1 it listed exactly one
+// slot whatever "parallel" was, so on such a build a model with parallel
+// above 1 publishes one slot.
+//
+// A request that runs alone is decoded outside the batch slots, so every
+// entry reads idle while it runs. Busy is then 0, and the node's own count of
+// requests in flight is what marks the slot taken (the supervisor publishes
+// the larger of the two).
 //
 // /status adds the server's own queue and the running request's token counts.
 // It is best effort: the heavier /metrics sometimes did not answer on gb3
@@ -114,7 +142,9 @@ func (e *Engine) LoadProgress(ctx context.Context, _ engine.Spec, addr string) (
 	if st.Queued != nil && *st.Queued > 0 {
 		load.Waiting = int(*st.Queued)
 	}
-	if g, m := st.Generated, st.MaxTokens; st.Busy && g != nil && m != nil && *g >= 0 && *m >= *g {
+	// /status counts one request. With more than one slot at work it
+	// describes none of them, and no progress is the honest answer.
+	if g, m := st.Generated, st.MaxTokens; load.Busy <= 1 && st.Busy && g != nil && m != nil && *g >= 0 && *m >= *g {
 		decoded, remain = int64(*g), int64(*m-*g)
 	}
 	return load, decoded, remain, nil
@@ -125,7 +155,7 @@ func (e *Engine) slots(ctx context.Context, addr string) ([]slotDoc, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer drain(resp)
+	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("strata: /slots answered %s", resp.Status)
 	}
@@ -154,7 +184,7 @@ func (e *Engine) status(ctx context.Context, addr string) (statusDoc, bool) {
 	if err != nil {
 		return statusDoc{}, false
 	}
-	defer drain(resp)
+	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		return statusDoc{}, false
 	}
@@ -171,9 +201,4 @@ func (e *Engine) get(ctx context.Context, addr, path string) (*http.Response, er
 		return nil, err
 	}
 	return e.client.Do(req)
-}
-
-func drain(resp *http.Response) {
-	_, _ = io.Copy(io.Discard, resp.Body)
-	_ = resp.Body.Close()
 }

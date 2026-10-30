@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/janit/viiwork/v2/internal/activity"
+	"github.com/janit/viiwork/v2/internal/clientuse"
 	"github.com/janit/viiwork/v2/internal/route"
 	"github.com/janit/viiwork/v2/internal/supervisor"
 	"github.com/janit/viiwork/v2/mesh/capacity"
@@ -41,6 +42,7 @@ type meshNode struct {
 	router   *route.Router
 	counters *Counters
 	log      *activity.Log
+	ledger   *clientuse.Ledger
 }
 
 // meshReports is the poller's reports as the router sees them. Freezing keeps
@@ -108,6 +110,8 @@ type meshSetup struct {
 	open         bool                           // open-mesh forward auth instead of secured
 	zeroRTT      bool                           // see meshReports
 	models       map[string]map[string][]string // node → model → engine addresses
+	clients      map[string]map[string][]string // node → its clients section
+	ledgers      bool                           // every node keeps client energy
 }
 
 var meshNames = []string{"A", "B", "C"}
@@ -147,10 +151,18 @@ func newMesh(t *testing.T, s meshSetup) map[string]*meshNode {
 		if s.open {
 			secret = nil
 		}
+		table, err := clientuse.ParseTable(s.clients[name])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if s.ledgers {
+			n.ledger = clientuse.NewLedger(nil)
+		}
 		n.h.Store(NewHandler(Deps{
 			Self: name, Version: "test", Router: n.router, Reports: n.reports,
 			Local: fakeLocalCapacity{&n.local}, Auth: mustAuth(t, name, secret, nil, members),
 			Counters: n.counters, ForwardRetry: 1, Activity: n.log,
+			Clients: func() *clientuse.Table { return table }, ClientUse: n.ledger,
 		}))
 		go n.router.Run(ctx)
 	}
@@ -455,5 +467,41 @@ func TestMeshM8OpenMesh(t *testing.T) {
 	}
 	if d := <-direct; d.status != 200 {
 		t.Errorf("direct: %d %q", d.status, d.body)
+	}
+}
+
+// M9: a request from a named address enters at A and runs on B. The mesh is
+// secured, so this also shows that a header outside the signature does not
+// break the forward. B has no clients section: the label is all it has.
+func TestMeshM9ClientLabelCrossesASignedForward(t *testing.T) {
+	eb := newRecEngine(t, nil)
+	nodes := newMesh(t, meshSetup{
+		queueTimeout: 5 * time.Second, ledgers: true,
+		clients: map[string]map[string][]string{"A": {"factory-a": {"127.0.0.1"}}},
+		models:  map[string]map[string][]string{"B": {"m": {eb.addr()}}},
+	})
+	started := time.Now().Unix() / 60 * 60
+	r := meshPost(nodes["A"].srv.URL, `{"model":"m","messages":[{"role":"user","content":"whose is this"}]}`)
+	if r.status != 200 || r.header.Get(meshapi.HeaderNode) != "B" || r.header.Get(meshapi.HeaderOrigin) != "A" {
+		t.Fatalf("%d %v %q %v", r.status, r.header, r.body, r.err)
+	}
+	// The counters are added after the lease is released, so by then the
+	// ledger has the request.
+	waitFor(t, func() bool { return nodes["B"].counters.Get("m").Requests == 1 })
+
+	var onB []clientuse.Usage
+	for _, minute := range []int64{started, started + 60} { // the request may have crossed a minute
+		onB = append(onB, nodes["B"].ledger.Take(minute)...)
+	}
+	if len(onB) != 1 || onB[0].Client != "factory-a" || onB[0].Model != "m" || onB[0].Tokens != 7 {
+		t.Errorf("B's ledger = %+v, want factory-a on m with 7 tokens", onB)
+	}
+	for _, minute := range []int64{started, started + 60} {
+		if got := nodes["A"].ledger.Take(minute); got != nil {
+			t.Errorf("A counted a request it forwarded: %+v", got)
+		}
+	}
+	if _, hdr := eb.last(); hdr.Get(meshapi.HeaderClient) != "" || hdr.Get(meshapi.HeaderForwarded) != "" {
+		t.Errorf("B's engine saw mesh headers: %v", hdr)
 	}
 }

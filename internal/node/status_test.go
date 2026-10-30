@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/janit/viiwork/v2/energy"
 	"github.com/janit/viiwork/v2/internal/gpu"
 	"github.com/janit/viiwork/v2/internal/perf"
 	"github.com/janit/viiwork/v2/internal/proxy"
@@ -122,5 +123,114 @@ func TestBuildStatusOptional(t *testing.T) {
 	s.Vendor, s.GPUs = gpu.VendorNone, nil
 	if st := BuildStatus(s); len(st.GPUs) != 0 {
 		t.Errorf("no GPUs: %+v", st.GPUs)
+	}
+}
+
+func TestBuildStatusClientEnergy(t *testing.T) {
+	src := statusFixture()
+	src.ClientEnergy = func() (energy.ClientEnergy, bool) {
+		return energy.ClientEnergy{Since: 1790000040, Through: 1790000100, Clients: []energy.ClientTotal{
+			{Name: "factory-a", Wh: 18234.5123, W1m: 212.04, KWh24h: 1.4204, KWh30d: 31.8, BusyS: 412300, Tokens: 9120044},
+		}}, true
+	}
+	ce := BuildStatus(src).ClientEnergy
+	if ce == nil || ce.Since != 1790000040 || ce.Through != 1790000100 || len(ce.Clients) != 1 {
+		t.Fatalf("client energy = %+v", ce)
+	}
+	want := meshapi.ClientEnergyEntry{Name: "factory-a", WhTotal: 18234.5, W1m: 212, KWh24h: 1.42, KWh30d: 31.8, BusySTotal: 412300, TokensTotal: 9120044}
+	if ce.Clients[0] != want {
+		t.Errorf("entry = %+v, want %+v", ce.Clients[0], want)
+	}
+}
+
+// Off: a node that has nothing to say about clients serves the status it
+// served before, byte for byte.
+func TestBuildStatusWithoutClientsIsUnchanged(t *testing.T) {
+	plain, err := json.Marshal(BuildStatus(statusFixture()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(plain), "client_energy") {
+		t.Fatalf("a status with no client source mentions client_energy: %s", plain)
+	}
+	src := statusFixture()
+	src.ClientEnergy = func() (energy.ClientEnergy, bool) { return energy.ClientEnergy{}, false }
+	unnamed, _ := json.Marshal(BuildStatus(src))
+	if string(unnamed) != string(plain) {
+		t.Errorf("a store with no named client changed the status:\n%s\n%s", unnamed, plain)
+	}
+}
+
+// engineFixture is three models: one of a registered engine with a known
+// version, one parked, and one whose id this binary has no engine for.
+func engineFixture(versions map[string]string) StatusSources {
+	s := statusFixture()
+	s.Models = func() []meshapi.ModelStatus {
+		return []meshapi.ModelStatus{
+			{Name: "a", Engine: "llamacpp", Slots: 2, Backends: []meshapi.BackendStatus{}},
+			{Name: "p", Engine: "vllm", Backends: []meshapi.BackendStatus{}, Parked: true},
+			{Name: "x", Engine: "not-an-engine", Backends: []meshapi.BackendStatus{}},
+		}
+	}
+	s.EngineVersions = func() map[string]string { return versions }
+	return s
+}
+
+func TestBuildStatusEngineNames(t *testing.T) {
+	st := BuildStatus(engineFixture(map[string]string{"llamacpp": "b6123", "vllm": "0.31.0"}))
+	for i, want := range []struct{ engine, name, version string }{
+		{"llamacpp", "llama.cpp", "b6123"},
+		{"vllm", "vLLM", "0.31.0"}, // parked: a dashboard draws this row too
+		{"not-an-engine", "not-an-engine", ""},
+	} {
+		m := st.Models[i]
+		if m.Engine != want.engine || m.EngineName != want.name || m.EngineVersion != want.version {
+			t.Errorf("models[%d] = engine %q, name %q, version %q; want %q, %q, %q",
+				i, m.Engine, m.EngineName, m.EngineVersion, want.engine, want.name, want.version)
+		}
+	}
+}
+
+// Absent is "cannot say": the key is off the JSON, never an empty string.
+func TestBuildStatusEngineVersionAbsent(t *testing.T) {
+	noSource := engineFixture(nil)
+	noSource.EngineVersions = nil
+	for name, s := range map[string]StatusSources{
+		"no source":    noSource,
+		"not read yet": engineFixture(nil),
+		"no versioner": engineFixture(map[string]string{}),
+	} {
+		raw, err := json.Marshal(BuildStatus(s))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(raw), "engine_version") {
+			t.Errorf("%s: the status carries engine_version: %s", name, raw)
+		}
+		if got := strings.Count(string(raw), `"engine_name"`); got != 3 {
+			t.Errorf("%s: %d models carry engine_name, want all 3", name, got)
+		}
+	}
+}
+
+// The status can be published on the internet: a version and nothing else.
+func TestBuildStatusEngineVersionIsOnlyAVersion(t *testing.T) {
+	for _, tc := range []struct{ read, want string }{
+		{"b6123", "b6123"},
+		{"0.31.0", "0.31.0"},
+		{"0.11.0rc1", "0.11.0rc1"},
+		{"1.2.3+cu128", "1.2.3+cu128"},
+		{"0.31.0 (/opt/venv/lib/python3.12)", ""},
+		{"/usr/local/bin/llama-server", ""},
+		{"b6123@build-host.example", ""},
+		{"100.64.0.10:8080", ""},
+		{"b6123\n", ""},
+		{"", ""},
+		{strings.Repeat("1", 41), ""},
+	} {
+		st := BuildStatus(engineFixture(map[string]string{"llamacpp": tc.read}))
+		if got := st.Models[0].EngineVersion; got != tc.want {
+			t.Errorf("version read as %q is published as %q, want %q", tc.read, got, tc.want)
+		}
 	}
 }

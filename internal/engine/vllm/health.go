@@ -28,7 +28,7 @@ func (e *Engine) Probe(ctx context.Context, addr string) (engine.Probe, error) {
 		// Transport failure only: refused, EOF, timeout, cancelled.
 		return engine.Probe{}, err
 	}
-	defer drain(resp)
+	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusOK {
 		return engine.Probe{Ready: true, Progress: -1}, nil
@@ -50,7 +50,7 @@ func (e *Engine) Load(ctx context.Context, s engine.Spec, addr string) (engine.L
 	if err != nil {
 		return engine.Load{}, err
 	}
-	defer drain(resp)
+	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		return engine.Load{}, fmt.Errorf("vllm: /metrics answered %s", resp.Status)
 	}
@@ -81,11 +81,6 @@ func (e *Engine) get(ctx context.Context, addr, path string) (*http.Response, er
 		return nil, err
 	}
 	return e.client.Do(req)
-}
-
-func drain(resp *http.Response) {
-	_, _ = io.Copy(io.Discard, resp.Body)
-	_ = resp.Body.Close()
 }
 
 // stats is the subset of vLLM's Prometheus output this engine acts on.

@@ -77,6 +77,8 @@ func filterModel(models []meshapi.FleetModel, want string, resolve Resolver) ([]
 type fleetAcc struct {
 	model meshapi.FleetModel
 	seen  bool // a fresh host WITH SLOTS has contributed a Ctx
+	// What the fresh hosts with slots say about reading images.
+	imgYes, imgUnknown bool
 }
 
 // aggregateFleet builds the fleet view from this node's own capacity plus every
@@ -116,6 +118,7 @@ func aggregateFleet(self string, local []meshapi.ModelCapacity, reports []capaci
 		free := m.Free() // clamps at 0
 		slots, busy, ctx := m.Slots, m.Busy, m.Ctx
 		host.Slots, host.Busy, host.Free, host.Ctx = &slots, &busy, &free, &ctx
+		host.Images = m.Images
 
 		a.model.Slots += m.Slots
 		a.model.Busy += m.Busy
@@ -140,6 +143,12 @@ func aggregateFleet(self string, local []meshapi.ModelCapacity, reports []capaci
 				a.model.Ctx = m.Ctx
 			}
 			a.seen = true
+			switch {
+			case m.Images == nil:
+				a.imgUnknown = true
+			case *m.Images:
+				a.imgYes = true
+			}
 		}
 		a.model.Hosts = append(a.model.Hosts, host)
 	}
@@ -165,6 +174,12 @@ func aggregateFleet(self string, local []meshapi.ModelCapacity, reports []capaci
 	}
 	for _, a := range byModel {
 		m := a.model
+		// Yes when a host the router can use says yes: that is where a request
+		// with an image goes. No only when every such host says no.
+		if a.imgYes || (a.seen && !a.imgUnknown) {
+			yes := a.imgYes
+			m.Images = &yes
+		}
 		sort.Slice(m.Hosts, func(i, j int) bool { return m.Hosts[i].Node < m.Hosts[j].Node })
 		out.Models = append(out.Models, m)
 	}
