@@ -4,15 +4,14 @@
 # tags, so describe reports the last one it can still see. See that script.
 VERSION ?= $(shell ./scripts/version.sh)
 
-# gfx906 track source (local to this fork): the milpster gfx906 llama.cpp
-# fork on GitHub. Pinned to a tag (not a moving branch) for reproducible
-# rebuilds. Bump MILPSTER_FORK_REF and rebuild to roll the fork; no local
-# clone required — docker/Dockerfile.gfx906 clones it at build time.
-#   b10803 = ggml-org/llama.cpp fork specialized for AMD gfx906
-#            (Radeon VII / Instinct MI50–MI60); carries muse-glimmer,
-#            DeltaNet/qwen3_moe, and MTP arches.
-MILPSTER_FORK_URL ?= https://github.com/milpster/gfx906-llama-cpp
-MILPSTER_FORK_REF ?= b10803
+# gfx906 track source (local to this fork): the mx-llama.cpp gfx906 fork.
+# Empty by default: docker/Dockerfile.gfx906's ARG defaults are the one pin.
+# Set any of these to override it for one build, e.g.
+#   make docker-gfx906 MX_LLAMA_COMMIT=<sha>
+#   make docker-gfx906 GFX906_ROCM_BASE=<STRATA_ROCM_BASE from docker/pins.env>
+MX_LLAMA_URL ?=
+MX_LLAMA_COMMIT ?=
+GFX906_ROCM_BASE ?=
 
 build:
 	./scripts/gobuild.sh ./cmd/viiwork bin/viiwork $(VERSION)
@@ -75,7 +74,7 @@ clean:
 #   docker-freetoken                            -> viiwork-freetoken:latest
 #   docker-strata                               -> viiwork-strata:latest
 #   docker-strata-cuda                          -> viiwork-strata-cuda:latest
-#   docker-gfx906 (alias: docker-experimental)  -> viiwork:gfx906 (milpster fork)
+#   docker-gfx906 (alias: docker-experimental)  -> viiwork:gfx906 (mx-llama.cpp fork)
 #
 # One image per engine, all under docker/, named for the ENGINE rather than for
 # a GPU vendor: Dockerfile.rocm is llama.cpp built for ROCm/gfx906, which is the
@@ -112,19 +111,15 @@ docker-strata:
 docker-strata-cuda:
 	docker build --build-arg VERSION=$(VERSION) -f docker/Dockerfile.strata-cuda -t viiwork-strata-cuda .
 
-# gfx906 track (local to this fork): llama.cpp from the milpster gfx906 fork
-# instead of upstream ggml-org. Clones $(MILPSTER_FORK_URL) @
-# $(MILPSTER_FORK_REF) inside the Dockerfile, so no local fork tree or
-# --build-context is needed. Tagged separately so `make docker` never
-# overwrites it.
+# gfx906 track (local to this fork): llama.cpp from the mx-llama.cpp gfx906
+# fork instead of upstream ggml-org, cloned inside the Dockerfile at its
+# pinned commit. Tagged separately so `make docker` never overwrites it.
 docker-gfx906 docker-experimental:
-	DOCKER_BUILDKIT=1 docker build \
-	    -t viiwork:gfx906 \
-	    -f docker/Dockerfile.gfx906 \
-	    --build-arg MILPSTER_FORK_URL=$(MILPSTER_FORK_URL) \
-	    --build-arg MILPSTER_FORK_REF=$(MILPSTER_FORK_REF) \
-	    --build-arg VERSION=$(VERSION)-gfx906 \
-	    .
+	DOCKER_BUILDKIT=1 docker build -t viiwork:gfx906 -f docker/Dockerfile.gfx906 \
+	    $(if $(MX_LLAMA_URL),--build-arg MX_LLAMA_URL=$(MX_LLAMA_URL)) \
+	    $(if $(MX_LLAMA_COMMIT),--build-arg MX_LLAMA_COMMIT=$(MX_LLAMA_COMMIT)) \
+	    $(if $(GFX906_ROCM_BASE),--build-arg GFX906_ROCM_BASE=$(GFX906_ROCM_BASE)) \
+	    --build-arg VERSION=$(VERSION)-gfx906 .
 
 up:
 	docker compose up -d

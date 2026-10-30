@@ -6,10 +6,10 @@ If somehow you stumbled across this repository, please check out the original re
 
 What this fork changes:
 
-- **A milpster gfx906 llama.cpp build.** `make docker-gfx906` builds
+- **An mx-llama.cpp gfx906 build.** `make docker-gfx906` builds
   `viiwork:gfx906` from `docker/Dockerfile.gfx906`, with llama.cpp from
-  [`milpster/gfx906-llama-cpp`](https://github.com/milpster/gfx906-llama-cpp)
-  instead of upstream. See [BUILDS.md](BUILDS.md).
+  [`mxxm-t/mx-llama.cpp`](https://github.com/mxxm-t/mx-llama.cpp), a gfx906-tuned
+  fork, instead of upstream. See [BUILDS.md](BUILDS.md).
 - **Thinking is not stripped by default.** Upstream strips `<think>` blocks
   unless a request sends `"think": true`; here only an explicit
   `"think": false` disables thinking, and otherwise llama-server decides.

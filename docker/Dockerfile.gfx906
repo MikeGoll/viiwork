@@ -1,122 +1,124 @@
-# viiwork:gfx906 — viiwork built against the milpster gfx906 llama.cpp fork
-# (milpster/gfx906-llama-cpp) instead of upstream ggml-org/llama.cpp.
+# viiwork:gfx906 — viiwork built against the mx-llama.cpp gfx906 fork
+# (mxxm-t/mx-llama.cpp) instead of upstream ggml-org/llama.cpp.
 #
 # Local to this fork of viiwork: upstream retired its own gfx906 track in
-# v2.1.0 (see BUILDS.md). This one is a GitHub fork pinned to a tag, cloned
-# at build time — rolling it is bumping MILPSTER_FORK_REF and rebuilding.
+# v2.1.0 (see BUILDS.md). mx-llama.cpp is a current llama.cpp fork tuned for
+# gfx906 (Radeon VII / Instinct MI50–MI60): it carries iacopPBK's Q8_0 gfx906
+# path plus its own MMQ tuning and weight repack, and tracks upstream closely
+# enough to load muse-glimmer and the Qwen3.5–3.8 arches.
 #
-# Build via:
+# Why not iacopPBK/llama.cpp-gfx906: it is frozen at upstream ~b7976 ("This
+# fork is not updated"), cannot load muse-glimmer or any Qwen3.5+, and rejects
+# --temperature/--reasoning/--reasoning-preserve. Its README points here.
 #
-#   make docker-gfx906            # (or: make docker-experimental)
+# Rolling it: the fork's b* tags stop at b10951 and do not track master, so
+# the pin is a commit, never a tag. Bump MX_LLAMA_COMMIT and rebuild:
+#
+#   make docker-gfx906                                  # (or: make docker-experimental)
+#   make docker-gfx906 MX_LLAMA_COMMIT=<sha>
 #
 #   DOCKER_BUILDKIT=1 docker build -t viiwork:gfx906 \
 #       -f docker/Dockerfile.gfx906 \
-#       --build-arg MILPSTER_FORK_REF=b10803 .
+#       --build-arg MX_LLAMA_COMMIT=<sha> .
+#
+# ROCm fallback: the default base is ROCm 6.2.4, the same as Dockerfile.rocm,
+# which has rocm-smi (power_limit_watts, telemetry, PID->GPU) and RCCL. If the
+# fork fails to compile or misbehaves on it, rebuild on the ROCm 7 gfx906 base
+# Dockerfile.strata uses (the fork's own published image is ROCm 7):
+#
+#   make docker-gfx906 GFX906_ROCM_BASE=<STRATA_ROCM_BASE from docker/pins.env>
+#
+# On ROCm >= 6.3 the fork's FP8 gate is active; see the note in stage 1.
+# Do not base on the published mxxm/mx-llama.cpp image: it is a slim runtime
+# without rocm-smi.
+
+ARG GFX906_ROCM_BASE=rocm/dev-ubuntu-24.04:6.2.4-complete
 
 # -----------------------------------------------------------------------------
-# Stage 1: Build milpster gfx906-llama-cpp with ROCm/gfx906
+# Stage 1: Build mx-llama.cpp with ROCm/gfx906
 # -----------------------------------------------------------------------------
-FROM rocm/dev-ubuntu-24.04:6.2.4-complete AS llama-build
+FROM ${GFX906_ROCM_BASE} AS llama-build
 RUN apt-get update && apt-get install -y --no-install-recommends cmake git \
     && rm -rf /var/lib/apt/lists/*
 
-# Pinned to a GitHub tag (not a moving branch) so rebuilds are deterministic.
-# milpster/gfx906-llama-cpp is a ggml-org/llama.cpp fork specialized for
-# AMD gfx906 (Radeon VII / Instinct MI50–MI60). It inherits upstream arch
-# coverage — this pin (b10803) carries muse-glimmer, DeltaNet/qwen3_moe,
-# and MTP speculative-decoding support.
-ARG MILPSTER_FORK_URL=https://github.com/milpster/gfx906-llama-cpp
-ARG MILPSTER_FORK_REF=b10803
-RUN git clone --depth 1 --branch ${MILPSTER_FORK_REF} ${MILPSTER_FORK_URL} /llama.cpp
+# c4d12e2c0 (2026-10-15) = fork master on upstream b11553; the fork publishes
+# it as mxxm/mx-llama.cpp:gfx906-b11756-c4d12e2c0.
+ARG MX_LLAMA_URL=https://github.com/mxxm-t/mx-llama.cpp
+ARG MX_LLAMA_COMMIT=c4d12e2c0094c9028318bed5bb1a30bb48f8a35b
+
+# Treeless, not shallow: the fork's cmake/build-info.cmake takes the build
+# number from `git rev-list --count HEAD`, which needs the full commit graph
+# (a shallow clone reports "build 1" and the node publishes engine_version
+# "b1"). Commits only, trees on demand, so it stays small. No
+# -DLLAMA_BUILD_NUMBER: the real count is the build number.
+RUN set -eux; \
+    git clone --filter=tree:0 --no-checkout "$MX_LLAMA_URL" /llama.cpp; \
+    git -C /llama.cpp checkout --detach "$MX_LLAMA_COMMIT"; \
+    test "$(git -C /llama.cpp rev-parse HEAD)" = "$MX_LLAMA_COMMIT"
 WORKDIR /llama.cpp
 
-# gfx906 (Radeon VII) has no FP8 hardware. The public fork's hip.h still
-# carries the stock version-only gate
-#
-#   #if HIP_VERSION >= 60200000
-#       #include <hip/hip_fp8.h>
-#       typedef __hip_fp8_e4m3 __nv_fp8_e4m3;
-#       #define FP8_AVAILABLE
-#   #endif
-#
-# which is TRUE on ROCm 6.2.4, but ROCm's amd_hip_fp8.h defines
-# __hip_fp8_e4m3 only for gfx94x, so the typedef fails to compile for
-# gfx906. (The old private fork carried the fix as a real commit; the
-# public one does not.) Disable the FP8 block the same way the stable
-# track does: rewrite the gate to an impossible version. FP8_AVAILABLE
-# then stays undefined and every FP8 usage site in the fork (all guarded
-# by it) compiles out. The greps keep this loud: if the fork's layout
-# changes, fail the build here instead of at 04:42 in a container log.
-RUN set -eux; \
-    f=ggml/src/ggml-cuda/vendors/hip.h; \
-    if [ ! -f "$f" ]; then \
-        echo "FATAL: $f does not exist -- fork layout changed."; exit 1; \
-    fi; \
-    if ! grep -q '#if HIP_VERSION >= 60200000' "$f"; then \
-        echo "############################################################"; \
-        echo "FATAL: stock FP8 gate not found in $f -- fork layout changed?"; \
-        echo "Current fp8/HIP_VERSION lines:"; \
-        grep -n -i 'fp8\|HIP_VERSION' "$f" || true; \
-        echo "############################################################"; \
-        exit 1; \
-    fi; \
-    sed -i 's/#if HIP_VERSION >= 60200000/#if HIP_VERSION >= 99999999/' "$f"; \
-    if ! grep -q '#if HIP_VERSION >= 99999999' "$f"; then \
-        echo "FATAL: FP8 gate rewrite did not apply."; exit 1; \
-    fi; \
-    echo "OK: gfx906 FP8 block disabled (stable-track sed)."
+# No source patches. The milpster track needed two; neither applies here:
+# - FP8: the fork's hip.h gates FP8 on `#if HIP_VERSION >= 60300000`, and
+#   ROCm 6.2.4 is below it, so FP8 compiles out by itself. On a ROCm >= 6.3
+#   base (the fallback above), if `__hip_fp8_e4m3` fails to compile for
+#   gfx906, the fix is the same gate rewrite: 60300000 -> 99999999 in
+#   ggml/src/ggml-cuda/vendors/hip.h.
+# - features_buf: that bug was specific to milpster b10803.
 
-# b10803's common/speculative.cpp has a copy-paste bug in the dflash
-# gap-fill path: it references `features_buf` — a member that only
-# exists on the eagle3 draft class — so llama-common fails with
-# "features_buf was not declared in this scope". Insert a local scratch
-# vector right before the sole use site (the buffer is assigned and
-# consumed inside the same block), keeping the patch loud if the fork's
-# layout ever changes.
-RUN set -eux; \
-    f=common/speculative.cpp; \
-    n=$(grep -cF 'features_buf.assign((size_t) n_fill * n_embd_enc, 0.0f);' "$f" || true); \
-    if [ "$n" -ne 1 ]; then \
-        echo "############################################################"; \
-        echo "FATAL: dflash gap-fill anchor found $n times in $f (expected 1) -- fork layout changed?"; \
-        grep -n 'features_buf' "$f" || true; \
-        echo "############################################################"; \
-        exit 1; \
-    fi; \
-    sed -i 's|features_buf\.assign((size_t) n_fill \* n_embd_enc, 0\.0f);|std::vector<float> features_buf; // build-time fix: undeclared in fork b10803\n                    features_buf.assign((size_t) n_fill * n_embd_enc, 0.0f);|' "$f"; \
-    if ! grep -qF 'std::vector<float> features_buf; // build-time fix' "$f"; then \
-        echo "FATAL: dflash features_buf patch did not apply."; exit 1; \
-    fi; \
-    echo "OK: dflash features_buf scratch declared."
-
-# BUILD_SHARED_LIBS=OFF -> self-contained static binaries, no .so shuffling
-# in the runtime stage (the fragile find -name '*.so*' step is dropped).
-# GPU_TARGETS + AMDGPU_TARGETS -> newer CMake prefers the former, this
-# fork/HIP still reads the latter. CMAKE_POSITION_INDEPENDENT_CODE=ON is
-# REQUIRED for the static build on Ubuntu 24.04 (hipcc emits non-PIC objects
-# into libggml-hip.a, which breaks the default PIE linker step).
+# Flags follow the fork's FEATURES.md, kept to this repo's static build:
+# BUILD_SHARED_LIBS=OFF -> self-contained binaries, no .so shuffling in the
+# runtime stage. CMAKE_POSITION_INDEPENDENT_CODE=ON is REQUIRED for the static
+# build on Ubuntu 24.04 (hipcc emits non-PIC objects into libggml-hip.a).
+# GPU_TARGETS + AMDGPU_TARGETS -> newer CMake prefers the former, HIP still
+# reads the latter. No GGML_NATIVE/-march=native: the build host's CPU is not
+# the run host's. The server UI is fetched prebuilt (LLAMA_USE_PREBUILT_UI,
+# the default). llama-bench is for A/B checks against the fork's numbers.
 RUN cmake -B build \
         -DCMAKE_BUILD_TYPE=Release \
         -DBUILD_SHARED_LIBS=OFF \
         -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
-        -DLLAMA_CURL=OFF \
         -DGGML_HIP=ON \
+        -DGGML_HIP_GRAPHS=ON \
+        -DGGML_HIP_RCCL=ON \
         -DGPU_TARGETS=gfx906 \
         -DAMDGPU_TARGETS=gfx906 \
         -DGGML_HIP_ROCWMMA_FATTN=OFF \
     && cmake --build build --config Release -j$(nproc) \
-        --target llama-server llama-cli
+        --target llama-server llama-cli llama-bench
 
-# Smoke test: both binaries run and can resolve the HIP runtime. llama-cli
-# is included alongside llama-server for rocprof-based kernel profiling.
+# Smoke test: every binary runs and can resolve the HIP runtime.
 RUN ldd /llama.cpp/build/bin/llama-server && /llama.cpp/build/bin/llama-server --help > /dev/null
 RUN ldd /llama.cpp/build/bin/llama-cli    && /llama.cpp/build/bin/llama-cli    --help > /dev/null
+RUN ldd /llama.cpp/build/bin/llama-bench  && /llama.cpp/build/bin/llama-bench  --help > /dev/null
 
-# Assertion: the architecture is genuinely registered in this build. If this
-# fails, MILPSTER_FORK_REF predates the arch merge — do not ship the image.
-RUN if ! grep -qa 'muse-glimmer' /llama.cpp/build/bin/llama-server; then \
+# Assertions: each fails the build loudly instead of shipping a wrong image.
+RUN set -eu; \
+    s=/llama.cpp/build/bin/llama-server; \
+    if ! "$s" --help 2>&1 | grep -q -- '--tensor-parallel-size'; then \
+        echo "FATAL: llama-server --help lacks --tensor-parallel-size."; \
+        echo "That flag exists only in mx-llama.cpp: MX_LLAMA_URL is not the fork."; \
+        exit 1; \
+    fi; \
+    echo "OK: mx-llama.cpp fork (--tensor-parallel-size present)."; \
+    if ! "$s" --help 2>&1 | grep -q -- '--load-mode'; then \
+        echo "FATAL: llama-server --help lacks --load-mode, which the node's probe relies on."; \
+        exit 1; \
+    fi; \
+    echo "OK: --load-mode present."; \
+    v=$("$s" --version 2>&1 | grep -E '^version: ' || true); \
+    if [ -z "$v" ]; then \
+        echo "FATAL: llama-server --version printed no 'version:' line."; \
+        "$s" --version 2>&1 || true; \
+        exit 1; \
+    fi; \
+    if printf '%s\n' "$v" | grep -qE '(build 1,|^version: 1 )'; then \
+        echo "FATAL: build number is 1 ($v): the clone lost its history."; \
+        exit 1; \
+    fi; \
+    echo "OK: $v"; \
+    if ! grep -qa 'muse-glimmer' "$s"; then \
         echo "FATAL: 'muse-glimmer' arch not found in llama-server."; \
-        echo "Use a MILPSTER_FORK_REF that carries the hybrid/MTP/muse arches."; \
+        echo "Use an MX_LLAMA_COMMIT that carries the muse arch."; \
         exit 1; \
     fi; \
     echo "OK: muse-glimmer architecture present."
@@ -124,7 +126,7 @@ RUN if ! grep -qa 'muse-glimmer' /llama.cpp/build/bin/llama-server; then \
 # -----------------------------------------------------------------------------
 # Stage 2: Build viiwork (same as docker/Dockerfile.rocm)
 # -----------------------------------------------------------------------------
-FROM golang:1.27.1 AS go-build
+FROM golang:1.27.2 AS go-build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
@@ -133,16 +135,21 @@ ARG VERSION=dev
 RUN CGO_ENABLED=0 go build -ldflags "-X main.version=${VERSION}" -o /viiwork ./cmd/viiwork
 
 # -----------------------------------------------------------------------------
-# Stage 3: Runtime (same as docker/Dockerfile.rocm, static llama binaries)
+# Stage 3: Runtime (same base as the build, static llama binaries)
 # -----------------------------------------------------------------------------
-FROM rocm/dev-ubuntu-24.04:6.2.4-complete
+FROM ${GFX906_ROCM_BASE}
 
 RUN apt-get update && apt-get install -y --no-install-recommends ipmitool \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=llama-build /llama.cpp/build/bin/llama-server /usr/local/bin/
 COPY --from=llama-build /llama.cpp/build/bin/llama-cli    /usr/local/bin/
+COPY --from=llama-build /llama.cpp/build/bin/llama-bench  /usr/local/bin/
 COPY --from=go-build    /viiwork                          /usr/local/bin/
+
+# The node passes its environment through to every backend
+# (internal/supervisor/backend.go), so these are llama-server's defaults;
+# models[].env overrides any of them per model.
 
 # Required: ROCm may not natively recognize gfx906 in all versions;
 # this override forces gfx900-series compatibility.
@@ -150,6 +157,20 @@ ENV HSA_OVERRIDE_GFX_VERSION=9.0.6
 
 # Surface llama-server's own stdout/stderr.
 ENV GGML_LOG_LEVEL=info
+
+# What the fork's own gfx906 image sets: fine-grained PCIe memory for
+# cross-card transfers, more HW queues, and the fork's MTP and custom
+# all-reduce paths.
+ENV HSA_FORCE_FINE_GRAIN_PCIE=1
+ENV GPU_MAX_HW_QUEUES=8
+ENV LLAMA_ENABLE_MTP_OPT=1
+ENV GGML_ENABLE_CUSTOM_AR=1
+
+# The fork's docs: "Always pass -lm dio. mmap on the model file hangs on this
+# stack." Plain llama.cpp defaults to mmap, so make direct I/O the default
+# here. A --load-mode on the command line wins: the node's own `none` (for a
+# model near RAM size, or an operator --no-mmap it rewrites) still applies.
+ENV LLAMA_ARG_LOAD_MODE=dio
 
 EXPOSE 8086/tcp 7946/tcp 7946/udp
 ENTRYPOINT ["viiwork"]

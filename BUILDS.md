@@ -14,7 +14,7 @@ One image per engine, all under `docker/`, each named for what it carries.
 | `viiwork-freetoken:latest` | `docker/Dockerfile.freetoken` | `freetoken` | `make docker-freetoken` |
 | `viiwork-strata:latest` | `docker/Dockerfile.strata` | `strata` on ROCm / gfx906 | `make docker-strata` |
 | `viiwork-strata-cuda:latest` | `docker/Dockerfile.strata-cuda` | `strata` on CUDA | `make docker-strata-cuda` |
-| `viiwork:gfx906` *(this fork only)* | `docker/Dockerfile.gfx906` | `llamacpp` from the milpster gfx906 fork on ROCm / gfx906 | `make docker-gfx906` (alias: `make docker-experimental`) |
+| `viiwork:gfx906` *(this fork only)* | `docker/Dockerfile.gfx906` | `llamacpp` from the mx-llama.cpp gfx906 fork on ROCm / gfx906 | `make docker-gfx906` (alias: `make docker-experimental`) |
 
 **Named for the engine, never for a GPU vendor.** vLLM already has a ROCm build
 and FreeToken may add AMD or Intel, so a second accelerator backend is a sibling
@@ -360,45 +360,90 @@ unpublished `configs/private/v1-archive/` and the A/B arms in
 `bench-harness/run_feature_soak.sh` and `run_overnight_soak.sh`. They need an
 image this repo no longer builds.
 
-## `docker/Dockerfile.gfx906` — the milpster gfx906 track (this fork only)
+## `docker/Dockerfile.gfx906` — the mx-llama.cpp gfx906 track (this fork only)
 
 This fork of viiwork carries its own gfx906 track, separate from the one
 upstream retired above. It builds llama.cpp from the GitHub fork
-[`milpster/gfx906-llama-cpp`](https://github.com/milpster/gfx906-llama-cpp),
-a ggml-org/llama.cpp fork specialized for AMD gfx906 (Radeon VII / Instinct
-MI50–MI60), pinned to a tag (`b10803`). Unlike the retired fork it is not
-arch-pruned: it inherits upstream arch coverage, so it carries the hybrid
-DeltaNet / qwen3_moe, MTP speculative decoding, and `muse-glimmer`
-architectures. And unlike `Dockerfile.gfx906` of old, it needs no local fork
-tree: the Dockerfile clones the fork at build time, so any host with outbound
-git access can build it.
+[`mxxm-t/mx-llama.cpp`](https://github.com/mxxm-t/mx-llama.cpp), a current
+llama.cpp fork tuned for AMD gfx906 (Radeon VII / Instinct MI50–MI60). It is
+pinned to a commit, `c4d12e2c0` (fork `master` on 2026-10-15, upstream base
+b11553), because the fork's `b*` tags stop at b10951 and don't track
+`master`. The clone is treeless rather than shallow, so `llama-server
+--version` reports the real build number, **11756**. This matches the fork's
+own image tag `gfx906-b11756-c4d12e2c0`, and the node publishes
+`engine_version` `b11756`.
+
+The image doesn't use `iacopPBK/llama.cpp-gfx906`. That fork is frozen at
+upstream ~b7976 and its README says it is no longer updated. It can't load
+`muse-glimmer` or any Qwen3.5–3.8 model, and it rejects `--temperature`,
+`--reasoning` and `--reasoning-preserve`. Its README points to mx-llama.cpp,
+which carries the same Q8_0 gfx906 path plus its own gfx906 MMQ tuning and
+weight repack.
 
 The image is tagged `viiwork:gfx906`, so `make docker` (upstream llama.cpp,
 `viiwork:latest`) never overwrites it. Point a node's compose `image:` at
 `viiwork:gfx906` to run it.
 
-Two build-time patches are applied to the fork, both loud if the fork's layout
-changes:
+**No source patches.** The fork's `hip.h` gates FP8 on
+`HIP_VERSION >= 60300000`. The default base is ROCm 6.2.4, the same as
+`Dockerfile.rocm`, which is below that gate, so FP8 compiles out without a
+patch. The milpster track's `features_buf` patch was specific to its b10803.
 
-- **FP8 gate.** The fork's `hip.h` still carries the stock
-  `#if HIP_VERSION >= 60200000` gate, and ROCm's `amd_hip_fp8.h` defines
-  `__hip_fp8_e4m3` only for gfx94x. Same fix as `docker/Dockerfile.rocm`.
-- **`features_buf` in `common/speculative.cpp`.** `b10803`'s dflash gap-fill
-  path references a member that only exists on the eagle3 draft class; a local
-  scratch vector is declared before its sole use.
+llama.cpp is built static (`BUILD_SHARED_LIBS=OFF`) with HIP graphs and RCCL,
+following the fork's `FEATURES.md`. It is built without `-march=native`,
+because the build host isn't the run host. The image ships `llama-server`,
+`llama-cli`, and `llama-bench` (for A/B checks against the fork's published
+numbers). The build fails loudly unless all of these hold:
 
-llama.cpp is built static (`BUILD_SHARED_LIBS=OFF`), and the image ships
-`llama-server` and `llama-cli`. A final assertion refuses an image whose
-`llama-server` lacks `muse-glimmer`.
+- every binary passes `ldd` and runs `--help`;
+- `llama-server --help` lists `--tensor-parallel-size`, a flag only
+  mx-llama.cpp has, which proves the right fork was built;
+- `llama-server --help` lists `--load-mode`, which the node's probe relies
+  on;
+- `llama-server --version` doesn't report build 1;
+- `llama-server` contains `muse-glimmer`.
 
-Build: `make docker-gfx906`. Roll the fork by bumping `MILPSTER_FORK_REF` in
-the `Makefile`, or override it once:
+**Environment defaults.** The node passes its environment through to every
+backend, so the image's `ENV` values become llama-server's defaults. A
+model's `models[].env` overrides any of them. Besides
+`HSA_OVERRIDE_GFX_VERSION=9.0.6` and `GGML_LOG_LEVEL=info`, the image sets
+the same variables as the fork's own gfx906 image:
+
+- `HSA_FORCE_FINE_GRAIN_PCIE=1`
+- `GPU_MAX_HW_QUEUES=8`
+- `LLAMA_ENABLE_MTP_OPT=1`
+- `GGML_ENABLE_CUSTOM_AR=1`
+
+It also sets **`LLAMA_ARG_LOAD_MODE=dio`**. The fork's docs say "Always pass
+`-lm dio`. mmap on the model file hangs on this stack.", and plain llama.cpp
+defaults to mmap. A `--load-mode` on the command line still wins. That
+includes the node's own `--load-mode none` for a model near RAM size, and the
+rewrite of an operator's `--no-mmap`, which this build no longer reads. In a
+node's `models[].args`, prefer `--load-mode dio` over `--no-mmap`.
+
+To build, run `make docker-gfx906`. The pin lives only in the Dockerfile's
+`ARG` defaults. To roll the fork, bump `MX_LLAMA_COMMIT` there, or override
+it for one build:
 
 ```bash
-make docker-gfx906 MILPSTER_FORK_REF=<tag|commit>
+make docker-gfx906 MX_LLAMA_COMMIT=<sha>
 ```
 
-For air-gapped nodes that cannot reach GitHub, transfer the image:
+**ROCm 7 fallback.** If the fork fails to compile or misbehaves on ROCm
+6.2.4, rebuild on the digest-pinned ROCm 7 gfx906 base that
+`Dockerfile.strata` uses. The fork's published image is ROCm 7 too.
+
+```bash
+. docker/pins.env && make docker-gfx906 GFX906_ROCM_BASE="$STRATA_ROCM_BASE"
+```
+
+The FP8 gate is active on that base. If `__hip_fp8_e4m3` fails to compile
+for gfx906, rewrite the gate in `ggml/src/ggml-cuda/vendors/hip.h` from
+`60300000` to `99999999`, as `Dockerfile.rocm` does. Don't base the image on
+the published `mxxm/mx-llama.cpp` image, because it has no `rocm-smi`, which
+the node needs for power limits, telemetry and GPU attribution.
+
+For air-gapped nodes that can't reach GitHub, transfer the image:
 
 ```bash
 docker save viiwork:gfx906 | ssh OTHER_NODE 'docker load'
